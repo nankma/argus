@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+notes.jsonl
+.claude/settings.local.json
