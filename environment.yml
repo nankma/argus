@@ -3,5 +3,9 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11
-  - openai
+  - langchain
+  - langchain-deepseek
   - requests
+  - feedparser
+  - pytest
+  - requests-mock

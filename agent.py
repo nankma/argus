@@ -1,138 +1,92 @@
 """
-A minimal agent built on the DeepSeek API (OpenAI-compatible Chat Completions).
+A news-trend agent built on LangChain, with DeepSeek as the LLM.
 
-Demonstrates the client-tool pattern: the model requests a tool call, YOU
-execute it locally, and send the result back. This is the pattern you'll
-reuse for anything custom: databases, file systems, internal APIs, etc.
+Agent construction (build_agent) takes the model as a parameter, and
+invocation (run_agent) takes an optional callbacks list — neither is
+hardcoded at import time. This is what makes the agent testable: swap in a
+fake chat model and an in-memory/local callback handler for CI, without
+touching this file. See docs/telemetry-and-testing-plan.md for what's built
+vs. still planned (test suite, CI, real telemetry backend).
 
 Run:
-    export DEEPSEEK_API_KEY=sk-e76b727c81364b97a5aa8d4052cda0c2
+    conda activate myfirstagent
+    export DEEPSEEK_API_KEY=<your-deepseek-key>
     python agent.py
 """
 
-import os
 import json
 from datetime import datetime
-import requests
-from openai import OpenAI
+from langchain_core.tools import tool
+from langchain_deepseek import ChatDeepSeek
+from langchain.agents import create_agent
+import news_sources
 
-MODEL = "deepseek-chat"  # use "deepseek-reasoner" for harder reasoning tasks
+MODEL = "deepseek-chat"
 NOTES_FILE = "notes.jsonl"
-NEWS_API_BASE = "https://ok.surf/api/v1"  # OK Surf News API — no key required
-
-client = OpenAI(
-    api_key=os.environ.get("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com",
-)
 
 SYSTEM_PROMPT = (
-    "You are a news trend analyst. Use the search_news tool to gather recent "
-    "headlines (optionally scoped to sections like Technology or Business), "
-    "spot recurring themes across them, and write a short trend-report "
-    "article that cites the source outlets. If the user asks you to "
-    "remember something, use the save_note tool."
+    "You are an AI industry analyst. Use the search_news tool to gather "
+    "recent items on a topic (e.g. a company, model, or trend) across "
+    "sources like Hacker News, arXiv, and major AI/tech outlets, spot "
+    "recurring themes, and write a short trend-report article that cites "
+    "the source outlets. If the user asks you to remember something, use "
+    "the save_note tool."
 )
 
-# --- Tool declarations -------------------------------------------------
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "save_note",
-            "description": "Save a short note to persistent local storage for later recall.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string", "description": "The note text to save."}
-                },
-                "required": ["note"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_news",
-            "description": (
-                "Fetch recent Google News headlines to spot trends. Optionally "
-                "scope to one or more sections: US, World, Business, Technology, "
-                "Entertainment, Sports, Science, Health."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sections": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Section names to filter by. Omit or leave empty for all sections.",
-                    }
-                },
-                "required": [],
-            },
-        },
-    },
-]
+# --- Tools -------------------------------------------------------------
 
 
-# --- Client-side tool execution -----------------------------------------
-
-def execute_tool(name: str, tool_input: dict) -> str:
-    """Dispatch a tool call to real Python code and return a string result."""
-    if name == "save_note":
-        entry = {"note": tool_input["note"], "ts": datetime.now().isoformat()}
-        with open(NOTES_FILE, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-        return f"Saved note: {tool_input['note']}"
-    if name == "search_news":
-        sections = tool_input.get("sections") or []
-        if sections:
-            resp = requests.post(f"{NEWS_API_BASE}/news-section", json={"sections": sections}, timeout=10)
-        else:
-            resp = requests.get(f"{NEWS_API_BASE}/news-feed", timeout=10)
-        resp.raise_for_status()
-        by_section = resp.json()  # {"Technology": [article, ...], "Business": [...], ...}
-        total = sum(len(articles) for articles in by_section.values())
-        lines = [
-            f"- [{section}] {a.get('title')} ({a.get('source')})"
-            for section, articles in by_section.items()
-            for a in articles[:15]
-        ]
-        return f"{total} articles found across {len(by_section)} section(s), showing up to 15 per section:\n" + "\n".join(lines)
-    return f"Unknown tool: {name}"
+@tool
+def save_note(note: str) -> str:
+    """Save a short note to persistent local storage for later recall."""
+    entry = {"note": note, "ts": datetime.now().isoformat()}
+    with open(NOTES_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return f"Saved note: {note}"
 
 
-# --- The agent loop -------------------------------------------------------
+@tool
+def search_news(query: str = "AI", max_results_per_source: int = 5) -> str:
+    """Search multiple AI-industry news sources for a query (e.g. a company,
+    model name, or topic like "AI regulation") and return recent items
+    grouped by source. Sources are pluggable — see news_sources.py.
+    """
+    sources = news_sources.enabled_sources()
+    lines = []
+    total = 0
+    for name, fetch in sources:
+        try:
+            articles = fetch(query, max_results_per_source)
+        except Exception as exc:
+            lines.append(f"- [{name}] ERROR: {exc}")
+            continue
+        total += len(articles)
+        for a in articles:
+            lines.append(f"- [{name}] {a['title']} ({a.get('source', name)})")
+    return f"{total} articles found across {len(sources)} source(s):\n" + "\n".join(lines)
 
-def run_agent(messages: list) -> list:
-    """Send messages to DeepSeek, resolve any tool calls, and loop until it
-    produces a final text answer. Returns the updated message list."""
-    while True:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-            tools=TOOLS,
-        )
-        message = response.choices[0].message
-        messages.append(message.model_dump(exclude_none=True))
 
-        if not message.tool_calls:
-            print(f"\nDeepSeek: {message.content}\n")
-            return messages
+TOOLS = [save_note, search_news]
 
-        for call in message.tool_calls:
-            result_text = execute_tool(call.function.name, json.loads(call.function.arguments))
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": result_text,
-            })
-        # loop continues, sending the tool results back to DeepSeek
+
+# --- Agent construction & invocation ------------------------------------
+
+def build_agent(model):
+    return create_agent(model=model, tools=TOOLS, system_prompt=SYSTEM_PROMPT)
+
+
+def run_agent(agent, messages: list, callbacks: list | None = None) -> list:
+    config = {"callbacks": callbacks} if callbacks else None
+    result = agent.invoke({"messages": messages}, config=config)
+    return result["messages"]
 
 
 # --- CLI chat interface ----------------------------------------------------
 
 def main():
+    model = ChatDeepSeek(model=MODEL)
+    agent = build_agent(model)
+
     print("Agent ready. Type 'exit' to quit.\n")
     messages = []
     while True:
@@ -140,7 +94,8 @@ def main():
         if user_input.lower() in ("exit", "quit"):
             break
         messages.append({"role": "user", "content": user_input})
-        messages = run_agent(messages)
+        messages = run_agent(agent, messages)
+        print(f"\nDeepSeek: {messages[-1].content}\n")
 
 
 if __name__ == "__main__":

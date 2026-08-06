@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 notes.jsonl
 .claude/settings.local.json
+.pytest_cache/
