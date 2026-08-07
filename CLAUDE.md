@@ -25,7 +25,7 @@ There is no lint config or build step. There is a test suite (`tests/`, pytest) 
 
 ## Architecture
 
-Two files: `agent.py` (agent/tools/CLI) and `news_sources.py` (the pluggable source registry `search_news` draws on — see below).
+Three files: `agent.py` (agent/tools/CLI), `news_sources.py` (the pluggable source registry `search_news` draws on — see below), and `bot.py` (Telegram entry point — see **Telegram Bot** section below).
 
 `agent.py`:
 
@@ -59,6 +59,23 @@ Dashboard: `http://localhost:6006`. `setup_telemetry()` calls `register(endpoint
 
 See `docs/telemetry-and-testing-plan.md` item 3 for the full story (why the original plan changed) and item 6 for the planned LLM-judged end-to-end evaluation (not built yet).
 
+## Telegram Bot
+
+`bot.py` is the headless entry point — the CLI REPL's `input()` loop can't run in a container (see `docs/deployment-plan.md`), so this is what a real deployment would actually run. Polling mode (`Application.run_polling()`), not webhooks — no public HTTPS endpoint/TLS needed, and it's the same shape locally and in a future Kubernetes `Deployment`.
+
+```powershell
+conda activate myfirstagent
+$env:DEEPSEEK_API_KEY = "<your-deepseek-key>"
+$env:TELEGRAM_BOT_TOKEN = "<your-bot-token>"   # from @BotFather
+python bot.py
+```
+
+- Imports `build_agent`/`run_agent`/`setup_telemetry` from `agent.py` **unchanged** — no changes were needed to `agent.py`'s core logic to add this second entry point, confirming the DI design actually paid off.
+- `run_agent` is synchronous but python-telegram-bot's handlers are async — `handle_message` calls it via `asyncio.to_thread(...)` rather than blocking the bot's event loop.
+- Per-chat history is an in-memory `dict[chat_id, messages]`, same non-persistence as the CLI's `messages` list — lost on restart.
+- Telegram rejects messages over 4096 characters, which this agent's trend reports can easily exceed. `split_for_telegram()` chunks long replies (preferring a newline boundary) and sends each as a separate message — covered by `tests/test_bot.py`.
+- Verified end-to-end against the real Telegram API, not just "the code runs": confirmed the token via `getMe`, then had a human message the live bot and confirmed a real reply came back.
+
 ## Testing
 
 ```powershell
@@ -72,6 +89,7 @@ No `DEEPSEEK_API_KEY` or network access needed — the whole suite runs in ~1.5s
 - `tests/fixtures.py` — mock response payloads for `news_sources.py`'s fetchers, matching real responses captured during live verification (Perigon excepted — unverified, no API key available).
 - `tests/conftest.py` — `isolated_notes_file` fixture, monkeypatches `agent.NOTES_FILE` so `save_note` tests never touch the real `notes.jsonl`.
 - `tests/test_telemetry.py` — only the `PHOENIX_ENABLED` gating logic (register not called when unset, called with expected args when set). Does not test actual tracing — that needs the real Docker container and is verified manually instead (see **Telemetry** above).
+- `tests/test_bot.py` — only `split_for_telegram()`'s chunking logic (pure function, no Telegram API needed). The actual bot integration is verified manually against the real Telegram API instead (see **Telegram Bot** above).
 - HTTP mocking via the `requests_mock` pytest fixture (auto-registered by the `requests-mock` package).
 
 See `docs/telemetry-and-testing-plan.md` for what's covered, what's explicitly not, and what's still planned (CI/CD, LLM-judged end-to-end evaluation). See `docs/deployment-plan.md` for the plan to containerize `agent.py` itself and deploy to Kubernetes/cloud (separate from, but related to, the Docker usage here).

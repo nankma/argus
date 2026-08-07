@@ -13,7 +13,7 @@ they're constructed, rather than hardcoded.
 | 1 | Dependency injection (model + callbacks as parameters) | Done |
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
 | 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker |
-| 4 | CI/CD setup | Not started |
+| 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
 | 5 | Test cases (actual scenarios) | Done — 16 tests, see below for what's covered vs. not |
 | 6 | LLM-judged end-to-end evaluation | Not started — design captured below |
 
@@ -142,21 +142,26 @@ set) — deliberately not testing whether tracing "works," since that needs
 the real Docker container and would break the test suite's zero-real-calls
 guarantee. See item 6 below for how actual trace *content* gets verified.
 
-## 4. CI/CD
+## 4. CI (test automation)
 
-Still not started — same open questions as before:
+**Done — GitHub Actions.** `.github/workflows/ci.yml` runs on every push to
+`main` and every PR against it: `mamba-org/setup-micromamba@v3` builds the
+environment straight from `environment.yml` (no separate pip lockfile —
+avoids the drift risk of maintaining two dependency files), then `pytest`.
+No secrets needed — same zero-real-calls guarantee as running locally.
 
-- Platform not yet confirmed. GitHub Actions is the natural fit (repo is
-  already on `github.com/nankma/myFirstAgent`), proposed but not agreed.
-- Workflow would run `pytest` — no `DEEPSEEK_API_KEY` or real telemetry
-  credentials needed, confirmed by the test suite actually running in 1.46s
-  with zero real network/LLM calls.
-- Dependencies are managed via `environment.yml` (conda-forge) — CI would
-  need to either install via conda (`conda env create -f environment.yml`,
-  slower) or maintain a compatible pip lockfile; not yet decided which. Given
-  the permission issues hit locally with this conda install (`EnvironmentNotWritableError`,
-  needed an elevated shell twice this session), conda-in-CI is untested
-  territory and might have its own surprises.
+**Not yet confirmed:**
+- Whether the workflow run actually went green on GitHub (asked to check,
+  no confirmation received yet).
+- Branch protection on `main` — walked through the exact settings to apply
+  via GitHub's web UI (require PR, require the `test` status check, no
+  admin bypass, no approval requirement, force-push/deletion disabled), but
+  applying it is a manual step on GitHub's side, not something committable
+  to this repo. Not confirmed done.
+
+This is CI (test automation) only — not CD. See `docs/deployment-plan.md`
+for what actual deployment automation needs first (it needs the whole
+deployment chain resolved, not just this).
 
 ## 5. Test cases
 
