@@ -12,9 +12,10 @@ they're constructed, rather than hardcoded.
 |---|------|--------|
 | 1 | Dependency injection (model + callbacks as parameters) | Done |
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
-| 3 | Telemetry service install + hook (real backend for normal runs) | Not started |
+| 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker |
 | 4 | CI/CD setup | Not started |
-| 5 | Test cases (actual scenarios) | Done — 14 tests, see below for what's covered vs. not |
+| 5 | Test cases (actual scenarios) | Done — 16 tests, see below for what's covered vs. not |
+| 6 | LLM-judged end-to-end evaluation | Not started — design captured below |
 
 ## 1. Dependency injection
 
@@ -79,24 +80,67 @@ with it since nothing else was ever proposed).
 
 ## 3. Telemetry service (real backend, for normal/non-test runs)
 
-Still deferred — test infrastructure (item 2) is now solid, this is the
-natural next thing, but not started.
+**Done — Arize Phoenix, but not the way originally planned.** The original
+idea was `pip install arize-phoenix` running in-process with no Docker
+needed. That didn't survive contact with reality:
 
-- **Recommendation from prior discussion: Arize Phoenix.** `pip install
-  arize-phoenix`, local dashboard via `px.launch_app()`, OpenTelemetry-based
-  auto-instrumentation (`openinference-instrumentation-langchain` +
-  `phoenix.otel.register()`). No Docker, no external account.
+- **The full `arize-phoenix` package can't run in this Python environment
+  at all.** It unconditionally imports `pandas` (for its bundled local
+  UI/session code) at `import phoenix` time, and on this machine that DLL
+  load is blocked by Windows 11 **Smart App Control** — confirmed as a real,
+  widely-documented phenomenon (unsigned/no-reputation compiled extensions
+  get blocked; see GitHub issues on mypy, ChimeraX, Julia hitting the exact
+  same error text). Not fixable by switching install tools — conda, mamba,
+  and pip all install the file fine; the block happens when the DLL tries to
+  *load*, not at install time.
+- **The fix: split client from server.** `arize-phoenix-otel` is a separate,
+  much lighter PyPI/conda-forge package — confirmed via its PyPI dependency
+  metadata to have **no pandas dependency at all** (just the OpenTelemetry/
+  OpenInference stack). `agent.py` uses only this lightweight package to
+  *send* traces. The actual Phoenix dashboard/collector runs as its own
+  Docker container instead (`arizephoenix/phoenix:latest`), which sidesteps
+  the Windows-native block entirely since it's an isolated Linux
+  environment. This split turns out to be the right shape for the future
+  Kubernetes deployment too, not just a workaround — see
+  `docs/deployment-plan.md`.
 - Considered and set aside: **LangSmith** (cloud-only — no fully local mode,
   requires an external account even on the free tier); **Langfuse**
   self-hosted (more full-featured — evals, prompt management — but requires
   running a Docker Compose stack with Postgres + ClickHouse, heavier than
   this project needs).
-- When implemented, telemetry setup should be gated behind a config flag
-  (e.g. `TELEMETRY_ENABLED`) so it's opt-in and never activates during tests
-  or CI. `run_agent`'s `callbacks` param is already the injection point for
-  this — `main()` would construct the real Phoenix/OTel callback handler (or
-  none) and pass it through, same shape tests already exercise with
-  `RecordingCallbackHandler`.
+
+**How it's wired up:** `agent.py`'s `setup_telemetry()` calls
+`phoenix.otel.register(endpoint=PHOENIX_ENDPOINT, project_name="myfirstagent",
+protocol="grpc", auto_instrument=True)`, gated behind the `PHOENIX_ENABLED`
+env var — unset (the default, including in every test and CI run) means
+it's a no-op. `auto_instrument=True` means LangChain calls are traced
+automatically process-wide once registered; this is **not** the same
+mechanism as `run_agent`'s `callbacks` parameter — Phoenix/OTel
+instrumentation is global and set up once at startup, unlike the
+per-invocation `callbacks` list. `run_agent`'s `callbacks` param remains
+available for the local/in-memory case (`RecordingCallbackHandler` in
+tests) but Phoenix doesn't go through it.
+
+**Run it:**
+```powershell
+docker run -d --name phoenix -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
+$env:PHOENIX_ENABLED = "true"
+python agent.py
+```
+Dashboard: `http://localhost:6006`.
+
+**Verified end-to-end** (not just "the code runs without error") — queried
+Phoenix's GraphQL API directly after a real run and confirmed 20 real spans
+recorded under the `myfirstagent` project, with the expected structure:
+`LangGraph` (chain) → `model` (chain) → `ChatDeepSeek`/`ChatCompletion`
+(llm) → `search_news` (tool), called multiple times matching the agent's
+actual multi-query behavior for that conversation.
+
+**Tests:** `tests/test_telemetry.py` covers only the gating logic (register
+not called when `PHOENIX_ENABLED` unset; called with expected args when
+set) — deliberately not testing whether tracing "works," since that needs
+the real Docker container and would break the test suite's zero-real-calls
+guarantee. See item 6 below for how actual trace *content* gets verified.
 
 ## 4. CI/CD
 
@@ -116,7 +160,7 @@ Still not started — same open questions as before:
 
 ## 5. Test cases
 
-14 tests, all passing, all real network/LLM calls mocked out:
+16 tests, all passing, all real network/LLM calls mocked out:
 
 **`tests/test_agent.py`** (the agentic loop, via `FakeToolCallingModel`):
 - `save_note` writes the expected JSON line to an isolated temp file and
@@ -146,6 +190,9 @@ Still not started — same open questions as before:
 - `enabled_sources()` — all 7 free sources always present; gated sources
   absent/present based on whether their env var is set.
 
+**`tests/test_telemetry.py`** — the `PHOENIX_ENABLED` gating logic only (see
+item 3).
+
 **Not covered yet** (candidates for later):
 - No test compares captured events/output against a checked-in baseline file
   (snapshot testing) — current tests assert specific expected values inline
@@ -154,3 +201,50 @@ Still not started — same open questions as before:
 - No test of the real `ChatDeepSeek` + real API path (intentionally — that's
   what the fakes exist to avoid; covered instead by the live manual testing
   done earlier in this project's history, see `CLAUDE.md`).
+
+## 6. LLM-judged end-to-end evaluation
+
+Not started — this is a fundamentally different kind of test than items 2/5
+above, so it gets its own item rather than folding into "more test cases."
+
+**The problem it solves:** items 2/5 test the agent's *mechanics* (does the
+tool-calling loop work, does error isolation work) using a fake LLM with
+scripted responses — deliberately not testing whether the *real* DeepSeek
+model's actual output is any good, since that's non-deterministic and can't
+be asserted against with `==`. There's currently no automated check that the
+real end-to-end system (real LLM, real tools, real sources) produces
+reasonable output — only the manual spot-checks done throughout this
+project's history (see `CLAUDE.md`).
+
+**Proposed design:**
+- A fixed set of representative test questions, run against the *real*
+  agent (real `ChatDeepSeek`, real tools/sources) — not the fakes.
+- `PHOENIX_ENABLED` on during the run, so the full trace (tool calls, LLM
+  calls, latency) is captured in Phoenix for every eval run — useful for
+  debugging a bad result, not just for the pass/fail verdict itself.
+- Verification is **not** exact-match (impossible for open-ended generated
+  text) — instead, an LLM judge (Claude, or another model) evaluates
+  whether the response reasonably satisfies what `SYSTEM_PROMPT` actually
+  asks for. This needs the judge's rubric to be derived from
+  `SYSTEM_PROMPT`'s stated goals, not a generic "is this good" prompt.
+
+**Additional deterministic sub-checks** (don't need an LLM judge, cheaper
+and more reliable where they apply) — none of these are built, and two of
+them require `SYSTEM_PROMPT` changes before they'd even make sense to check:
+
+- **Source links present.** Every article/claim the agent cites should
+  include its original URL, not just an outlet name. `SYSTEM_PROMPT`
+  currently only says "cites the source outlets" — doesn't explicitly
+  require a link. Needs a prompt change *and* a check (e.g. regex for URLs
+  correlated with cited titles) before this is meaningful.
+- **Output format compliance.** Not yet defined what "compliant" means
+  (heading structure? required sections? something else?) — needs
+  definition before it can be built.
+- **Writing pattern/style consistency.** Also not yet defined. Once
+  decided, likely needs `SYSTEM_PROMPT` tuned to actually enforce it
+  consistently — a check without a prompt that aims for that pattern would
+  just measure how often the model happens to comply by chance.
+
+None of this is built yet. Revisit once there's a concrete list of eval
+questions and a decision on what "format" and "writing pattern" actually
+mean for this agent.

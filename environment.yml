@@ -9,3 +9,5 @@ dependencies:
   - feedparser
   - pytest
   - requests-mock
+  - arize-phoenix-otel
+  - openinference-instrumentation-langchain

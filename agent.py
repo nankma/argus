@@ -15,14 +15,17 @@ Run:
 """
 
 import json
+import os
 from datetime import datetime
 from langchain_core.tools import tool
 from langchain_deepseek import ChatDeepSeek
 from langchain.agents import create_agent
+from phoenix.otel import register
 import news_sources
 
 MODEL = "deepseek-chat"
 NOTES_FILE = "notes.jsonl"
+PHOENIX_ENDPOINT = "http://localhost:4317"
 
 SYSTEM_PROMPT = (
     "You are an AI industry analyst. Use the search_news tool to gather "
@@ -81,9 +84,26 @@ def run_agent(agent, messages: list, callbacks: list | None = None) -> list:
     return result["messages"]
 
 
+# --- Telemetry -------------------------------------------------------------
+
+def setup_telemetry():
+    """Wire up Phoenix tracing if PHOENIX_ENABLED is set. No-op otherwise —
+    tests/CI never set that env var, so they never try to reach a collector
+    that isn't there."""
+    if not os.environ.get("PHOENIX_ENABLED"):
+        return
+    register(
+        endpoint=PHOENIX_ENDPOINT,
+        project_name="myfirstagent",
+        protocol="grpc",
+        auto_instrument=True,
+    )
+
+
 # --- CLI chat interface ----------------------------------------------------
 
 def main():
+    setup_telemetry()
     model = ChatDeepSeek(model=MODEL)
     agent = build_agent(model)
 
