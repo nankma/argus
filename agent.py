@@ -25,7 +25,10 @@ import news_sources
 
 MODEL = "deepseek-chat"
 NOTES_FILE = "notes.jsonl"
-PHOENIX_ENDPOINT = "http://localhost:4317"
+# Configurable because "localhost" only works for local dev — once Phoenix
+# runs as its own container/Kubernetes service, this needs to point there
+# instead (e.g. PHOENIX_ENDPOINT=http://phoenix:4317 or a cluster DNS name).
+PHOENIX_ENDPOINT = os.environ.get("PHOENIX_ENDPOINT", "http://localhost:4317")
 
 SYSTEM_PROMPT = (
     "You are an AI industry analyst. Use the search_news tool to gather "

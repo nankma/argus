@@ -74,6 +74,15 @@ python bot.py
 - `run_agent` is synchronous but python-telegram-bot's handlers are async — `handle_message` calls it via `asyncio.to_thread(...)` rather than blocking the bot's event loop.
 - Per-chat history is an in-memory `dict[chat_id, messages]`, same non-persistence as the CLI's `messages` list — lost on restart.
 - Telegram rejects messages over 4096 characters, which this agent's trend reports can easily exceed. `split_for_telegram()` chunks long replies (preferring a newline boundary) and sends each as a separate message — covered by `tests/test_bot.py`.
+
+### Running it in Docker
+
+```powershell
+docker build -t myfirstagent-bot .
+docker run -d --name myfirstagent-bot -e DEEPSEEK_API_KEY=$env:DEEPSEEK_API_KEY -e TELEGRAM_BOT_TOKEN=$env:TELEGRAM_BOT_TOKEN myfirstagent-bot
+```
+
+`Dockerfile` uses `mambaorg/micromamba` and installs straight from `environment.yml` — same dependency source as local dev and CI, no separate pip requirements file. `CMD` runs `bot.py` (the headless entry point), not the CLI. Image is ~900MB — a deliberate tradeoff for conda-forge consistency over a smaller `pip`+slim image; see `docs/deployment-plan.md` if that needs revisiting. `PHOENIX_ENDPOINT` is configurable via env var for this reason — `localhost` only resolves correctly for local dev, not once Phoenix runs as a separate container/service.
 - Verified end-to-end against the real Telegram API, not just "the code runs": confirmed the token via `getMe`, then had a human message the live bot and confirmed a real reply came back.
 
 ## Testing

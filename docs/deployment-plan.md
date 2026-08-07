@@ -9,7 +9,7 @@ starts, same pattern as `docs/telemetry-and-testing-plan.md`.
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Containerize `agent.py` (Dockerfile) | Not started |
+| 1 | Containerize `agent.py` (Dockerfile) | Done — see below |
 | 2 | Kubernetes manifests (Deployment, Service, Secret, etc.) | Not started |
 | 3 | Cloud provider / hosting target | Not decided |
 | 4 | Refactor `main()` from interactive CLI to a headless service | Done — Telegram bot, polling mode |
@@ -75,24 +75,61 @@ service (its own `Deployment` + `Service` in the cluster) that all agent
 replicas send traces to over OTLP. No architecture change needed later for
 this reason — just more Kubernetes manifests.
 
+**Fixed as part of the Dockerfile work:** `agent.py`'s `PHOENIX_ENDPOINT`
+was hardcoded to `http://localhost:4317`, which only works for local dev —
+inside a container, `localhost` is the container's own network namespace,
+not wherever Phoenix's Docker container/Kubernetes service actually runs.
+Now reads from a `PHOENIX_ENDPOINT` env var (defaulting to the old
+`localhost` value, so nothing changes for local dev) — deploying will need
+to set it to wherever Phoenix's service actually is (e.g. a Kubernetes
+service DNS name once that manifest exists).
+
+## The Dockerfile
+
+`FROM mambaorg/micromamba:latest` — stays on conda-forge via micromamba
+(same tool the CI workflow already uses) rather than introducing a second
+pip requirements file that could drift from `environment.yml`. Installs
+into the base image's `base` environment (not a named `myfirstagent` env —
+unlike the local dev machine, a single-purpose container doesn't need
+named-environment isolation, so there's nothing to gain from replicating
+that scheme inside it).
+
+- `CMD ["python", "bot.py"]` — runs the headless Telegram entry point, not
+  the CLI (`agent.py`'s `input()` loop still can't run in a container).
+- `DEEPSEEK_API_KEY` / `TELEGRAM_BOT_TOKEN` / `PHOENIX_ENABLED` /
+  `PHOENIX_ENDPOINT` are all runtime env vars (`docker run -e`, later a
+  Kubernetes `Secret`/`ConfigMap`) — nothing is baked into the image.
+- `.dockerignore` excludes `tests/`, `docs/`, `.git/`, etc. from the build
+  context.
+- **Image size: 907MB.** Larger than a `pip` + `python:slim` approach would
+  produce — the tradeoff deliberately made for staying consistent with the
+  project's conda-forge-everywhere convention (local dev, CI, and now the
+  container all read the same `environment.yml`, zero drift risk). Worth
+  revisiting later if image size becomes an actual problem (multi-stage
+  build copying just the final env, or reconsidering pip for the container
+  specifically) — not a problem yet, just a known tradeoff.
+- **Verified for real, not just "the build succeeded":** ran the built
+  image with real credentials, confirmed `python bot.py` actually executing
+  inside the container via `docker top` (not just `Up` status, which only
+  means the container didn't immediately exit), then had a human message
+  the live bot again and confirmed a real reply came back through the
+  containerized version specifically.
+
 ## Open questions
 
 - **Cloud provider** — not decided (AWS/GCP/Azure/other). Affects which
   Kubernetes flavor (EKS/GKE/AKS/self-managed) and how secrets are managed.
+  This is now the only remaining blocker before Kubernetes manifests (item
+  2) can be written.
 - **Secrets management** — `DEEPSEEK_API_KEY` (and any telemetry
-  credentials) currently come from a local env var. In Kubernetes this
-  becomes a `Secret` object at minimum; a cloud-native secret manager
-  (e.g. AWS Secrets Manager, GCP Secret Manager) integrated via the
-  cluster's CSI driver is the more production-grade option — not decided
-  which.
-- **Base image** — this project uses a conda/Miniforge environment
-  (`environment.yml`) locally. A container image doesn't need conda at all
-  (no multiple envs to isolate inside a single-purpose container) — worth
-  deciding whether the Dockerfile installs the same dependencies via a
-  plain `pip install` from a generated requirements list, or keeps using
-  conda/mamba inside the image for consistency with local dev. Not decided.
+  credentials) currently come from a local env var / `docker run -e`. In
+  Kubernetes this becomes a `Secret` object at minimum; a cloud-native
+  secret manager (e.g. AWS Secrets Manager, GCP Secret Manager) integrated
+  via the cluster's CSI driver is the more production-grade option — not
+  decided which.
 - **CI/CD overlap** — `docs/telemetry-and-testing-plan.md` item 4 (test
   CI) and this deployment work are related but distinct: one runs `pytest`
   on every push, the other builds/pushes a container image and deploys it.
-  They'll likely share a GitHub Actions workflow file eventually, but
-  neither is started yet.
+  The existing `.github/workflows/ci.yml` doesn't build/push the Docker
+  image yet — that's the natural next CI addition once a registry/target
+  is decided.

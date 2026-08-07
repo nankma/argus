@@ -1,0 +1,14 @@
+.git/
+.github/
+.claude/
+.agents/
+docs/
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+notes.jsonl
+AGENTS.md
+CLAUDE.md
+README.md
+pytest.ini
