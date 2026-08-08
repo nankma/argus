@@ -2,10 +2,9 @@
 
 Goal: stop the agent from answering off-topic questions or discussing its
 own implementation/system prompt, without adding infrastructure this
-project's tiny free-tier deployment can't carry. Nothing here is built
-yet — this doc captures the incident, the research behind the design, and
-the plan before implementation starts, same pattern as the other `docs/*
--plan.md` files.
+project's tiny free-tier deployment can't carry. **Built and live** — see
+Status below; this doc still captures the incident and the research
+behind the design, kept for context.
 
 ## The incident that triggered this
 
@@ -28,10 +27,15 @@ mitigations actually apply (see below).
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Fast pre-filter for obviously-bad input | Planned, not built |
-| 2 | Cheap secondary classifier ("gateway") before the main agent runs | Planned, not built |
-| 3 | Hardened, scope-confined `SYSTEM_PROMPT` | Planned, not built |
-| 4 | Output-side check before replying (added based on research, not in the original ask) | Planned, not built |
+| 1 | Fast pre-filter for obviously-bad input | **Done** — `guardrails.fails_local_prefilter()` |
+| 2 | Cheap secondary classifier ("gateway") before the main agent runs | **Done** — `guardrails.is_input_on_topic()` |
+| 3 | Hardened, scope-confined `SYSTEM_PROMPT` | **Done** — `agent.py` |
+| 4 | Output-side check before replying (added based on research, not in the original ask) | **Done** — `guardrails.is_output_on_topic()` |
+
+**Verified live, both directions**: a normal AI-news question
+(e.g. "What's new with OpenAI?") still gets a real answer; the actual
+incident message (and rephrasings of it) now gets the redirect message
+instead of the agent discussing its own configuration.
 
 ## What the research says (see chat for full findings; summary here)
 
@@ -231,14 +235,21 @@ it from the input.
 
 ## Open questions
 
-- Exact wording/pattern list for layer 1 — needs to be built and iterated
-  on, not fully speculated here.
-- Whether layers 2 and 4 share one prompt/function or need separate ones
-  (input framing vs. output framing are different enough that separate
-  prompts may classify better — not decided).
-- Cost/latency impact of the extra DeepSeek call(s) per message — not
-  measured yet; worth checking after building, especially since layer 2
-  runs on *every* message, not just suspicious ones.
+- ~~Exact wording/pattern list for layer 1~~ — built in `guardrails.py`'s
+  `_SUSPICIOUS_PATTERNS`; expect to keep iterating on this list as new
+  false-negative phrasings show up in practice.
+- ~~Whether layers 2 and 4 share one prompt~~ — **decided: separate
+  prompts** (`_INPUT_SCOPE_PROMPT` / `_OUTPUT_SCOPE_PROMPT` in
+  `guardrails.py`), sharing one `_classify()` helper. Input framing asks
+  "is this a legitimate request"; output framing asks "does this text
+  stay in scope and avoid self-disclosure" — different enough questions
+  that reusing one prompt for both seemed likely to classify worse.
+- Cost/latency impact of the extra DeepSeek call(s) per message — still
+  not measured. Every message now costs at least one extra classification
+  call (layer 2), and on-topic ones cost two (layer 2 + layer 4) on top
+  of the main agent call — worth watching, especially since layer 2 runs
+  on *every* message, not just suspicious-looking ones.
 - Whether false positives (a legitimate news question getting redirected)
-  are a real problem in practice — only observable once this is live and
-  used for a while.
+  are a real problem in practice — not observed in initial live testing
+  (a normal question still got a real answer), but that's one data point,
+  not a stress test.

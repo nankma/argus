@@ -291,8 +291,8 @@ expands what a tool call can actually do.
 incident (not malicious external content — an ambiguous user question
 pulled the agent off its assigned role and into discussing its own
 implementation) — see `docs/guardrails-plan.md` for the incident and the
-four-layer mitigation plan (pre-filter, secondary classifier gateway,
-hardened system prompt, output-side check). Not built yet.
+four-layer mitigation (pre-filter, secondary classifier gateway, hardened
+system prompt, output-side check). **Built and verified live**.
 
 ### 6. `admin_bot.py` confirms its own existence to non-admins
 
