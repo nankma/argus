@@ -30,6 +30,10 @@ cloud provider and starting on Kubernetes manifests in parallel.
 | 10 | Non-root container user | Good — already correct | No action needed |
 | 11 | No inbound ports (polling-only architecture) | Good — already correct | No action needed |
 | 12 | Admin identity check relies on Telegram-verified `chat_id`/`from_user.id` | Good — already correct | No action needed |
+| 13 | `subscribers.db` has no backup — single Docker volume, no copy anywhere | Medium | Not started — availability risk, not a vulnerability |
+| 14 | Cloud VM OS-level hardening (SSH, patching) not yet planned | Medium | Not started — needs deciding once a specific provider/VM is chosen |
+| 15 | IAM policy scoping for whichever secret manager is used | Low | Design-time reminder, not a current gap (nothing built yet) |
+| 16 | No audit logging on secret access | Low | Comes largely free once a real vault is adopted (finding 2) |
 
 ## Findings
 
@@ -77,6 +81,69 @@ today) — real protection needs either envelope encryption at the cluster
 level, a cloud-native secret store (AWS Secrets Manager, GCP Secret
 Manager, etc.) integrated via a CSI driver, or a tool like Sealed Secrets.
 Decide this alongside the cloud provider choice, not after.
+
+**If Oracle Cloud is the chosen provider**, confirmed it has a real
+equivalent to Azure Key Vault + Managed Service Identity, at no extra cost
+within Always Free:
+
+- **OCI Vault** — one service covering both Key Management (encryption
+  keys) and **Secret Management** (arbitrary secrets — API keys, tokens,
+  passwords), same combined shape as Azure Key Vault, not split across two
+  products.
+- **Instance Principals** — the Azure MSI equivalent. A Compute VM
+  authenticates using its own instance identity (instance OCID), no
+  long-lived credential stored on the box.
+- **Dynamic Groups + IAM policy** — the Azure "grant this MSI an access
+  policy on the Key Vault" equivalent. A Dynamic Group is defined by
+  matching rules (compartment OCID, instance OCID, tags); an IAM policy
+  statement then grants that Dynamic Group specific permissions (e.g.
+  `read secret-bundles`) scoped to a compartment/vault — not tenancy-wide.
+- **Always Free coverage**: 150 secrets per tenancy (40 versions each),
+  unlimited free software-protected encryption keys, 20 free HSM key
+  versions (then $0.53/version/month — not needed here). Comfortably
+  covers this project's four secrets at zero cost.
+- **Differences from Azure worth knowing**: a mandatory **7-day deletion
+  grace period** on vaults/keys (secrets: minimum 1 day) — no instant
+  purge; vault OCIDs are **region-scoped**, don't hardcode across regions;
+  Instance Principal auth **only works from inside OCI Compute** — local
+  dev/testing still needs env vars as it does today. Some third-party
+  tooling (HashiCorp Vault's OCI plugin, External Secrets Operator) has
+  reported occasional instance-principal detection friction — less
+  turnkey than Azure MSI in a few integrations, though the core mechanism
+  works as described.
+
+## Is cloud-vault + workload identity the industry standard?
+
+Yes — "no long-lived credential stored on the workload; authenticate via
+a platform-verified identity, fetch secrets from a managed vault at
+runtime" is the current mainstream best practice, not an Azure-specific
+pattern. It goes by different names per platform (Azure Managed Identity,
+AWS IAM Roles, GCP Workload Identity, OCI Instance Principals) but the
+shape is the same everywhere. Other approaches that show up across the
+industry, relevant if this project ever needs them:
+
+- **HashiCorp Vault** — a cloud-agnostic, self-hostable (or HCP-managed)
+  secrets manager. Common when avoiding lock-in to one cloud's native
+  vault, running multi-cloud, or wanting **dynamic secrets** (short-lived,
+  auto-rotated credentials issued on demand instead of long-lived static
+  ones). Overkill for this project's single-provider, single-VM scale.
+- **Kubernetes-native tools** (relevant once `docs/deployment-plan.md`
+  item 2's manifests exist): **Sealed Secrets** (encrypts a secret so
+  it's safe to commit to git — only the in-cluster controller can decrypt
+  it) and **External Secrets Operator** (syncs secrets from a real vault —
+  OCI Vault, AWS Secrets Manager, etc. — into native Kubernetes `Secret`
+  objects automatically). Either pairs naturally with the OCI Vault design
+  above once there's a cluster to run them in.
+- **SOPS** (Mozilla) — encrypts individual config files using a cloud
+  KMS/PGP/age key, so the encrypted files are safe to check into git
+  directly. A lower-ceremony alternative to Sealed Secrets, worth
+  considering when the K8s manifests get written.
+- **Automatic secret rotation** — cloud secret managers (including OCI
+  Vault) support scheduled/triggered rotation of stored credentials. This
+  project doesn't rotate anything today (all four secrets are static,
+  set-once). Not urgent at this scale, but worth designing for once a
+  real vault is in place — rotation is far easier to bolt on early than
+  retrofit later.
 
 ### 3. No rate limiting on approved users
 
@@ -170,6 +237,48 @@ manual check in GitHub's repo settings.
   client — this is a trustworthy check, not a self-reported value an
   attacker could forge.
 
+### 13. `subscribers.db` has no backup
+
+The approval database (`users_db.py`) lives in a single Docker volume
+(`myfirstagent-data`) with no copy anywhere else. This is an availability
+concern, not a vulnerability — if the volume is lost (host disk failure,
+accidental `docker volume rm`, bad migration), every approval decision
+(who's approved, denied, pending) is gone, and every existing subscriber
+would need to re-request access. Worth a simple periodic backup (e.g. a
+scheduled `sqlite3 .backup` copied to cloud object storage) once this
+moves to a cloud host — cheap insurance, not urgent at today's "owner plus
+a couple of friends" scale.
+
+### 14. Cloud VM OS-level hardening
+
+Not yet relevant since no cloud host exists — but whichever provider gets
+picked (`docs/deployment-plan.md` item 3), if it's a plain Compute VM
+(rather than a fully managed service), standard hardening applies: SSH
+key-only auth (no password login), restrict SSH source IPs where
+possible, keep the OS patched, disable unused services. None of this is
+built or decided yet; flagging so it isn't skipped when the VM is actually
+provisioned. Not a concern at all for fully-managed/serverless options
+that don't expose SSH.
+
+### 15. IAM policy scoping (design-time reminder)
+
+Not a current gap — nothing is built yet — but worth stating as a
+principle before the Dynamic Group + IAM policy from finding 2 gets
+written for real: grant the narrowest permission that works (e.g. `read
+secret-bundles` on a specific vault/compartment, not `manage` or
+tenancy-wide access). Cheaper to get this right the first time than to
+loosen-then-tighten later.
+
+### 16. No audit logging on secret access
+
+Right now there's no log of who/what accessed a secret, because secrets
+aren't in a real vault yet (finding 2) — env vars passed via `docker run
+-e` don't produce an access log. This mostly resolves itself once a real
+secret manager is adopted: OCI Vault (like Azure Key Vault, AWS Secrets
+Manager, etc.) logs every secret read via the platform's audit service by
+default. Not something to build separately — just confirm it's turned on
+when finding 2 is implemented.
+
 ## Recommendation on cloud deployment timing
 
 None of the above blocks moving forward on `docs/deployment-plan.md` item
@@ -179,9 +288,16 @@ hole. Suggested order:
 1. Decide secrets management (finding 2) **as part of** the cloud
    provider decision, since the right answer depends on which provider
    (native secret manager availability differs) — don't pick a provider
-   first and retrofit this after.
-2. Add rate limiting (finding 3) and CI vulnerability/secrets scanning
-   (findings 7-8) before or shortly after the first real cloud deployment
-   — cheap, and cheaper to do before more users are approved.
-3. Everything else (findings 4, 6, 9) can happen whenever convenient —
+   first and retrofit this after. If Oracle: OCI Vault + Instance
+   Principals + Dynamic Groups, scoped per finding 15, with finding 16's
+   audit logging coming along for free.
+2. When provisioning the actual VM/host, apply finding 14's OS hardening
+   checklist at that time — easy to forget once the excitement is "it's
+   running," so treat it as part of the provisioning step, not an
+   afterthought.
+3. Add rate limiting (finding 3), CI vulnerability/secrets scanning
+   (findings 7-8), and a `subscribers.db` backup (finding 13) before or
+   shortly after the first real cloud deployment — all cheap, and cheaper
+   to do before more users are approved.
+4. Everything else (findings 4, 6, 9) can happen whenever convenient —
    none are urgent.
