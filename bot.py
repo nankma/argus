@@ -32,6 +32,7 @@ from telegram.error import BadRequest
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from langchain_deepseek import ChatDeepSeek
 from agent import MODEL, build_agent, run_agent, setup_telemetry
+import guardrails
 import users_db
 
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -138,19 +139,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await check_access(update, context):
         return
 
+    user_text = update.message.text
+
+    # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
+    # docs/guardrails-plan.md for the incident this design responds to.
+    if guardrails.fails_local_prefilter(user_text):
+        await update.message.reply_text(guardrails.REDIRECT_MESSAGE)
+        return
+
+    guard_model = context.bot_data["guard_model"]
+
+    # Guardrail layer 2: cheap classifier call gating the expensive
+    # multi-turn agent call -- skips it entirely for off-topic requests.
+    input_on_topic = await asyncio.to_thread(guardrails.is_input_on_topic, guard_model, user_text)
+    if not input_on_topic:
+        await update.message.reply_text(guardrails.REDIRECT_MESSAGE)
+        return
+
     chat_id = update.effective_chat.id
-    messages = chat_histories.setdefault(chat_id, [])
-    messages.append({"role": "user", "content": update.message.text})
+    history = chat_histories.get(chat_id, [])
+    working_messages = history + [{"role": "user", "content": user_text}]
 
     agent = context.bot_data["agent"]
     try:
-        messages = await asyncio.to_thread(run_agent, agent, messages)
+        result_messages = await asyncio.to_thread(run_agent, agent, working_messages)
     except Exception as exc:
         await update.message.reply_text(f"Something went wrong: {exc}")
         return
-    chat_histories[chat_id] = messages
 
-    chunks = split_for_telegram(messages[-1].content)
+    final_content = result_messages[-1].content
+
+    # Guardrail layer 4: re-checks the agent's actual output before it's
+    # sent -- the layer that catches drift layers 1-3 missed, since the
+    # failure is only visible in what the model wrote, not the input.
+    output_on_topic = await asyncio.to_thread(guardrails.is_output_on_topic, guard_model, final_content)
+    if not output_on_topic:
+        await update.message.reply_text(guardrails.REDIRECT_MESSAGE)
+        return
+
+    # Only persisted once accepted -- a rejected exchange doesn't pollute
+    # the conversation history the next turn sees.
+    chat_histories[chat_id] = result_messages
+
+    chunks = split_for_telegram(final_content)
     for i, chunk in enumerate(chunks):
         if i > 0:
             # Small gap between sequential messages -- avoids hitting
@@ -175,6 +206,9 @@ def main():
 
     app = Application.builder().token(token).build()
     app.bot_data["agent"] = agent
+    # Reuses the same model instance for guardrail classification calls
+    # (guardrails.py) -- no separate model/infra, see docs/guardrails-plan.md.
+    app.bot_data["guard_model"] = model
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

@@ -47,9 +47,12 @@ import telemetry_monitor
 import users_db
 
 
-def build_info_app(agent, admin_chat_id: int, admin_bot_token: str) -> Application:
+def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None) -> Application:
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.bot_data["agent"] = agent
+    # Reuses the same model instance for guardrail classification calls
+    # (guardrails.py) -- no separate model/infra, see docs/guardrails-plan.md.
+    app.bot_data["guard_model"] = guard_model
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["admin_bot_token"] = admin_bot_token
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, info_bot.handle_message))
@@ -126,7 +129,7 @@ def main():
     model = ChatDeepSeek(model=MODEL)
     agent = build_agent(model)
 
-    info_app = build_info_app(agent, admin_chat_id, admin_bot_token)
+    info_app = build_info_app(agent, admin_chat_id, admin_bot_token, guard_model=model)
     admin_app = build_admin_app(admin_chat_id, info_bot_token)
 
     asyncio.run(run_both(info_app, admin_app, admin_bot_token, admin_chat_id))
