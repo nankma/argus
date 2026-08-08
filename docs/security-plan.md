@@ -355,7 +355,13 @@ a couple of friends" scale.
 ### 14. Cloud VM OS-level hardening
 
 Now live and relevant: Oracle `VM.Standard.E2.1.Micro`, `us-sanjose-1`,
-Ubuntu 24.04 Minimal, see `docs/deployment-plan.md`.
+Ubuntu 24.04 Minimal, see `docs/deployment-plan.md`. There are now **two**
+such VMs — the bot (`myfirstagent-bot` instance) and a second, isolated
+one running Phoenix (`myfirstagent-phoenix` — deliberately separate so a
+Phoenix memory spike can't take the bot down; see
+`docs/deployment-plan.md`'s "Live Phoenix deployment" section for that
+VM's specific hardening: SSH-tunnel-only access, no public port 6006/4317,
+native auth with the default `admin`/`admin` password overridden).
 
 - **Done**: SSH is key-only by default (OCI's instance creation only
   offers SSH-key auth for the `ubuntu` login, no password auth was ever

@@ -134,6 +134,62 @@ Now reads from a `PHOENIX_ENDPOINT` env var (defaulting to the old
 to set it to wherever Phoenix's service actually is (e.g. a Kubernetes
 service DNS name once that manifest exists).
 
+### Live Phoenix deployment: dedicated Oracle VM, no Docker
+
+A second Always Free instance, `myfirstagent-phoenix`
+(`VM.Standard.E2.1.Micro`, same VCN/subnet as the bot VM, same SSH key),
+runs Phoenix — kept separate from the bot's VM deliberately, since
+Phoenix's memory use can spike hard under load (community reports of
+idle ~235MB ballooning to 11GB+ during traffic bursts, since it buffers
+spans in memory unboundedly relative to ingest rate) — isolating it means
+a Phoenix memory spike can't take the bot down with it.
+
+**Not run in Docker, unlike everything else in this project** — and this
+is a deliberate exception, not a lapse in the conda-forge/Docker
+convention. The original reason `arize-phoenix` (the full package, not
+`-otel`) was avoided was Windows Smart App Control blocking pandas'
+compiled DLL (`docs/telemetry-and-testing-plan.md` item 3) — a
+Windows-only problem that doesn't exist on this Linux VM. Also,
+conda-forge's `arize-phoenix` package turned out to be badly stale
+(version 0.1.0, vs. the real current ~19.x on PyPI) — so this one host
+uses a plain Python venv + `pip install arize-phoenix` instead, which is
+fine since it's a single-purpose ops VM, not part of the main project's
+`environment.yml`-tracked environment. Run as a systemd service
+(`/etc/systemd/system/phoenix.service`, `phoenix serve`) rather than a
+container — one less moving part (no Docker daemon overhead) on an
+already memory-constrained free-tier VM.
+
+**Runs on-demand, not always-on.** The systemd unit is deliberately
+`disabled` (won't start on boot) — start it only when actively debugging
+an agent issue (`sudo systemctl start phoenix`), stop it when done
+(`sudo systemctl stop phoenix`). Reduces both cost/resource exposure and
+the OOM-under-load risk to zero when not in active use.
+
+**Secured two ways, not just one:**
+1. Phoenix's native auth is enabled (`PHOENIX_ENABLE_AUTH=true`,
+   `PHOENIX_SECRET` set to a random 64-char value) — **critically, also
+   overrides `PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD`**, since Phoenix's
+   default admin login is the well-known `admin`/`admin` and enabling
+   auth alone does *not* change that default — a real gotcha caught by
+   reading Phoenix's own source (`phoenix.auth.DEFAULT_ADMIN_PASSWORD`),
+   not documented prominently.
+2. Port 6006 (web UI) and 4317 (OTLP) are **not opened in the OCI
+   security list at all** — confirmed by testing from an external
+   network that the port is unreachable. Access is via SSH tunnel only
+   (`ssh -i <key> -L 6006:localhost:6006 ubuntu@<phoenix-vm-ip>`, then
+   browse `localhost:6006`) — so even a hypothetical auth bypass still
+   requires SSH key access to reach the port at all. The systemd unit
+   file itself is also locked to `600`/root-owned, since it holds
+   `PHOENIX_SECRET` and the admin password in plaintext.
+
+**Not yet done**: the bot container isn't pointed at this Phoenix
+instance yet (`PHOENIX_ENABLED`/`PHOENIX_ENDPOINT` aren't set on
+`myfirstagent-bot`). Given Phoenix is only running some of the time,
+worth confirming OpenTelemetry's exporter behaves as expected (fails
+silently/retries in the background rather than blocking or crashing the
+bot) when the endpoint is unreachable, before turning this on for the
+live bot — not yet verified for this specific setup.
+
 ## The Dockerfile
 
 `FROM mambaorg/micromamba:latest` — stays on conda-forge via micromamba
