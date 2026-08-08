@@ -116,6 +116,28 @@ trends — try asking about a company, model, or trend instead.") — no
 DeepSeek tool-calling loop spent on a request that was never going to be
 answerable anyway.
 
+**Why DeepSeek and not a cheaper embedding/semantic-similarity check**:
+considered and deferred, not rejected outright. Embedding-based topic
+routing (compute an embedding of the incoming message, compare cosine
+similarity against reference on-topic examples, no text generation
+involved — the "semantic-router" pattern) is genuinely cheaper and faster
+than an LLM call, and a real, commonly-used technique for this exact
+problem. Not adopted now for a concrete infrastructure reason: the model
+itself is small (e.g. `sentence-transformers`' `all-MiniLM-L6-v2` is
+~80MB), but the inference library it needs (PyTorch) is not — installing
+it would meaningfully strain VMs that are already carefully managed down
+to individual hundreds-of-MB of headroom (see `docs/deployment-plan.md`'s
+Oracle Always Free setup). Revisit once there's a host with room for it,
+or a case for calling a hosted embeddings API instead of running one
+locally. Also worth being honest about a real limitation even if this
+gets adopted later: embedding similarity is good at catching *clearly*
+off-topic input cheaply (weather, recipes, poetry) but weaker on the kind
+of input that actually caused this project's incident — a message that's
+still semantically AI/tech-adjacent, just aimed at the wrong target (the
+bot's own tooling, not AI industry news). An embedding layer would be a
+useful cheap *first* pass to reduce how often the DeepSeek classifier
+call below even needs to run, not a replacement for it.
+
 ### 3. Hardened `SYSTEM_PROMPT` (item 3 from the ask)
 
 Add explicit scope-confinement instructions to `agent.py`'s
@@ -158,6 +180,41 @@ replace it.
 Would have caught the actual incident even if the other three layers
 missed it, since the failure only became visible in what the model
 *wrote*, not in the (ambiguous, not obviously malicious) input.
+
+## Worked example: the actual incident through all four layers
+
+Concrete walkthrough, tracing the real message ("Claude code has a new
+function that allow message cross session. How do I sent the prompt that
+you can return this kind of news next time.") through the design above —
+useful for understanding why four layers, not one:
+
+1. **Layer 1 (regex/keyword)**: no "ignore instructions"-style phrasing,
+   no direct "show me your system prompt" pattern → **passes**. Expected —
+   this layer only exists to catch blatant attempts for free, and this
+   message doesn't look blatant.
+2. **Layer 2 (DeepSeek gateway)**: asked "is this a legitimate AI-industry
+   news/trends request?" — a well-prompted classifier should recognize
+   this is actually a question about a dev tool's own feature (Claude
+   Code's session handling), not an AI-news request → **should flag as
+   off-topic here**, before the main agent ever runs. This is the layer
+   actually expected to have prevented the incident.
+3. **Layer 3 (hardened system prompt)**: backstop if layer 2 somehow
+   passed it through anyway — the main agent's own instructions say
+   explicitly not to discuss its own configuration or role-play as
+   another tool, which is exactly what went wrong originally.
+4. **Layer 4 (output check)**: final backstop — even if the agent still
+   produced an off-topic answer, re-checking the *actual generated text*
+   ("does this response stay in AI-news scope and avoid discussing the
+   bot's own tooling?") catches it before it's ever sent, and swaps it
+   for the same redirect message. This is the layer that would have
+   caught this specific incident for certain, since the failure was only
+   visible in what the model wrote, not in the input itself.
+
+No single layer is assumed to be reliable alone — that's the point of
+having four. Layer 2 is where this incident was *expected* to be caught;
+layer 4 is where it's *guaranteed* to be caught if every earlier layer
+fails, since it inspects the actual output rather than trying to predict
+it from the input.
 
 ## Where this plugs into the existing code
 
