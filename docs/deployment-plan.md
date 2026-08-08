@@ -65,6 +65,25 @@ split back into two containers at that point if isolation becomes more
 valuable than the memory savings `combined_bot.py` was built for. Not
 urgent — the current setup is stable and verified working.
 
+### Connection details (safe to document — no secrets)
+
+An IP address is a routing detail, not a credential, and the private key
+itself never leaves the local machine or gets committed — so this is safe
+to keep here for whoever next needs to deploy or debug, instead of
+re-discovering it from the OCI console each time.
+
+- **Bot VM** (`instance-mnk-20260807-2035`, runs `myfirstagent-bot` via
+  `combined_bot.py`): public IP `<bot-vm-ip>`, private IP `10.0.0.7`.
+- **Phoenix VM** (`instance-mnk-phoenix-20260808-1012`, runs the Phoenix
+  telemetry collector/UI): public IP `<phoenix-vm-ip>`, private IP
+  `10.0.0.234`.
+- **SSH private key**: `<ssh-key-file>`, kept locally under
+  `<local-key-directory>` — not in this repo, not committed, referenced
+  by path only. `ssh -i "<path-to-ssh-key>" ubuntu@<bot-vm-ip>`.
+- Both VMs are `us-sanjose-1`/Phoenix-region Always Free shapes under the
+  same tenancy; user is `ubuntu` on both (default for the Ubuntu 24.04
+  Minimal image).
+
 ## The blocking architectural gap
 
 `agent.py`'s `main()` is an interactive REPL: it calls `input()` in a loop

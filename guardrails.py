@@ -32,8 +32,14 @@ from typing import Literal
 from pydantic import BaseModel
 
 REDIRECT_MESSAGE = (
-    "I only help with tech industry news and trends — try asking about a "
-    "company, product, or trend instead."
+    "I only help with tech industry news and this bot's own subscription "
+    "features. Here's what you can ask, in plain language:\n\n"
+    "📰 <b>News</b> — \"What's new with OpenAI?\", \"Any trends in AI "
+    "regulation?\"\n"
+    "⭐ <b>Interests</b> — \"Add robotics to my interests\", \"Remove "
+    "crypto\", or use /interests to view/set them directly\n"
+    "🔔 <b>Push notifications</b> — \"Start/stop pushing me news\" (saves "
+    "your preference — scheduled sending isn't live yet)"
 )
 
 Category = Literal[

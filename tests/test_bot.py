@@ -7,7 +7,13 @@ from telegram.error import BadRequest
 import bot
 import guardrails
 import users_db
-from bot import TELEGRAM_MESSAGE_LIMIT, _is_html_balanced, _strip_html_tags, split_for_telegram
+from bot import (
+    TELEGRAM_MESSAGE_LIMIT,
+    _is_html_balanced,
+    _normalize_markdown_bold,
+    _strip_html_tags,
+    split_for_telegram,
+)
 
 
 def test_split_for_telegram_short_text_unchanged():
@@ -59,6 +65,19 @@ def test_is_html_balanced():
 def test_strip_html_tags():
     assert _strip_html_tags("<b>bold</b> and <a href=\"x\">link</a>") == "bold and link"
     assert _strip_html_tags("plain text") == "plain text"
+
+
+def test_normalize_markdown_bold_converts_stray_markdown():
+    # Real incident, 2026-08-08: the model ignored the "HTML not Markdown"
+    # instruction for confirmation replies and emitted **bold** anyway,
+    # which showed up as literal asterisks under parse_mode=HTML.
+    assert _normalize_markdown_bold("好的！已將 **AI** 加入你的興趣清單") == "好的！已將 <b>AI</b> 加入你的興趣清單"
+    assert _normalize_markdown_bold("**AI** 和 **robotics**") == "<b>AI</b> 和 <b>robotics</b>"
+
+
+def test_normalize_markdown_bold_leaves_plain_and_html_text_unchanged():
+    assert _normalize_markdown_bold("plain text, no markdown") == "plain text, no markdown"
+    assert _normalize_markdown_bold("<b>already html</b>") == "<b>already html</b>"
 
 
 def _make_update(chat_id, username="alice", first_name="Alice", text="What's new with OpenAI?"):
@@ -174,6 +193,27 @@ def test_handle_message_falls_back_to_plain_text_on_bad_request(isolated_subscri
     assert "parse_mode" not in second_kwargs
 
 
+def test_handle_message_normalizes_stray_markdown_before_sending(isolated_subscribers_db, monkeypatch):
+    # Real incident, 2026-08-08: the model emitted **AI** instead of
+    # <b>AI</b> for a set_interest confirmation, despite the prompt saying
+    # not to -- handle_message must sanitize this before it reaches
+    # reply_text, not just rely on the prompt.
+    _bypass_guardrails(monkeypatch, category="set_interest")
+    update = _make_update(chat_id=999, text="Add AI to my interests")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    monkeypatch.setattr(
+        bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="已將 **AI** 加入你的興趣清單")])
+    )
+
+    asyncio.run(bot.handle_message(update, context))
+
+    args, kwargs = update.message.reply_text.call_args
+    assert args[0] == "已將 <b>AI</b> 加入你的興趣清單"
+    assert "**" not in args[0]
+    assert kwargs["parse_mode"] is not None
+
+
 def test_handle_message_blocked_by_local_prefilter(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=True))
     run_agent_mock = MagicMock()
@@ -185,7 +225,9 @@ def test_handle_message_blocked_by_local_prefilter(isolated_subscribers_db, monk
     asyncio.run(bot.handle_message(update, context))
 
     run_agent_mock.assert_not_called()
-    update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE)
+    update.message.reply_text.assert_called_once_with(
+        bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML
+    )
 
 
 def test_handle_message_blocked_by_router_off_topic(isolated_subscribers_db, monkeypatch):
@@ -204,7 +246,9 @@ def test_handle_message_blocked_by_router_off_topic(isolated_subscribers_db, mon
     asyncio.run(bot.handle_message(update, context))
 
     run_agent_mock.assert_not_called()
-    update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE)
+    update.message.reply_text.assert_called_once_with(
+        bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML
+    )
 
 
 def test_handle_message_passes_chat_id_and_category_to_run_agent(isolated_subscribers_db, monkeypatch):
@@ -246,7 +290,9 @@ def test_handle_message_blocked_by_output_classifier(isolated_subscribers_db, mo
     history_before = list(bot.chat_histories.get(999, []))
     asyncio.run(bot.handle_message(update, context))
 
-    update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE)
+    update.message.reply_text.assert_called_once_with(
+        bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML
+    )
     # the rejected exchange must not be persisted into chat history
     assert bot.chat_histories.get(999, []) == history_before
 

@@ -42,6 +42,20 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 chat_histories: dict[int, list] = {}
 
 _HTML_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>")
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _normalize_markdown_bold(text: str) -> str:
+    """Safety net for when the model ignores agent.py's "no Markdown,
+    HTML only" instruction and emits **bold** anyway (a real incident,
+    2026-08-08 — see the smoke-test table in the
+    build-locally-deploy-remotely skill). Prompt compliance alone isn't
+    reliable enough (same lesson as guardrails.py's classifiers), so this
+    converts stray **bold** into real Telegram HTML instead of relying
+    purely on the model following the rule -- turns a literal-asterisk
+    bug into a no-op when the model behaves, and into a fix when it
+    doesn't."""
+    return _MARKDOWN_BOLD_RE.sub(r"<b>\1</b>", text)
 
 
 def _is_html_balanced(text: str) -> bool:
@@ -176,7 +190,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
     # docs/guardrails-plan.md for the incident this design responds to.
     if guardrails.fails_local_prefilter(user_text):
-        await update.message.reply_text(guardrails.REDIRECT_MESSAGE)
+        await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
         return
 
     guard_model = context.bot_data["guard_model"]
@@ -187,7 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # it which layer-2 instructions/tool to reach for in the same pass.
     classification = await asyncio.to_thread(guardrails.classify_message, guard_model, user_text)
     if not classification.on_topic:
-        await update.message.reply_text(guardrails.REDIRECT_MESSAGE)
+        await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
         return
 
     chat_id = update.effective_chat.id
@@ -210,14 +224,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"Something went wrong: {exc}")
         return
 
-    final_content = result_messages[-1].content
+    final_content = _normalize_markdown_bold(result_messages[-1].content)
 
     # Guardrail layer 4: re-checks the agent's actual output before it's
     # sent -- the layer that catches drift layers 1-3 missed, since the
     # failure is only visible in what the model wrote, not the input.
     output_on_topic = await asyncio.to_thread(guardrails.is_output_on_topic, guard_model, final_content)
     if not output_on_topic:
-        await update.message.reply_text(guardrails.REDIRECT_MESSAGE)
+        await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
         return
 
     # Only persisted once accepted -- a rejected exchange doesn't pollute

@@ -95,17 +95,25 @@ _NEWS_QUERY_INSTRUCTIONS = (
     "returned a link for — never invent a URL."
 )
 
+_PLAIN_REPLY_FORMATTING_NOTE = (
+    "Your reply is sent with Telegram HTML parsing, not Markdown. Plain "
+    "text needs no tags at all — prefer that. If you do want emphasis, "
+    "use <b>bold</b>/<i>italic</i> only; never use Markdown syntax like "
+    "**bold** or _italic_ — Telegram will not render it and it will show "
+    "up as literal asterisks/underscores to the user."
+)
+
 _SET_INTEREST_INSTRUCTIONS = (
     "This turn: the user wants to add a topic to their stated interests. "
     "Use the update_interests tool with action=\"add\", then confirm "
-    "conversationally what was added in one or two sentences — plain text "
-    "is fine, no need for the full Telegram report structure."
+    "conversationally what was added in one or two sentences — no need for "
+    "the full Telegram report structure.\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
 )
 
 _REMOVE_INTEREST_INSTRUCTIONS = (
     "This turn: the user wants to remove a topic from their stated "
     "interests. Use the update_interests tool with action=\"remove\", then "
-    "confirm conversationally in one or two sentences."
+    "confirm conversationally in one or two sentences.\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
 )
 
 _START_PUSH_INSTRUCTIONS = (
@@ -113,12 +121,13 @@ _START_PUSH_INSTRUCTIONS = (
     "set_push_enabled tool with enabled=true, then confirm conversationally. "
     "Be honest that the scheduled sending itself isn't built yet if it "
     "comes up — this only saves the preference, don't imply pushes will "
-    "start immediately."
+    "start immediately.\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
 )
 
 _STOP_PUSH_INSTRUCTIONS = (
     "This turn: the user wants to turn off periodic news push. Use the "
     "set_push_enabled tool with enabled=false, then confirm conversationally."
+    "\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
 )
 
 _LAYER2_BY_CATEGORY = {
