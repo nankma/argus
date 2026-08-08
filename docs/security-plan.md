@@ -156,6 +156,62 @@ industry, relevant if this project ever needs them:
   real vault is in place — rotation is far easier to bolt on early than
   retrofit later.
 
+**What "automatic" actually means for third-party-issued credentials.**
+No cloud vault (OCI Vault, Azure Key Vault, AWS Secrets Manager, GCP
+Secret Manager) can auto-generate a new DeepSeek API key or a new
+Telegram bot token — that requires the *issuing provider* to expose a
+credential-creation API, and neither does (confirmed by checking their
+docs):
+
+- **DeepSeek** — key management is web-console-only
+  (platform.deepseek.com/api_keys); no REST endpoint to create/rotate
+  keys programmatically. **But it does support multiple simultaneously-
+  valid keys per account** — creating a new one doesn't invalidate
+  existing ones; revocation is a separate, explicit step. This makes a
+  **zero-downtime rotation possible**: create the new key → point the
+  service at it → confirm it actually works (a real message round-trip,
+  not just "no error") → only then revoke the old key. No window where
+  the server holds a key the provider no longer accepts.
+- **Telegram bot tokens (`TELEGRAM_BOT_TOKEN`, `ADMIN_BOT_TOKEN`)** — only
+  regenerable via BotFather's `/token` or `/revoke` commands, no
+  programmatic API either. Unlike DeepSeek, **this is a hard cutover with
+  no overlap window** — the instant a new token is issued, the old one
+  stops working. There's no way to "verify the new one works before the
+  old one dies" the way DeepSeek allows.
+  - This is where the scenario in the question — "the server still holds
+    the old key but the provider only accepts the new one" — genuinely
+    happens for these two secrets specifically, for however long it takes
+    to push the new token into the running bot process.
+  - **Why it's low-stakes for this project anyway**: `bot.py`/`admin_bot.py`
+    use polling, not webhooks. Telegram queues undelivered updates
+    server-side for any bot that isn't currently polling — confirmed
+    directly in this project when the local bot process died
+    unexpectedly and a friend's `/start`/`Hello` messages sat queued,
+    intact, until polling resumed (see the access-control testing
+    session). A rotation gap of a few seconds to a couple of minutes
+    means delayed replies, not lost messages or failed deliveries — a
+    webhook-based bot wouldn't have this safety net, since a delivery
+    attempt during the gap would just fail.
+  - Practical procedure: stage the new deployment/config first (image
+    built, container ready to go with everything except the token) →
+    trigger `/token` on BotFather → immediately update the vault value
+    and restart the bot process → confirm it's polling again. Minimize
+    the gap; don't eliminate it, because Telegram doesn't allow that.
+
+**Automating the distribution half, even though generation stays manual.**
+Once `docs/deployment-plan.md` item 2's Kubernetes manifests exist, the
+standard pattern is **External Secrets Operator** (syncs a vault's current
+value into a native Kubernetes `Secret`) paired with a tool like
+**Reloader** (watches for `Secret` changes and automatically triggers a
+rolling restart of the affected `Deployment`). That closes the loop on the
+part that *can* be automated: a human still creates the new DeepSeek key
+or Telegram token, but from the moment it's written into the vault, the
+running service picks it up and restarts itself with no manual `docker
+restart`/redeploy step. Kubernetes rolling updates also naturally keep old
+pods serving traffic until new pods report healthy, which is exactly the
+overlap DeepSeek's multi-key support allows for and Telegram's hard
+cutover doesn't.
+
 ### 3. No rate limiting on approved users
 
 Once approved, a user (including a well-meaning friend, or an approved
