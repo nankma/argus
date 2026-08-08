@@ -159,36 +159,91 @@ fine since it's a single-purpose ops VM, not part of the main project's
 container — one less moving part (no Docker daemon overhead) on an
 already memory-constrained free-tier VM.
 
-**Runs on-demand, not always-on.** The systemd unit is deliberately
-`disabled` (won't start on boot) — start it only when actively debugging
-an agent issue (`sudo systemctl start phoenix`), stop it when done
-(`sudo systemctl stop phoenix`). Reduces both cost/resource exposure and
-the OOM-under-load risk to zero when not in active use.
+**Runs always-on, not on-demand — a deliberate change from the original
+plan.** Initially the systemd unit was left `disabled` (start only when
+debugging) specifically to cap resource/OOM exposure. At the user's
+request this was flipped to `systemctl enable --now phoenix` (starts on
+boot, `Restart=on-failure` keeps it up) — explicitly to "push the limit
+and see what we actually need" now that the bot is also wired to send
+real traffic. Revisit if memory pressure (see the community reports
+above) becomes a real problem on this VM specifically, not just a
+theoretical one.
 
-**Secured two ways, not just one:**
+**Secured multiple ways:**
 1. Phoenix's native auth is enabled (`PHOENIX_ENABLE_AUTH=true`,
    `PHOENIX_SECRET` set to a random 64-char value) — **critically, also
    overrides `PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD`**, since Phoenix's
    default admin login is the well-known `admin`/`admin` and enabling
    auth alone does *not* change that default — a real gotcha caught by
-   reading Phoenix's own source (`phoenix.auth.DEFAULT_ADMIN_PASSWORD`),
-   not documented prominently.
+   reading Phoenix's own source (`phoenix.auth.DEFAULT_ADMIN_PASSWORD`).
 2. Port 6006 (web UI) and 4317 (OTLP) are **not opened in the OCI
-   security list at all** — confirmed by testing from an external
-   network that the port is unreachable. Access is via SSH tunnel only
-   (`ssh -i <key> -L 6006:localhost:6006 ubuntu@<phoenix-vm-ip>`, then
-   browse `localhost:6006`) — so even a hypothetical auth bypass still
-   requires SSH key access to reach the port at all. The systemd unit
-   file itself is also locked to `600`/root-owned, since it holds
-   `PHOENIX_SECRET` and the admin password in plaintext.
+   security list to the public internet** — confirmed by testing from an
+   external network that the port is unreachable. Human web UI access is
+   via SSH tunnel only (`ssh -i <key> -L 6006:localhost:6006
+   ubuntu@<phoenix-vm-ip>`, then browse `localhost:6006`) — so even a
+   hypothetical auth bypass still requires SSH key access to reach the
+   port at all. The systemd unit file itself is also locked to
+   `600`/root-owned, since it holds `PHOENIX_SECRET` and the admin
+   password in plaintext.
+3. Port 4317 (OTLP only, not 6006) **is** opened, but only to the VCN's
+   private subnet (`10.0.0.0/24`), not the public internet — so the bot
+   VM can push traces without the endpoint being internet-reachable. Two
+   layers had to be opened for this, not just one: the OCI-level Security
+   List (console), **and** the VM's own local `iptables` rules — Oracle's
+   Ubuntu images ship a host-level firewall (`REJECT ... 
+   icmp-host-prohibited` catch-all, allowing only SSH by default)
+   independent of the cloud-level security list. Missing the second layer
+   produced a confusing `No route to host` rather than a timeout, which is
+   what actually revealed it was two separate firewalls, not one. Rule
+   added via `iptables -I INPUT <pos> -p tcp -s 10.0.0.0/24 --dport 4317 -j
+   ACCEPT` and persisted with `netfilter-persistent save`.
+4. **Login uses an email address, not the username** — the default admin
+   account's login identifier is `admin@localhost`, not `admin`; typing
+   just `admin` into the login form's email field fails. Not obvious from
+   the UI copy.
 
-**Not yet done**: the bot container isn't pointed at this Phoenix
-instance yet (`PHOENIX_ENABLED`/`PHOENIX_ENDPOINT` aren't set on
-`myfirstagent-bot`). Given Phoenix is only running some of the time,
-worth confirming OpenTelemetry's exporter behaves as expected (fails
-silently/retries in the background rather than blocking or crashing the
-bot) when the endpoint is unreachable, before turning this on for the
-live bot — not yet verified for this specific setup.
+**Bot is now wired to Phoenix and verified end-to-end.** `myfirstagent-bot`
+runs with `PHOENIX_ENABLED=true` and `PHOENIX_ENDPOINT=http://10.0.0.234:4317`
+(Phoenix's private IP — not the public one, per the security-list setup
+above). One thing that wasn't obvious going in: **`PHOENIX_ENABLE_AUTH`
+blocks the OTLP trace-ingestion endpoint too, not just the human web UI**
+— the bot ran with no errors for a while but zero traces actually landed
+in Phoenix, because unauthenticated OTLP pushes were being silently
+rejected. Fixed by creating a **Phoenix System API Key** (via the
+`createSystemApiKey` GraphQL mutation — no REST/UI shortcut for this
+found) and setting `PHOENIX_API_KEY` — `phoenix.otel.register()` picks
+this up automatically from the environment if not passed explicitly, so
+no `agent.py` code change was needed. The key itself is stored as another
+OCI Vault secret (`phoenix-api-key`) and fetched by
+`docker-entrypoint.sh` exactly like the other four — see finding 2 in
+`docs/security-plan.md`. Verified for real: a live message through the
+bot produced a full LangGraph trace (tool calls, token usage, model name)
+visible in Phoenix's `myfirstagent` project.
+
+**How to query Phoenix without the human admin login.** The same System
+API Key works as a bare `Authorization: Bearer <key>` header for read
+queries too (`/v1/projects`, `/v1/projects/<id>/spans`, etc.), not just
+for writing traces — confirmed by querying project/span data with it
+directly, no session cookie or admin password involved. This means
+diagnosing an issue later (in this session or a future one) doesn't need
+the human admin's password at all: SSH to the bot VM (already has
+Instance Principal access to the vault), fetch `phoenix-api-key` the same
+way `docker-entrypoint.sh` does, then `curl` Phoenix's API through the
+same SSH-tunnel-or-VCN-internal path. No local environment setup needed
+on the dev machine for this.
+
+**Incident alerting — `telemetry_monitor.py`.** Since OpenTelemetry
+doesn't raise export failures into application code (by design — a
+telemetry outage shouldn't crash the app), a silent Phoenix outage would
+otherwise go unnoticed. `combined_bot.py` runs a periodic (default 300s)
+TCP reachability check against Phoenix's OTLP host:port, edge-triggered
+(alerts only on state *change* — down→up or up→down — not every check,
+so an ongoing outage doesn't spam the admin every interval) via
+`admin_bot.py`'s token. Only starts when `PHOENIX_ENABLED` is set, so it's
+a no-op for local dev/tests. **Verified for real, both directions**:
+stopped Phoenix, confirmed the "unreachable" alert arrived in
+`@mnkInfoAdmin_bot` at the next check; restarted it, confirmed the
+"reachable again" alert arrived at the following check.
 
 ## The Dockerfile
 

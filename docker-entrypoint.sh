@@ -40,5 +40,8 @@ fi
 if [ -n "$ADMIN_CHAT_ID_SECRET_OCID" ]; then
     export ADMIN_CHAT_ID="$(fetch_secret "$ADMIN_CHAT_ID_SECRET_OCID")"
 fi
+if [ -n "$PHOENIX_API_KEY_SECRET_OCID" ]; then
+    export PHOENIX_API_KEY="$(fetch_secret "$PHOENIX_API_KEY_SECRET_OCID")"
+fi
 
 exec "$@"

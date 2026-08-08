@@ -14,23 +14,36 @@ bot.py and admin_bot.py keep their own standalone main()s too -- this file
 only adds a combined option, reusing their handler functions and bot_data
 wiring unchanged.
 
+Also runs telemetry_monitor.py's Phoenix health-check loop alongside the
+two bots (only when PHOENIX_ENABLED is set) -- alerts the admin via
+admin_bot.py's token if Phoenix's OTLP endpoint (PHOENIX_ENDPOINT, from
+agent.py) goes unreachable or recovers, since a telemetry outage is
+otherwise silent (OpenTelemetry doesn't raise export failures into
+application code by design).
+
 Run:
     conda activate myfirstagent
     export DEEPSEEK_API_KEY=<your-deepseek-key>
     export TELEGRAM_BOT_TOKEN=<info-bot-token>
     export ADMIN_BOT_TOKEN=<admin-bot-token>
     export ADMIN_CHAT_ID=<your-telegram-numeric-user-id>
+    export PHOENIX_ENABLED=true          # optional
+    export PHOENIX_ENDPOINT=http://<phoenix-host>:4317   # optional
     python combined_bot.py
 """
 
 import asyncio
+import contextlib
 import os
 import signal
+from urllib.parse import urlparse
 from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
 from langchain_deepseek import ChatDeepSeek
+import agent as agent_module
 from agent import MODEL, build_agent, run_agent, setup_telemetry
 import bot as info_bot
 import admin_bot
+import telemetry_monitor
 import users_db
 
 
@@ -52,12 +65,32 @@ def build_admin_app(admin_chat_id: int, info_bot_token: str) -> Application:
     return app
 
 
-async def run_both(info_app: Application, admin_app: Application) -> None:
+def _start_telemetry_monitor(admin_bot_token: str, admin_chat_id: int) -> asyncio.Task | None:
+    """Starts the Phoenix health-check/alert loop (telemetry_monitor.py) only
+    when telemetry is actually enabled -- pointless (and noisy, since
+    PHOENIX_ENDPOINT defaults to localhost) otherwise, e.g. in local dev
+    without PHOENIX_ENABLED set."""
+    if not os.environ.get("PHOENIX_ENABLED"):
+        return None
+    parsed = urlparse(agent_module.PHOENIX_ENDPOINT)
+    if not parsed.hostname:
+        return None
+    port = parsed.port or 4317
+    return asyncio.create_task(
+        telemetry_monitor.monitor_telemetry_health(admin_bot_token, admin_chat_id, parsed.hostname, port)
+    )
+
+
+async def run_both(
+    info_app: Application, admin_app: Application, admin_bot_token: str, admin_chat_id: int
+) -> None:
     async with info_app, admin_app:
         await info_app.start()
         await info_app.updater.start_polling()
         await admin_app.start()
         await admin_app.updater.start_polling()
+
+        monitor_task = _start_telemetry_monitor(admin_bot_token, admin_chat_id)
 
         print("Both bots ready (polling). Ctrl+C to stop.")
         stop_event = asyncio.Event()
@@ -73,6 +106,10 @@ async def run_both(info_app: Application, admin_app: Application) -> None:
         except KeyboardInterrupt:
             pass
         finally:
+            if monitor_task:
+                monitor_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await monitor_task
             await admin_app.updater.stop()
             await admin_app.stop()
             await info_app.updater.stop()
@@ -92,7 +129,7 @@ def main():
     info_app = build_info_app(agent, admin_chat_id, admin_bot_token)
     admin_app = build_admin_app(admin_chat_id, info_bot_token)
 
-    asyncio.run(run_both(info_app, admin_app))
+    asyncio.run(run_both(info_app, admin_app, admin_bot_token, admin_chat_id))
 
 
 if __name__ == "__main__":
