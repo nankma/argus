@@ -139,6 +139,26 @@ docker run -d --name myfirstagent-bot --restart unless-stopped `
 
 `Dockerfile` uses `mambaorg/micromamba` and installs straight from `environment.yml` — same dependency source as local dev and CI, no separate pip requirements file. `CMD` runs `combined_bot.py` by default (both bots, one process/container — see above); override the command (`docker run ... myfirstagent-bot python bot.py`) to run either bot standalone in its own container instead. Image is ~900MB — a deliberate tradeoff for conda-forge consistency over a smaller `pip`+slim image; see `docs/deployment-plan.md` if that needs revisiting. `PHOENIX_ENDPOINT` is configurable via env var for this reason — `localhost` only resolves correctly for local dev, not once Phoenix runs as a separate container/service.
 - Verified end-to-end against the real Telegram API, not just "the code runs": confirmed the token via `getMe`, then had a human message the live bot and confirmed a real reply came back.
+
+### Deploying to the live Oracle VM
+
+The above `docker build`/`docker run` is for local testing. The actual
+deployment target is a real Oracle Cloud VM (see `docs/deployment-plan.md`
+for the full setup). **Always build the image locally and transfer it —
+never run `docker build` on the VM itself** — see the
+`build-locally-deploy-remotely` skill for why (the VM is a tiny free-tier
+shape; building there is slow and was once left in a corrupted state by
+an unrelated interrupted SSH session):
+
+```bash
+docker build -t myfirstagent-bot .
+docker save myfirstagent-bot:latest | ssh -i "<path-to-key>" ubuntu@<vm-ip> "sudo docker load"
+```
+
+Then on the VM, stop/remove the old container and `docker run` the new
+image with the same flags as before. Secrets are fetched from OCI Vault
+at container startup rather than passed as plain env vars — see
+`docker-entrypoint.sh` and `docs/security-plan.md` finding 2 for how.
 - Four further requested features (translation, DB-backed per-user preferences, per-user search-source selection, proactive push) are planned but not built — see `docs/bot-features-plan.md`. Access control (the fifth, and the urgent one) is done — see **Access control** above.
 
 ## Testing

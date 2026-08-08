@@ -199,3 +199,31 @@ that scheme inside it).
   The existing `.github/workflows/ci.yml` doesn't build/push the Docker
   image yet — that's the natural next CI addition once a registry/target
   is decided.
+- **CD (continuous deployment) — open question, not decided, revisit
+  later.** Deployment today is entirely manual: build locally, `docker
+  save | ssh ... docker load` onto the VM (see the
+  `build-locally-deploy-remotely` skill), stop/restart the container by
+  hand. Turning this into an automated pipeline (push to `main` →
+  auto-deploy) raises questions not yet worked through:
+  - **How does GitHub Actions reach the VM?** The VM has no public
+    container registry pull set up — CI would need either (a) SSH access
+    from the Actions runner (a private key stored as a GitHub Secret,
+    itself a sensitive credential to manage carefully), or (b) push the
+    built image to a registry (Docker Hub, or OCI's own Container
+    Registry — OCIR) and have something on the VM pull from there instead
+    of `docker load` over SSH.
+  - **What triggers a deploy vs. just running tests?** Presumably a push
+    to `main` after CI passes, but that also means every merge
+    auto-deploys to the only environment that exists (no
+    staging/production split) — worth deciding if that's actually wanted
+    for a personal project, or if manual deploys are fine indefinitely
+    given how infrequently this changes.
+  - **Does the VM's tiny CPU matter here too?** If CD pulls a pre-built
+    image (option (b) above) this is moot; if it triggers a build on the
+    VM itself, this repeats the exact slowness problem the
+    `build-locally-deploy-remotely` skill exists to avoid.
+  - **Rollback** — if a bad deploy goes out automatically, what's the
+    process to revert? Not designed at all yet.
+  Not blocking anything today — manual deployment works fine at this
+  project's current pace of changes. Come back to this if deploys start
+  happening often enough that the manual steps become the bottleneck.

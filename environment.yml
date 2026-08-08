@@ -12,3 +12,4 @@ dependencies:
   - arize-phoenix-otel
   - openinference-instrumentation-langchain
   - python-telegram-bot
+  - oci-cli
