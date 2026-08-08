@@ -8,17 +8,17 @@ from "local only" to "actually on the internet" changes anything.
 
 ## Bottom line
 
-No critical, actively-exploitable vulnerability found. The two real gaps
-are **secrets stored in plaintext** (findings 1-2) and **no rate limiting**
-(finding 3) — both worth fixing now that this is genuinely live rather than
-a local test, but neither is an active exploit today.
+No critical, actively-exploitable vulnerability found. **Secrets in
+plaintext (finding 2) is now resolved** — OCI Vault + Instance Principals,
+implemented and verified live. The remaining real gap is **no rate
+limiting** (finding 3) — worth fixing, not an active exploit today.
 
 ## Status
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
 | 1 | Historically-leaked DeepSeek key still in git history | Resolved | Confirmed current key is a different value (see below) — no action needed beyond awareness |
-| 2 | Secrets stored in plaintext, readable via `docker inspect` | Medium | Not started — needs a decision before K8s manifests |
+| 2 | Secrets stored in plaintext, readable via `docker inspect` | Resolved | **Done and verified live** — OCI Vault + Instance Principals, see below |
 | 3 | No rate limiting on approved users | Medium | Not started |
 | 4 | Unapproved strangers can spam admin notifications | Low | Not started — cheap to fix, low urgency |
 | 5 | LLM prompt-injection surface via external content (`search_news`) | Low (currently) | Monitor — re-assess whenever new tools are added |
@@ -121,6 +121,43 @@ within Always Free:
   reported occasional instance-principal detection friction — less
   turnkey than Azure MSI in a few integrations, though the core mechanism
   works as described.
+
+**Implemented and verified live.** The design above is what got built:
+
+- Vault `myfirstagent-vault` with a software-protected Master Encryption
+  Key, and four Secrets (`deepseek-api-key`, `telegram-bot-token`,
+  `admin-bot-token`, `admin-chat-id`) holding the real values.
+- Dynamic Group matching this specific instance by OCID (`instance.id =
+  '<ocid>'`, fetched from the VM's own metadata service rather than typed
+  by hand — least-privilege, one exact instance, not a whole compartment
+  — per finding 15) plus an IAM policy granting it `read secret-family`.
+- `docker-entrypoint.sh` (see `Dockerfile`) fetches all four via `oci
+  secrets secret-bundle get --auth instance_principal` at container
+  startup and exports them as env vars before `exec`-ing
+  `combined_bot.py` — the container itself never receives the real
+  secret values via `docker run -e` anymore, only the four `*_SECRET_OCID`
+  values (not sensitive — resource identifiers, same as any other OCID in
+  this project's docs).
+- **Verified end-to-end for real**: a live Telegram message round-trip
+  through the container running with only `*_SECRET_OCID` env vars set,
+  no plaintext secrets anywhere in `docker inspect`'s output.
+- **Real bug hit and fixed along the way**: the first IAM policy attempt
+  failed every request with `NotAuthorizedOrNotFound`, despite Instance
+  Principal auth itself succeeding (a real API response came back, not an
+  auth-token failure) — caused by the policy statement referencing a
+  Dynamic Group name (`myfirstagent-dg`, from the initial suggested
+  naming) that didn't match the group's *actual* name (the console's
+  auto-generated `dg-mnk-...`, which is what actually got created).
+  Fixed by editing the policy statement to reference the real group name.
+  Worth remembering: OCI accepts a policy statement referencing a
+  nonexistent dynamic-group name without any validation error at
+  creation time — it just silently never matches anything, so this class
+  of typo doesn't fail loudly until someone actually queries a secret and
+  hits `NotAuthorizedOrNotFound`.
+- Local/Docker Desktop testing is unaffected — `docker-entrypoint.sh`
+  only fetches from Vault when a `*_SECRET_OCID` var is set, otherwise it
+  falls through to whatever plain env vars were passed directly (which is
+  what local testing still does).
 
 ## Is cloud-vault + workload identity the industry standard?
 
@@ -353,25 +390,17 @@ Manager, etc.) logs every secret read via the platform's audit service by
 default. Not something to build separately — just confirm it's turned on
 when finding 2 is implemented.
 
-## Recommendation on cloud deployment timing
+## Remaining work
 
-None of the above blocks moving forward on `docs/deployment-plan.md` item
-3 (choosing a cloud provider) — nothing here is an active, exploitable
-hole. Suggested order:
+Cloud provider is chosen, the bot is live, and secrets management
+(finding 2, the item this whole review was originally gating) is done and
+verified. What's left, roughly in order of value for the effort:
 
-1. Decide secrets management (finding 2) **as part of** the cloud
-   provider decision, since the right answer depends on which provider
-   (native secret manager availability differs) — don't pick a provider
-   first and retrofit this after. If Oracle: OCI Vault + Instance
-   Principals + Dynamic Groups, scoped per finding 15, with finding 16's
-   audit logging coming along for free.
-2. When provisioning the actual VM/host, apply finding 14's OS hardening
-   checklist at that time — easy to forget once the excitement is "it's
-   running," so treat it as part of the provisioning step, not an
-   afterthought.
-3. Add rate limiting (finding 3), CI vulnerability/secrets scanning
-   (findings 7-8), and a `subscribers.db` backup (finding 13) before or
-   shortly after the first real cloud deployment — all cheap, and cheaper
-   to do before more users are approved.
+1. Rate limiting (finding 3) and a `subscribers.db` backup (finding 13) —
+   both cheap, worth doing before approving more users.
+2. CI vulnerability/secrets scanning (findings 7-8).
+3. Remaining OS hardening on the live VM (finding 14: SSH source-IP
+   restriction, a patch cadence) — not urgent for a single-user box.
+4. Everything else (findings 4, 6, 9) whenever convenient.
 4. Everything else (findings 4, 6, 9) can happen whenever convenient —
    none are urgent.

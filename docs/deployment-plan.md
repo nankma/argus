@@ -13,7 +13,7 @@ starts, same pattern as `docs/telemetry-and-testing-plan.md`.
 | 2 | Kubernetes manifests (Deployment, Service, Secret, etc.) | Not started |
 | 3 | Cloud provider / hosting target | **Decided and live: Oracle Cloud Always Free** — see below |
 | 4 | Refactor `main()` from interactive CLI to a headless service | Done — Telegram bot, polling mode |
-| 5 | Security review + hardening | Reviewed — see `docs/security-plan.md`. Secrets still plaintext env vars (finding 2) — OCI Vault integration not built yet |
+| 5 | Security review + hardening | Reviewed — see `docs/security-plan.md`. Secrets management (finding 2) done: OCI Vault + Instance Principals, live and verified |
 
 ## Live deployment: Oracle Cloud Always Free
 
@@ -184,15 +184,15 @@ that scheme inside it).
   sub-question — OCI's managed option is OKE (Oracle Kubernetes Engine);
   not decided whether that's worth it at this scale vs. staying on plain
   Docker on the VM.
-- **Secrets management** — `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`,
-  `ADMIN_CHAT_ID`, `ADMIN_BOT_TOKEN` (and any telemetry credentials)
-  currently come from a local env var / `docker run -e` **on the live VM**
-  now too, confirmed readable in plaintext via `docker inspect` by anyone
-  with Docker daemon access on the host — see `docs/security-plan.md`
-  finding 2. Oracle's answer is OCI Vault + Instance Principals + Dynamic
-  Groups (researched and documented in that finding, Always-Free-eligible)
-  — not implemented yet. This is the top remaining item now that the
-  provider is chosen and the bot is actually live.
+- ~~**Secrets management** — not implemented~~ **Done.** `DEEPSEEK_API_KEY`,
+  `TELEGRAM_BOT_TOKEN`, `ADMIN_BOT_TOKEN`, `ADMIN_CHAT_ID` are fetched from
+  OCI Vault via Instance Principal auth at container startup
+  (`docker-entrypoint.sh`) — the container only ever receives
+  `*_SECRET_OCID` values now, no plaintext secrets in `docker run -e` or
+  `docker inspect`. See `docs/security-plan.md` finding 2 for the full
+  setup and a real policy-naming bug hit and fixed along the way. Telemetry
+  credentials aren't in Vault yet since Phoenix isn't deployed to the cloud
+  yet — revisit when it is.
 - **CI/CD overlap** — `docs/telemetry-and-testing-plan.md` item 4 (test
   CI) and this deployment work are related but distinct: one runs `pytest`
   on every push, the other builds/pushes a container image and deploys it.
