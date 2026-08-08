@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from telegram.error import BadRequest
 
 import bot
+import guardrails
 import users_db
 from bot import TELEGRAM_MESSAGE_LIMIT, _is_html_balanced, _strip_html_tags, split_for_telegram
 
@@ -81,12 +82,16 @@ def _make_context(admin_chat_id=999):
     return context
 
 
-def _bypass_guardrails(monkeypatch):
+def _bypass_guardrails(monkeypatch, category="news_query"):
     """Used by tests that aren't about guardrail behavior itself (message
     formatting, the BadRequest fallback, etc.) so those stay focused on
     what they're actually testing."""
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
-    monkeypatch.setattr(bot.guardrails, "is_input_on_topic", MagicMock(return_value=True))
+    monkeypatch.setattr(
+        bot.guardrails,
+        "classify_message",
+        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category=category)),
+    )
     monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=True))
 
 
@@ -183,9 +188,13 @@ def test_handle_message_blocked_by_local_prefilter(isolated_subscribers_db, monk
     update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE)
 
 
-def test_handle_message_blocked_by_input_classifier(isolated_subscribers_db, monkeypatch):
+def test_handle_message_blocked_by_router_off_topic(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
-    monkeypatch.setattr(bot.guardrails, "is_input_on_topic", MagicMock(return_value=False))
+    monkeypatch.setattr(
+        bot.guardrails,
+        "classify_message",
+        MagicMock(return_value=guardrails.MessageClassification(on_topic=False, category="off_topic")),
+    )
     run_agent_mock = MagicMock()
     monkeypatch.setattr(bot, "run_agent", run_agent_mock)
     update = _make_update(chat_id=999, text="How do I use Claude Code sessions?")
@@ -198,9 +207,34 @@ def test_handle_message_blocked_by_input_classifier(isolated_subscribers_db, mon
     update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE)
 
 
+def test_handle_message_passes_chat_id_and_category_to_run_agent(isolated_subscribers_db, monkeypatch):
+    monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
+    monkeypatch.setattr(
+        bot.guardrails,
+        "classify_message",
+        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category="set_interest")),
+    )
+    monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=True))
+    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="Added it.")])
+    monkeypatch.setattr(bot, "run_agent", run_agent_mock)
+    update = _make_update(chat_id=999, text="Add robotics to my interests")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+
+    asyncio.run(bot.handle_message(update, context))
+
+    run_agent_mock.assert_called_once()
+    _, kwargs = run_agent_mock.call_args
+    assert kwargs["context"] == {"chat_id": 999, "category": "set_interest"}
+
+
 def test_handle_message_blocked_by_output_classifier(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
-    monkeypatch.setattr(bot.guardrails, "is_input_on_topic", MagicMock(return_value=True))
+    monkeypatch.setattr(
+        bot.guardrails,
+        "classify_message",
+        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category="news_query")),
+    )
     monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=False))
     monkeypatch.setattr(
         bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="off-topic drift content")])
@@ -272,7 +306,11 @@ def test_handle_interests_command_requires_access(isolated_subscribers_db, monke
     assert users_db.get_interests(555) == []  # never set, the request was blocked
 
 
-def test_handle_message_injects_interests_into_agent_context(isolated_subscribers_db, monkeypatch):
+def test_handle_message_sends_raw_user_text_unmodified(isolated_subscribers_db, monkeypatch):
+    # Interests are no longer prepended onto the message text in bot.py --
+    # they're read fresh from users_db inside agent.py's dynamic-prompt
+    # middleware (layer 3), keyed off the chat_id passed via context. See
+    # test_handle_message_passes_chat_id_and_category_to_run_agent above.
     _bypass_guardrails(monkeypatch)
     users_db.set_interests(999, ["AI", "robotics"])
     update = _make_update(chat_id=999, text="What's new?")
@@ -284,20 +322,4 @@ def test_handle_message_injects_interests_into_agent_context(isolated_subscriber
     asyncio.run(bot.handle_message(update, context))
 
     sent_messages = run_agent_mock.call_args[0][1]  # run_agent(agent, messages)
-    last_user_message = sent_messages[-1]["content"]
-    assert "AI, robotics" in last_user_message
-    assert "What's new?" in last_user_message
-
-
-def test_handle_message_no_interests_note_when_none_set(isolated_subscribers_db, monkeypatch):
-    _bypass_guardrails(monkeypatch)
-    update = _make_update(chat_id=999, text="What's new?")
-    context = _make_context(admin_chat_id=999)
-    context.bot_data["agent"] = "fake-agent"
-    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="<b>Report</b>")])
-    monkeypatch.setattr(bot, "run_agent", run_agent_mock)
-
-    asyncio.run(bot.handle_message(update, context))
-
-    sent_messages = run_agent_mock.call_args[0][1]
     assert sent_messages[-1]["content"] == "What's new?"

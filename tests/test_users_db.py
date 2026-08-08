@@ -83,3 +83,57 @@ def test_init_db_migrates_schema_missing_interests_column(isolated_subscribers_d
     users_db.request_access(9, "henry", "Henry")
     users_db.set_interests(9, ["AI"])
     assert users_db.get_interests(9) == ["AI"]
+
+
+def test_add_interest_appends(isolated_subscribers_db):
+    users_db.request_access(10, "iris", "Iris")
+    users_db.set_interests(10, ["AI"])
+    result = users_db.add_interest(10, "robotics")
+    assert result == ["AI", "robotics"]
+    assert users_db.get_interests(10) == ["AI", "robotics"]
+
+
+def test_add_interest_is_idempotent_case_insensitive(isolated_subscribers_db):
+    users_db.request_access(11, "jack", "Jack")
+    users_db.set_interests(11, ["AI"])
+    result = users_db.add_interest(11, "ai")  # different case, same topic
+    assert result == ["AI"]  # not duplicated
+
+
+def test_add_interest_creates_row_when_none_exists(isolated_subscribers_db):
+    result = users_db.add_interest(999, "semiconductors")
+    assert result == ["semiconductors"]
+    assert users_db.get_status(999) == users_db.APPROVED
+
+
+def test_remove_interest(isolated_subscribers_db):
+    users_db.request_access(12, "kate", "Kate")
+    users_db.set_interests(12, ["AI", "robotics"])
+    result = users_db.remove_interest(12, "AI")
+    assert result == ["robotics"]
+    assert users_db.get_interests(12) == ["robotics"]
+
+
+def test_remove_interest_not_present_is_a_noop(isolated_subscribers_db):
+    users_db.request_access(13, "liam", "Liam")
+    users_db.set_interests(13, ["AI"])
+    result = users_db.remove_interest(13, "robotics")
+    assert result == ["AI"]
+
+
+def test_get_push_enabled_defaults_false(isolated_subscribers_db):
+    assert users_db.get_push_enabled(14) is False
+
+
+def test_set_and_get_push_enabled(isolated_subscribers_db):
+    users_db.request_access(15, "mia", "Mia")
+    users_db.set_push_enabled(15, True)
+    assert users_db.get_push_enabled(15) is True
+    users_db.set_push_enabled(15, False)
+    assert users_db.get_push_enabled(15) is False
+
+
+def test_set_push_enabled_upserts_when_no_existing_row(isolated_subscribers_db):
+    users_db.set_push_enabled(999, True)
+    assert users_db.get_push_enabled(999) is True
+    assert users_db.get_status(999) == users_db.APPROVED

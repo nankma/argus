@@ -181,30 +181,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     guard_model = context.bot_data["guard_model"]
 
-    # Guardrail layer 2: cheap classifier call gating the expensive
-    # multi-turn agent call -- skips it entirely for off-topic requests.
-    input_on_topic = await asyncio.to_thread(guardrails.is_input_on_topic, guard_model, user_text)
-    if not input_on_topic:
+    # Guardrail layer 2 -- now the router (docs/context-management-plan.md):
+    # one structured-output call answers both "is this on-topic" and "what
+    # kind of request is this", gating the expensive agent call and telling
+    # it which layer-2 instructions/tool to reach for in the same pass.
+    classification = await asyncio.to_thread(guardrails.classify_message, guard_model, user_text)
+    if not classification.on_topic:
         await update.message.reply_text(guardrails.REDIRECT_MESSAGE)
         return
 
     chat_id = update.effective_chat.id
     history = chat_histories.get(chat_id, [])
+    working_messages = history + [{"role": "user", "content": user_text}]
 
-    # Layers 1/2 above judged the user's actual raw question. Only the
-    # agent-facing copy (and thus what's stored in history for future
-    # turns) gets the interests note prepended -- see
-    # docs/bot-features-plan.md for the per-user interests design.
-    interests = users_db.get_interests(chat_id)
-    if interests:
-        agent_facing_text = f"[User's stated interests: {', '.join(interests)}]\n\n{user_text}"
-    else:
-        agent_facing_text = user_text
-    working_messages = history + [{"role": "user", "content": agent_facing_text}]
-
+    # chat_id and category feed agent.py's dynamic-prompt middleware
+    # (layers 2/3) and the update_interests/set_push_enabled tools (which
+    # need to know *which* user's row to write) -- see
+    # docs/context-management-plan.md's router design.
     agent = context.bot_data["agent"]
     try:
-        result_messages = await asyncio.to_thread(run_agent, agent, working_messages)
+        result_messages = await asyncio.to_thread(
+            run_agent,
+            agent,
+            working_messages,
+            context={"chat_id": chat_id, "category": classification.category},
+        )
     except Exception as exc:
         await update.message.reply_text(f"Something went wrong: {exc}")
         return

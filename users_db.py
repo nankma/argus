@@ -54,11 +54,13 @@ def init_db() -> None:
                 status TEXT NOT NULL,
                 requested_at TEXT NOT NULL,
                 decided_at TEXT,
-                interests TEXT
+                interests TEXT,
+                push_enabled INTEGER
             )
             """
         )
         _ensure_column(conn, "interests", "TEXT")
+        _ensure_column(conn, "push_enabled", "INTEGER")
 
 
 def get_status(chat_id: int) -> str | None:
@@ -120,4 +122,43 @@ def set_interests(chat_id: int, interests: list[str]) -> None:
             ON CONFLICT(chat_id) DO UPDATE SET interests = excluded.interests
             """,
             (chat_id, APPROVED, datetime.now().isoformat(), json.dumps(interests)),
+        )
+
+
+def add_interest(chat_id: int, topic: str) -> list[str]:
+    """Adds `topic` if not already present (case-insensitive check, stores
+    the topic as given). Returns the resulting full list."""
+    interests = get_interests(chat_id)
+    if not any(t.lower() == topic.lower() for t in interests):
+        interests.append(topic)
+        set_interests(chat_id, interests)
+    return interests
+
+
+def remove_interest(chat_id: int, topic: str) -> list[str]:
+    """Removes `topic` (case-insensitive match) if present. Returns the
+    resulting full list."""
+    interests = [t for t in get_interests(chat_id) if t.lower() != topic.lower()]
+    set_interests(chat_id, interests)
+    return interests
+
+
+def get_push_enabled(chat_id: int) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT push_enabled FROM subscribers WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return bool(row[0]) if row and row[0] is not None else False
+
+
+def set_push_enabled(chat_id: int, enabled: bool) -> None:
+    """Upserts -- same reasoning as set_interests()."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, status, requested_at, push_enabled)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET push_enabled = excluded.push_enabled
+            """,
+            (chat_id, APPROVED, datetime.now().isoformat(), int(enabled)),
         )
