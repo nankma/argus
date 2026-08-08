@@ -244,11 +244,23 @@ it from the input.
   "is this a legitimate request"; output framing asks "does this text
   stay in scope and avoid self-disclosure" — different enough questions
   that reusing one prompt for both seemed likely to classify worse.
-- Cost/latency impact of the extra DeepSeek call(s) per message — still
-  not measured. Every message now costs at least one extra classification
-  call (layer 2), and on-topic ones cost two (layer 2 + layer 4) on top
-  of the main agent call — worth watching, especially since layer 2 runs
-  on *every* message, not just suspicious-looking ones.
+- Cost/latency impact of the extra DeepSeek call(s) per message — partly
+  answered. **There is no cheaper DeepSeek model to move the classifier
+  calls to** — DeepSeek's current lineup is `deepseek-v4-flash` (cheap)
+  and `deepseek-v4-pro` (expensive: ~50x pricier on cache hits, ~3x on
+  cache misses, per DeepSeek's pricing page), and this project's
+  `deepseek-chat` identifier is already aliased to `v4-flash` — confirmed
+  directly from a real Phoenix trace during this session's testing
+  (`model_name: deepseek-v4-flash`). So layers 2/4 aren't running on a
+  discounted model; they're on the same one as the main agent. The actual
+  savings this design gets isn't a cheaper-model discount — it's that an
+  off-topic message never reaches the main agent's multi-turn tool-calling
+  loop (`search_news` calls, synthesis, etc.) at all, and a single short
+  classification completion is far cheaper than that whole loop even on
+  the same model. A genuine "cheaper model for the gate" would require
+  going back to the deferred local-embedding option (no DeepSeek call at
+  all for the gate) rather than a same-provider model swap — there isn't
+  one available. Actual token/latency numbers still not measured.
 - Whether false positives (a legitimate news question getting redirected)
   are a real problem in practice — not observed in initial live testing
   (a normal question still got a real answer), but that's one data point,
