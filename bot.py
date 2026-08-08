@@ -29,7 +29,7 @@ import re
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from langchain_deepseek import ChatDeepSeek
 from agent import MODEL, build_agent, run_agent, setup_telemetry
 import guardrails
@@ -135,6 +135,38 @@ async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     return False
 
 
+async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/interests -- show current interests. /interests <comma, separated,
+    topics> -- set them. /interests clear -- clear them. Stored per-chat
+    in users_db.py; injected into the agent's context on future messages
+    (see handle_message) so it can prioritize a subscriber's own topics
+    when their question is general -- see docs/bot-features-plan.md."""
+    if not await check_access(update, context):
+        return
+
+    chat_id = update.effective_chat.id
+    text_after_command = update.message.text.partition(" ")[2].strip()
+
+    if not text_after_command:
+        interests = users_db.get_interests(chat_id)
+        if interests:
+            await update.message.reply_text("Your interests: " + ", ".join(interests))
+        else:
+            await update.message.reply_text(
+                "You haven't set any interests yet. Use /interests topic1, topic2 to set them."
+            )
+        return
+
+    if text_after_command.lower() == "clear":
+        users_db.set_interests(chat_id, [])
+        await update.message.reply_text("Interests cleared.")
+        return
+
+    interests = [t.strip() for t in text_after_command.split(",") if t.strip()]
+    users_db.set_interests(chat_id, interests)
+    await update.message.reply_text("Interests updated: " + ", ".join(interests))
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await check_access(update, context):
         return
@@ -158,7 +190,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     chat_id = update.effective_chat.id
     history = chat_histories.get(chat_id, [])
-    working_messages = history + [{"role": "user", "content": user_text}]
+
+    # Layers 1/2 above judged the user's actual raw question. Only the
+    # agent-facing copy (and thus what's stored in history for future
+    # turns) gets the interests note prepended -- see
+    # docs/bot-features-plan.md for the per-user interests design.
+    interests = users_db.get_interests(chat_id)
+    if interests:
+        agent_facing_text = f"[User's stated interests: {', '.join(interests)}]\n\n{user_text}"
+    else:
+        agent_facing_text = user_text
+    working_messages = history + [{"role": "user", "content": agent_facing_text}]
 
     agent = context.bot_data["agent"]
     try:
@@ -211,6 +253,7 @@ def main():
     app.bot_data["guard_model"] = model
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
+    app.add_handler(CommandHandler("interests", handle_interests_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Telegram bot ready (polling). Ctrl+C to stop.")

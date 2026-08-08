@@ -9,6 +9,7 @@ deployment can point both bots at the same file on a shared volume (see
 docs/deployment-plan.md) — same reasoning as agent.py's PHOENIX_ENDPOINT.
 """
 
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -31,6 +32,17 @@ def _connect():
         conn.close()
 
 
+def _ensure_column(conn, column: str, sql_type: str) -> None:
+    """Adds `column` to subscribers if an older schema (from before this
+    column existed) doesn't already have it -- ALTER TABLE ADD COLUMN
+    isn't naturally idempotent like CREATE TABLE IF NOT EXISTS, so check
+    first. A no-op for a freshly-created table, which already has every
+    column from the CREATE TABLE statement below."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(subscribers)")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE subscribers ADD COLUMN {column} {sql_type}")
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(
@@ -41,10 +53,12 @@ def init_db() -> None:
                 first_name TEXT,
                 status TEXT NOT NULL,
                 requested_at TEXT NOT NULL,
-                decided_at TEXT
+                decided_at TEXT,
+                interests TEXT
             )
             """
         )
+        _ensure_column(conn, "interests", "TEXT")
 
 
 def get_status(chat_id: int) -> str | None:
@@ -84,3 +98,26 @@ def list_pending() -> list[tuple]:
             "SELECT chat_id, username, first_name FROM subscribers WHERE status = ?",
             (PENDING,),
         ).fetchall()
+
+
+def get_interests(chat_id: int) -> list[str]:
+    with _connect() as conn:
+        row = conn.execute("SELECT interests FROM subscribers WHERE chat_id = ?", (chat_id,)).fetchone()
+    if not row or not row[0]:
+        return []
+    return json.loads(row[0])
+
+
+def set_interests(chat_id: int, interests: list[str]) -> None:
+    """Upserts -- a chat_id may not have a subscribers row yet (e.g. the
+    admin, who bypasses the approval flow in check_access() entirely and
+    so never goes through request_access())."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, status, requested_at, interests)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET interests = excluded.interests
+            """,
+            (chat_id, APPROVED, datetime.now().isoformat(), json.dumps(interests)),
+        )

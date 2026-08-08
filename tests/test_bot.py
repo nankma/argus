@@ -215,3 +215,89 @@ def test_handle_message_blocked_by_output_classifier(isolated_subscribers_db, mo
     update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE)
     # the rejected exchange must not be persisted into chat history
     assert bot.chat_histories.get(999, []) == history_before
+
+
+def test_handle_interests_command_shows_empty_state(isolated_subscribers_db):
+    update = _make_update(chat_id=999, text="/interests")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_interests_command(update, context))
+
+    reply = update.message.reply_text.call_args[0][0]
+    assert "haven't set" in reply.lower()
+
+
+def test_handle_interests_command_sets_interests(isolated_subscribers_db):
+    update = _make_update(chat_id=999, text="/interests AI, robotics, semiconductors")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_interests_command(update, context))
+
+    assert users_db.get_interests(999) == ["AI", "robotics", "semiconductors"]
+    reply = update.message.reply_text.call_args[0][0]
+    assert "AI, robotics, semiconductors" in reply
+
+
+def test_handle_interests_command_shows_set_interests(isolated_subscribers_db):
+    users_db.set_interests(999, ["AI"])
+    update = _make_update(chat_id=999, text="/interests")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_interests_command(update, context))
+
+    reply = update.message.reply_text.call_args[0][0]
+    assert "AI" in reply
+
+
+def test_handle_interests_command_clears(isolated_subscribers_db):
+    users_db.set_interests(999, ["AI"])
+    update = _make_update(chat_id=999, text="/interests clear")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_interests_command(update, context))
+
+    assert users_db.get_interests(999) == []
+    reply = update.message.reply_text.call_args[0][0]
+    assert "cleared" in reply.lower()
+
+
+def test_handle_interests_command_requires_access(isolated_subscribers_db, monkeypatch):
+    notify = AsyncMock()
+    monkeypatch.setattr(bot, "notify_admin", notify)
+    update = _make_update(chat_id=555, text="/interests AI")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_interests_command(update, context))
+
+    assert users_db.get_interests(555) == []  # never set, the request was blocked
+
+
+def test_handle_message_injects_interests_into_agent_context(isolated_subscribers_db, monkeypatch):
+    _bypass_guardrails(monkeypatch)
+    users_db.set_interests(999, ["AI", "robotics"])
+    update = _make_update(chat_id=999, text="What's new?")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="<b>Report</b>")])
+    monkeypatch.setattr(bot, "run_agent", run_agent_mock)
+
+    asyncio.run(bot.handle_message(update, context))
+
+    sent_messages = run_agent_mock.call_args[0][1]  # run_agent(agent, messages)
+    last_user_message = sent_messages[-1]["content"]
+    assert "AI, robotics" in last_user_message
+    assert "What's new?" in last_user_message
+
+
+def test_handle_message_no_interests_note_when_none_set(isolated_subscribers_db, monkeypatch):
+    _bypass_guardrails(monkeypatch)
+    update = _make_update(chat_id=999, text="What's new?")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="<b>Report</b>")])
+    monkeypatch.setattr(bot, "run_agent", run_agent_mock)
+
+    asyncio.run(bot.handle_message(update, context))
+
+    sent_messages = run_agent_mock.call_args[0][1]
+    assert sent_messages[-1]["content"] == "What's new?"

@@ -37,7 +37,7 @@ import contextlib
 import os
 import signal
 from urllib.parse import urlparse
-from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from langchain_deepseek import ChatDeepSeek
 import agent as agent_module
 from agent import MODEL, build_agent, run_agent, setup_telemetry
@@ -55,6 +55,7 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.bot_data["guard_model"] = guard_model
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["admin_bot_token"] = admin_bot_token
+    app.add_handler(CommandHandler("interests", info_bot.handle_interests_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, info_bot.handle_message))
     return app
 
