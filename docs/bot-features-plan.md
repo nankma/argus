@@ -70,12 +70,16 @@ list — was wanted).
   against a temp SQLite file (`isolated_subscribers_db` fixture in
   `tests/conftest.py`), no real Telegram API calls.
 - **Deployment note**: the two bots need to see the *same* `subscribers.db`
-  file — fine as two local processes sharing a working directory, but once
-  containerized (`docs/deployment-plan.md`) they need a shared volume
-  (`SUBSCRIBERS_DB_FILE` pointed at the same mounted path for both
-  containers) or to run as two processes in one container. Not yet decided
-  which — add to `docs/deployment-plan.md`'s open questions when the cloud
-  provider is chosen.
+  file — fine as two local processes sharing a working directory. Decided
+  for containerized deployment: **`combined_bot.py`** runs both bots in one
+  process/container (see `CLAUDE.md`'s "Running both bots in one process"
+  section), driven by the Oracle `VM.Standard.E2.1.Micro` shape's 1GB RAM
+  constraint — running `bot.py` and `admin_bot.py` as two separate OS
+  processes/containers would each independently load LangChain/
+  python-telegram-bot into memory. `bot.py`/`admin_bot.py` still work
+  standalone (their own `main()`s are unchanged) for local dev or a future
+  higher-RAM shape where splitting back into two containers might be
+  preferable for isolation.
 - **Original simpler plan (superseded, kept here for context)**: a static
   `TELEGRAM_ALLOWED_USER_IDS` env var, no DB, no second bot, no approval
   flow — just a fixed allowlist checked per-message. Would have worked, but

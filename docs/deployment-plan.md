@@ -95,10 +95,22 @@ unlike the local dev machine, a single-purpose container doesn't need
 named-environment isolation, so there's nothing to gain from replicating
 that scheme inside it).
 
-- `CMD ["python", "bot.py"]` — runs the headless Telegram entry point, not
-  the CLI (`agent.py`'s `input()` loop still can't run in a container).
-- `DEEPSEEK_API_KEY` / `TELEGRAM_BOT_TOKEN` / `PHOENIX_ENABLED` /
-  `PHOENIX_ENDPOINT` are all runtime env vars (`docker run -e`, later a
+- `CMD ["python", "combined_bot.py"]` — runs both Telegram bots (info +
+  admin) in a single process/container, not the CLI (`agent.py`'s
+  `input()` loop still can't run in a container) and not two separate
+  containers either. Chosen specifically for small-RAM Always Free shapes
+  (e.g. Oracle's `VM.Standard.E2.1.Micro`, 1GB) where running `bot.py` and
+  `admin_bot.py` as two OS processes would each independently load
+  LangChain/python-telegram-bot into memory — confirmed via `docker
+  stats` that the combined container uses ~135MB vs. close to double for
+  two. `bot.py`/`admin_bot.py` can still run standalone
+  (`docker run ... myfirstagent-bot python bot.py`) if a future
+  higher-RAM shape makes splitting them back into two containers
+  preferable for isolation. See `docs/bot-features-plan.md` item 1 and
+  `CLAUDE.md`'s "Running both bots in one process" section.
+- `DEEPSEEK_API_KEY` / `TELEGRAM_BOT_TOKEN` / `ADMIN_CHAT_ID` /
+  `ADMIN_BOT_TOKEN` / `PHOENIX_ENABLED` / `PHOENIX_ENDPOINT` /
+  `SUBSCRIBERS_DB_FILE` are all runtime env vars (`docker run -e`, later a
   Kubernetes `Secret`/`ConfigMap`) — nothing is baked into the image.
 - `.dockerignore` excludes `tests/`, `docs/`, `.git/`, etc. from the build
   context.

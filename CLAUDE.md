@@ -25,7 +25,7 @@ There is no lint config or build step. There is a test suite (`tests/`, pytest) 
 
 ## Architecture
 
-Core files: `agent.py` (agent/tools/CLI), `news_sources.py` (the pluggable source registry `search_news` draws on — see below), `bot.py` (Telegram entry point — see **Telegram Bot** section below), `admin_bot.py` (the access-control companion bot), and `users_db.py` (the SQLite store both bots share for approval state).
+Core files: `agent.py` (agent/tools/CLI), `news_sources.py` (the pluggable source registry `search_news` draws on — see below), `bot.py` (Telegram entry point — see **Telegram Bot** section below), `admin_bot.py` (the access-control companion bot), `combined_bot.py` (runs both bots in one process — the default for deployment, see **Running both bots in one process** below), and `users_db.py` (the SQLite store both bots share for approval state).
 
 `agent.py`:
 
@@ -95,14 +95,49 @@ python bot.py
 - Both processes must point at the same SQLite file — `SUBSCRIBERS_DB_FILE` env var (defaults to `subscribers.db` in the working directory), same configurability reasoning as `agent.py`'s `PHOENIX_ENDPOINT`. Solved for local Docker via a shared named volume (`myfirstagent-data`) mounted into both containers — not yet solved for Kubernetes, see `docs/deployment-plan.md`.
 - See `docs/security-plan.md` for a full security review (secrets handling, rate limiting, prompt-injection surface, CI scanning gaps) done before moving to cloud deployment.
 
+### Running both bots in one process (`combined_bot.py`)
+
+`bot.py` and `admin_bot.py` can each run standalone (as shown above), but by
+default the deployed image runs **`combined_bot.py`** instead, which runs
+both Telegram `Application`s concurrently in a single asyncio event loop —
+`build_info_app`/`build_admin_app` reuse `bot.py`'s and `admin_bot.py`'s
+handler functions and `bot_data` wiring unchanged, so nothing about the
+two-bot-token security design changes.
+
+Why: running two separate OS processes duplicates LangChain/python-
+telegram-bot's in-memory footprint (each independently loads its own copy).
+On a small-RAM Always Free shape (e.g. Oracle's `VM.Standard.E2.1.Micro`,
+1GB) that duplication is a real constraint — confirmed via `docker stats`
+that the combined single-container setup uses ~135MB vs. what would be
+close to double running as two containers. `bot.py`/`admin_bot.py` keep
+their own standalone `main()`s for local dev flexibility or in case a
+future higher-RAM shape (e.g. Ampere A1) makes splitting back into two
+containers preferable for isolation — see `docs/deployment-plan.md`.
+
+```powershell
+conda activate myfirstagent
+$env:DEEPSEEK_API_KEY = "<your-deepseek-key>"
+$env:TELEGRAM_BOT_TOKEN = "<info-bot-token>"
+$env:ADMIN_BOT_TOKEN = "<admin-bot-token>"
+$env:ADMIN_CHAT_ID = "<your-telegram-numeric-user-id>"
+python combined_bot.py
+```
+
 ### Running it in Docker
 
 ```powershell
 docker build -t myfirstagent-bot .
-docker run -d --name myfirstagent-bot -e DEEPSEEK_API_KEY=$env:DEEPSEEK_API_KEY -e TELEGRAM_BOT_TOKEN=$env:TELEGRAM_BOT_TOKEN myfirstagent-bot
+docker run -d --name myfirstagent-bot --restart unless-stopped `
+  -e DEEPSEEK_API_KEY=$env:DEEPSEEK_API_KEY `
+  -e TELEGRAM_BOT_TOKEN=$env:TELEGRAM_BOT_TOKEN `
+  -e ADMIN_CHAT_ID=$env:ADMIN_CHAT_ID `
+  -e ADMIN_BOT_TOKEN=$env:ADMIN_BOT_TOKEN `
+  -e SUBSCRIBERS_DB_FILE=/data/subscribers.db `
+  -v myfirstagent-data:/data `
+  myfirstagent-bot
 ```
 
-`Dockerfile` uses `mambaorg/micromamba` and installs straight from `environment.yml` — same dependency source as local dev and CI, no separate pip requirements file. `CMD` runs `bot.py` (the headless entry point), not the CLI. Image is ~900MB — a deliberate tradeoff for conda-forge consistency over a smaller `pip`+slim image; see `docs/deployment-plan.md` if that needs revisiting. `PHOENIX_ENDPOINT` is configurable via env var for this reason — `localhost` only resolves correctly for local dev, not once Phoenix runs as a separate container/service.
+`Dockerfile` uses `mambaorg/micromamba` and installs straight from `environment.yml` — same dependency source as local dev and CI, no separate pip requirements file. `CMD` runs `combined_bot.py` by default (both bots, one process/container — see above); override the command (`docker run ... myfirstagent-bot python bot.py`) to run either bot standalone in its own container instead. Image is ~900MB — a deliberate tradeoff for conda-forge consistency over a smaller `pip`+slim image; see `docs/deployment-plan.md` if that needs revisiting. `PHOENIX_ENDPOINT` is configurable via env var for this reason — `localhost` only resolves correctly for local dev, not once Phoenix runs as a separate container/service.
 - Verified end-to-end against the real Telegram API, not just "the code runs": confirmed the token via `getMe`, then had a human message the live bot and confirmed a real reply came back.
 - Four further requested features (translation, DB-backed per-user preferences, per-user search-source selection, proactive push) are planned but not built — see `docs/bot-features-plan.md`. Access control (the fifth, and the urgent one) is done — see **Access control** above.
 
@@ -121,6 +156,7 @@ No `DEEPSEEK_API_KEY` or network access needed — the whole suite runs in ~1.5s
 - `tests/test_telemetry.py` — only the `PHOENIX_ENABLED` gating logic (register not called when unset, called with expected args when set). Does not test actual tracing — that needs the real Docker container and is verified manually instead (see **Telemetry** above).
 - `tests/test_bot.py` — `split_for_telegram()`'s chunking logic, plus `check_access()`'s branching (admin bypass, approved/pending/denied, new-request registration + admin notification), with `notify_admin` and the Telegram `Update`/`context` objects mocked. The actual bot integration is verified manually against the real Telegram API instead (see **Telegram Bot** above).
 - `tests/test_admin_bot.py` — `handle_decision()`'s approve/deny/non-admin-tap branching, with `telegram.Bot` mocked.
+- `tests/test_combined_bot.py` — `build_info_app`/`build_admin_app` wire up `bot_data` and register the right handler types; builds real (but unstarted) `Application` objects with fake tokens, no network calls (confirmed `Application.builder().build()` doesn't touch the network until `initialize()`/polling starts).
 - `tests/test_users_db.py` — the `subscribers` SQLite table's CRUD functions, via the `isolated_subscribers_db` fixture (temp DB file per test).
 - HTTP mocking via the `requests_mock` pytest fixture (auto-registered by the `requests-mock` package).
 
