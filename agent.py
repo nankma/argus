@@ -66,10 +66,12 @@ LAYER1_IDENTITY = (
 # via run_agent's `context`, read in _compose_prompt below) — only the
 # fragment for the current turn's category is sent, not all of them.
 
-_NEWS_QUERY_INSTRUCTIONS = (
-    "This turn: the user wants tech/AI news or trends. Use the search_news "
-    "tool to gather recent items, spot recurring themes across sources, "
-    "and write a trend report.\n\n"
+# Shared with news_push.py's digest-writing prompt (see that module) so the
+# two places that ever write a trend report can't drift apart the way
+# agent.py's per-category confirmation prompts once did for the "HTML not
+# Markdown" rule (see the build-locally-deploy-remotely skill's smoke-test
+# incident note).
+HTML_FORMATTING_RULES = (
     "Write your final answer as a Telegram message using Telegram's HTML "
     "formatting: <b>bold</b>, <i>italic</i>, and <a href=\"URL\">link "
     "text</a>. Do not use Markdown syntax (#, **, [text](url), etc.) "
@@ -80,7 +82,10 @@ _NEWS_QUERY_INSTRUCTIONS = (
     "title) — not every noun. Use at most one emoji on the title line as "
     "a visual anchor, and one 🔗 before the source links on each item; "
     "don't scatter emoji through the body text, and don't use an emoji "
-    "as a substitute for an actual label.\n\n"
+    "as a substitute for an actual label."
+)
+
+TREND_REPORT_STRUCTURE = (
     "Structure the report like this:\n"
     "📰 <b>[Topic] Trend Report</b>\n\n"
     "<b>[Short subtitle naming one theme or story]</b>\n"
@@ -91,8 +96,14 @@ _NEWS_QUERY_INSTRUCTIONS = (
     "<b>[Next subtitle]</b>\n"
     "[...]\n\n"
     "Use a blank line between sections, one <b>subtitle</b> per distinct "
-    "theme or story, and only include sources search_news actually "
-    "returned a link for — never invent a URL."
+    "theme or story, and only include sources actually provided in the "
+    "source material below — never invent a URL."
+)
+
+_NEWS_QUERY_INSTRUCTIONS = (
+    "This turn: the user wants tech/AI news or trends. Use the search_news "
+    "tool to gather recent items, spot recurring themes across sources, "
+    "and write a trend report.\n\n" + HTML_FORMATTING_RULES + "\n\n" + TREND_REPORT_STRUCTURE
 )
 
 _PLAIN_REPLY_FORMATTING_NOTE = (
@@ -117,11 +128,17 @@ _REMOVE_INTEREST_INSTRUCTIONS = (
 )
 
 _START_PUSH_INSTRUCTIONS = (
-    "This turn: the user wants to turn on periodic news push. Use the "
-    "set_push_enabled tool with enabled=true, then confirm conversationally. "
-    "Be honest that the scheduled sending itself isn't built yet if it "
-    "comes up — this only saves the preference, don't imply pushes will "
-    "start immediately.\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
+    "This turn: the user wants to turn on periodic news push, and/or "
+    "change how often it sends. Use the set_push_enabled tool with "
+    "enabled=true. If they stated a frequency (e.g. \"every 6 hours\", "
+    "\"daily\", \"twice a day\"), also call set_push_interval with the "
+    "matching number of hours (daily=24, twice a day=12, every 4/6/12 "
+    "hours as stated). If they didn't state one, don't call "
+    "set_push_interval — leave their existing interval (default: once a "
+    "day) alone, but you may mention in your reply that 24h/12h/6h/4h are "
+    "the suggested options if it's natural to do so. Then confirm "
+    "conversationally what's now enabled and at what interval.\n\n"
+    + _PLAIN_REPLY_FORMATTING_NOTE
 )
 
 _STOP_PUSH_INSTRUCTIONS = (
@@ -193,7 +210,10 @@ def search_news(query: str = "AI", max_results_per_source: int = 5) -> str:
             continue
         total += len(articles)
         for a in articles:
-            lines.append(f"- [{name}] {a['title']} ({a.get('source', name)}) — {a.get('link', '')}")
+            published = a.get("published") or "date unknown"
+            lines.append(
+                f"- [{name}] {a['title']} ({a.get('source', name)}, published {published}) — {a.get('link', '')}"
+            )
     return f"{total} articles found across {len(sources)} source(s):\n" + "\n".join(lines)
 
 
@@ -211,14 +231,26 @@ def update_interests(action: str, topic: str, runtime: ToolRuntime) -> str:
 
 @tool
 def set_push_enabled(enabled: bool, runtime: ToolRuntime) -> str:
-    """Turn periodic news push on or off for the calling user. Only saves
-    the preference -- the scheduled sending itself isn't built yet."""
+    """Turn periodic news push on or off for the calling user."""
     chat_id = runtime.context["chat_id"]
     users_db.set_push_enabled(chat_id, enabled)
     return f"Push preference set to {'enabled' if enabled else 'disabled'}."
 
 
-TOOLS = [save_note, search_news, update_interests, set_push_enabled]
+@tool
+def set_push_interval(hours: int, runtime: ToolRuntime) -> str:
+    """Set how often (in hours) periodic news push sends for the calling
+    user. Suggested presets: 24 (daily), 12 (twice a day), 6, or 4. Any
+    integer of 1 or more is accepted."""
+    chat_id = runtime.context["chat_id"]
+    try:
+        users_db.set_push_interval_hours(chat_id, hours)
+    except ValueError as exc:
+        return str(exc)
+    return f"Push interval set to every {hours} hour(s)."
+
+
+TOOLS = [save_note, search_news, update_interests, set_push_enabled, set_push_interval]
 
 
 # --- Agent construction & invocation ------------------------------------

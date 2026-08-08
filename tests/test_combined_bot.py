@@ -19,6 +19,9 @@ def test_build_info_app_wires_bot_data(monkeypatch):
     assert app.bot_data["guard_model"] == "fake-guard-model"
     handlers = [h for group in app.handlers.values() for h in group]
     assert any(isinstance(h, MessageHandler) for h in handlers)
+    # the periodic-push scheduler (docs/bot-features-plan.md item 5) must
+    # be wired up in the combined process too, not just standalone bot.py
+    assert len(app.job_queue.jobs()) == 1
 
 
 def test_build_admin_app_wires_bot_data(monkeypatch):

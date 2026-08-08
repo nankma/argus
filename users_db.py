@@ -21,6 +21,14 @@ PENDING = "pending"
 APPROVED = "approved"
 DENIED = "denied"
 
+DEFAULT_PUSH_INTERVAL_HOURS = 24
+MIN_PUSH_INTERVAL_HOURS = 1
+# Bounds how many previously-pushed article links are remembered per user --
+# a fallback dedup check for articles whose "published" date didn't parse
+# (see news_push.py), not meant as a full history. Cheap to keep generous
+# at this project's scale (owner + a few friends).
+_MAX_REMEMBERED_PUSHED_LINKS = 200
+
 
 @contextmanager
 def _connect():
@@ -55,12 +63,18 @@ def init_db() -> None:
                 requested_at TEXT NOT NULL,
                 decided_at TEXT,
                 interests TEXT,
-                push_enabled INTEGER
+                push_enabled INTEGER,
+                push_interval_hours INTEGER,
+                last_push_at TEXT,
+                pushed_links TEXT
             )
             """
         )
         _ensure_column(conn, "interests", "TEXT")
         _ensure_column(conn, "push_enabled", "INTEGER")
+        _ensure_column(conn, "push_interval_hours", "INTEGER")
+        _ensure_column(conn, "last_push_at", "TEXT")
+        _ensure_column(conn, "pushed_links", "TEXT")
 
 
 def get_status(chat_id: int) -> str | None:
@@ -162,3 +176,97 @@ def set_push_enabled(chat_id: int, enabled: bool) -> None:
             """,
             (chat_id, APPROVED, datetime.now().isoformat(), int(enabled)),
         )
+
+
+def get_push_interval_hours(chat_id: int) -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT push_interval_hours FROM subscribers WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return row[0] if row and row[0] is not None else DEFAULT_PUSH_INTERVAL_HOURS
+
+
+def set_push_interval_hours(chat_id: int, hours: int) -> None:
+    """Upserts -- same reasoning as set_interests(). Suggested presets are
+    24/12/6/4h (per the user's own request), but any integer >= the
+    project-wide floor is accepted -- MIN_PUSH_INTERVAL_HOURS exists so a
+    typo or an over-eager agent can't schedule something that would hammer
+    news sources/DeepSeek every few minutes."""
+    if hours < MIN_PUSH_INTERVAL_HOURS:
+        raise ValueError(f"push interval must be at least {MIN_PUSH_INTERVAL_HOURS} hour(s)")
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, status, requested_at, push_interval_hours)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET push_interval_hours = excluded.push_interval_hours
+            """,
+            (chat_id, APPROVED, datetime.now().isoformat(), hours),
+        )
+
+
+def get_pushed_links(chat_id: int) -> list[str]:
+    with _connect() as conn:
+        row = conn.execute("SELECT pushed_links FROM subscribers WHERE chat_id = ?", (chat_id,)).fetchone()
+    if not row or not row[0]:
+        return []
+    return json.loads(row[0])
+
+
+def get_last_push_at(chat_id: int) -> datetime | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT last_push_at FROM subscribers WHERE chat_id = ?", (chat_id,)).fetchone()
+    if not row or not row[0]:
+        return None
+    return datetime.fromisoformat(row[0])
+
+
+def record_push(chat_id: int, article_links: list[str], pushed_at: datetime) -> None:
+    """Called after a periodic digest is actually sent (or after a due
+    check finds nothing new -- see news_push.py) to advance the dedup
+    state: last_push_at resets the "how long until due again" clock, and
+    pushed_links is the fallback dedup list for articles whose published
+    date didn't parse (see news_sources.py's published_dt). Capped to the
+    most recent _MAX_REMEMBERED_PUSHED_LINKS, newest first."""
+    existing = get_pushed_links(chat_id)
+    merged = (article_links + [link for link in existing if link not in article_links])[
+        :_MAX_REMEMBERED_PUSHED_LINKS
+    ]
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, status, requested_at, last_push_at, pushed_links)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                last_push_at = excluded.last_push_at,
+                pushed_links = excluded.pushed_links
+            """,
+            (chat_id, APPROVED, datetime.now().isoformat(), pushed_at.isoformat(), json.dumps(merged)),
+        )
+
+
+def list_push_enabled_subscribers() -> list[dict]:
+    """Approved subscribers with push_enabled=true, with everything
+    news_push.py's scheduler needs to decide who's due and what to filter
+    against -- avoids the scheduler doing its own row-by-row SQL."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT chat_id, interests, push_interval_hours, last_push_at, pushed_links
+            FROM subscribers
+            WHERE status = ? AND push_enabled = 1
+            """,
+            (APPROVED,),
+        ).fetchall()
+    result = []
+    for chat_id, interests_json, interval_hours, last_push_at, pushed_links_json in rows:
+        result.append(
+            {
+                "chat_id": chat_id,
+                "interests": json.loads(interests_json) if interests_json else [],
+                "push_interval_hours": interval_hours if interval_hours is not None else DEFAULT_PUSH_INTERVAL_HOURS,
+                "last_push_at": datetime.fromisoformat(last_push_at) if last_push_at else None,
+                "pushed_links": json.loads(pushed_links_json) if pushed_links_json else [],
+            }
+        )
+    return result

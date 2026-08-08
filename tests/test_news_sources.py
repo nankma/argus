@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import news_sources
 from tests.fixtures import (
     ARXIV_RESPONSE,
@@ -20,6 +22,7 @@ def test_fetch_hackernews(requests_mock):
     assert articles[0]["source"] == "Hacker News"
     # second hit has url=None in the fixture -> falls back to the HN item link
     assert articles[1]["link"] == "https://news.ycombinator.com/item?id=12346"
+    assert articles[0]["published_dt"] == datetime(2026, 8, 5, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_fetch_arxiv(requests_mock):
@@ -33,6 +36,17 @@ def test_fetch_arxiv(requests_mock):
     assert articles[0]["source"] == "arXiv"
     assert "fake abstract" in articles[0]["summary"]
     assert "\n" not in articles[0]["title"]
+    assert articles[0]["published_dt"] == datetime(2026, 8, 4, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_iso_published_handles_missing_and_malformed():
+    assert news_sources._parse_iso_published(None) is None
+    assert news_sources._parse_iso_published("") is None
+    assert news_sources._parse_iso_published("not a date") is None
+
+
+def test_parse_rss_published_handles_missing():
+    assert news_sources._parse_rss_published({}) is None
 
 
 def test_fetch_rss_generic(requests_mock):

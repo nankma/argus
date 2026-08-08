@@ -3,15 +3,50 @@ Pluggable AI-industry news sources for the search_news tool in agent.py.
 
 Each source is a function `fetch(query, max_results) -> list[dict]` returning
 a normalized article shape: {"title", "link", "source", "summary",
-"published"}. SOURCE_REGISTRY lists them with the env var (if any) required
-to enable them; enabled_sources() skips key-gated sources whose key isn't
-set, so the tool degrades gracefully instead of erroring. See
-docs/ai-news-sources.md for what each source is and how to add a new one.
+"published", "published_dt"}. "published" is the raw, source-specific date
+string (for display); "published_dt" is that same date parsed into a
+timezone-aware datetime (UTC), or None if parsing failed -- added so
+callers (search_news, and news_push.py's periodic-digest dedup) can reason
+about recency without each doing their own per-source date parsing. See
+the incident this responds to: search_news wasn't surfacing "published" to
+the model at all, so it had no way to judge freshness or avoid repeating
+itself across calls -- see docs/bot-features-plan.md item 5.
+
+SOURCE_REGISTRY lists sources with the env var (if any) required to enable
+them; enabled_sources() skips key-gated sources whose key isn't set, so the
+tool degrades gracefully instead of erroring. See docs/ai-news-sources.md
+for what each source is and how to add a new one.
 """
 
+import calendar
 import os
+from datetime import datetime, timezone
+
 import feedparser
 import requests
+
+
+def _parse_iso_published(raw: str | None) -> datetime | None:
+    """For sources that give an ISO-8601-ish string (HN's created_at,
+    NewsAPI/GNews/Perigon's publishedAt/pubDate)."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _parse_rss_published(entry) -> datetime | None:
+    """For feedparser entries (arXiv, RSS blogs) -- feedparser normalizes
+    whatever date format the feed uses into published_parsed (a UTC
+    struct_time), which is far more reliable than parsing the raw
+    "published" string ourselves."""
+    parsed = entry.get("published_parsed")
+    if not parsed:
+        return None
+    return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
+
 
 # --- Free, no-key sources ------------------------------------------------
 
@@ -30,6 +65,7 @@ def fetch_hackernews(query: str, max_results: int = 5) -> list[dict]:
             "source": "Hacker News",
             "summary": None,
             "published": hit.get("created_at"),
+            "published_dt": _parse_iso_published(hit.get("created_at")),
         }
         for hit in resp.json().get("hits", [])
     ]
@@ -55,6 +91,7 @@ def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5) -> list[dict]:
             "source": "arXiv",
             "summary": entry.get("summary", "").replace("\n", " ").strip()[:300],
             "published": entry.get("published"),
+            "published_dt": _parse_rss_published(entry),
         }
         for entry in feed.entries
     ]
@@ -71,6 +108,7 @@ def _fetch_rss(url: str, source_name: str, max_results: int = 5) -> list[dict]:
             "source": source_name,
             "summary": None,
             "published": entry.get("published"),
+            "published_dt": _parse_rss_published(entry),
         }
         for entry in feed.entries[:max_results]
     ]
@@ -118,6 +156,7 @@ def fetch_newsapi(query: str, max_results: int = 5) -> list[dict]:
             "source": (a.get("source") or {}).get("name", "NewsAPI"),
             "summary": a.get("description"),
             "published": a.get("publishedAt"),
+            "published_dt": _parse_iso_published(a.get("publishedAt")),
         }
         for a in resp.json().get("articles", [])
     ]
@@ -137,6 +176,7 @@ def fetch_gnews(query: str, max_results: int = 5) -> list[dict]:
             "source": (a.get("source") or {}).get("name", "GNews"),
             "summary": a.get("description"),
             "published": a.get("publishedAt"),
+            "published_dt": _parse_iso_published(a.get("publishedAt")),
         }
         for a in resp.json().get("articles", [])
     ]
@@ -156,6 +196,7 @@ def fetch_perigon(query: str, max_results: int = 5) -> list[dict]:
             "source": (a.get("source") or {}).get("domain", "Perigon"),
             "summary": a.get("summary"),
             "published": a.get("pubDate"),
+            "published_dt": _parse_iso_published(a.get("pubDate")),
         }
         for a in resp.json().get("articles", [])
     ]

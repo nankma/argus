@@ -1,4 +1,7 @@
 import sqlite3
+from datetime import datetime, timezone
+
+import pytest
 
 import users_db
 
@@ -137,3 +140,62 @@ def test_set_push_enabled_upserts_when_no_existing_row(isolated_subscribers_db):
     users_db.set_push_enabled(999, True)
     assert users_db.get_push_enabled(999) is True
     assert users_db.get_status(999) == users_db.APPROVED
+
+
+def test_get_push_interval_hours_defaults(isolated_subscribers_db):
+    assert users_db.get_push_interval_hours(16) == users_db.DEFAULT_PUSH_INTERVAL_HOURS
+
+
+def test_set_and_get_push_interval_hours(isolated_subscribers_db):
+    users_db.request_access(16, "noah", "Noah")
+    users_db.set_push_interval_hours(16, 6)
+    assert users_db.get_push_interval_hours(16) == 6
+
+
+def test_set_push_interval_hours_rejects_below_minimum(isolated_subscribers_db):
+    with pytest.raises(ValueError):
+        users_db.set_push_interval_hours(16, 0)
+
+
+def test_get_pushed_links_empty_for_unset_chat(isolated_subscribers_db):
+    assert users_db.get_pushed_links(17) == []
+
+
+def test_get_last_push_at_none_for_unset_chat(isolated_subscribers_db):
+    assert users_db.get_last_push_at(17) is None
+
+
+def test_record_push_sets_last_push_at_and_links(isolated_subscribers_db):
+    pushed_at = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.record_push(18, ["https://example.com/a", "https://example.com/b"], pushed_at)
+    assert users_db.get_last_push_at(18) == pushed_at
+    assert users_db.get_pushed_links(18) == ["https://example.com/a", "https://example.com/b"]
+
+
+def test_record_push_merges_and_dedupes_links_newest_first(isolated_subscribers_db):
+    users_db.record_push(19, ["https://example.com/old"], datetime(2026, 8, 1, tzinfo=timezone.utc))
+    users_db.record_push(
+        19, ["https://example.com/new", "https://example.com/old"], datetime(2026, 8, 8, tzinfo=timezone.utc)
+    )
+    assert users_db.get_pushed_links(19) == ["https://example.com/new", "https://example.com/old"]
+
+
+def test_list_push_enabled_subscribers_only_returns_approved_and_enabled(isolated_subscribers_db):
+    users_db.request_access(20, "olivia", "Olivia")
+    users_db.decide(20, approved=True)
+    users_db.set_interests(20, ["AI"])
+    users_db.set_push_enabled(20, True)
+
+    users_db.request_access(21, "peter", "Peter")
+    users_db.decide(21, approved=True)
+    users_db.set_push_enabled(21, False)  # opted out -- shouldn't show up
+
+    users_db.request_access(22, "quinn", "Quinn")  # still pending -- shouldn't show up
+    users_db.set_push_enabled(22, True)
+
+    subscribers = users_db.list_push_enabled_subscribers()
+    assert [s["chat_id"] for s in subscribers] == [20]
+    assert subscribers[0]["interests"] == ["AI"]
+    assert subscribers[0]["push_interval_hours"] == users_db.DEFAULT_PUSH_INTERVAL_HOURS
+    assert subscribers[0]["last_push_at"] is None
+    assert subscribers[0]["pushed_links"] == []

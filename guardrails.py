@@ -99,7 +99,9 @@ _ROUTER_PROMPT = (
     "- set_interest: wants to add a topic to their stated interests.\n"
     "- remove_interest: wants to remove a topic from their stated "
     "interests.\n"
-    "- start_push: wants to turn on periodic news push notifications.\n"
+    "- start_push: wants to turn on periodic news push notifications, or "
+    "change how often an already-enabled push sends (e.g. \"every 6 "
+    "hours\", \"switch to daily\").\n"
     "- stop_push: wants to turn off periodic news push notifications.\n"
     "If on_topic is false, set category to off_topic."
 )

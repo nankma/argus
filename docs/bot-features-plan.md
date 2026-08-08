@@ -13,7 +13,7 @@ questions before implementation starts, same pattern as
 | 2 | Per-user response language / translation | Not started | Normal — benefits from #1's DB existing |
 | 3 | Multi-user subscribers + DB-backed sessions | Partially done — approval status (#1) and per-user `interests` are both live; language/sources/conversation-history persistence still missing | Normal — extend for #2/#4/#5 |
 | 4 | Per-user search-source configuration | Not started | Normal — depends on #3 |
-| 5 | Proactive news push (hourly digest) | Not started | Explicitly deferred by request — depends on #3 |
+| 5 | Proactive news push (per-user configurable interval digest) | **Done — see below** | Was deferred, now built at the user's request (2026-08-08) |
 
 ## 1. Bot access control — done
 
@@ -200,40 +200,101 @@ Let each user pick which of `news_sources.py`'s `SOURCE_REGISTRY` entries
     user, but keeps `search_news` itself simple.
   Not resolved here; needs a decision when this item is actually built.
 
-## 5. Proactive news push (explicitly: can be later)
+## 5. Proactive news push — done
 
-Per-topic hourly (or configurable-interval) digest, pushed to a user
-without them asking first — the opposite of the bot's current
-request-then-respond-only shape.
+Per-user digest of new tech/AI news, pushed without the user asking first
+— the opposite of the bot's normal request-then-respond shape. Built
+2026-08-08, after being explicitly deferred earlier in the project.
 
-- Needs a per-user "watched topics" list — another table depending on #3.
-- Needs a scheduler. `python-telegram-bot` ships a `JobQueue` (wraps
-  APScheduler) built for exactly this — periodic jobs that can call
-  `bot.send_message(chat_id, ...)` outside of any incoming update. This is
-  the natural fit rather than a separate cron/scheduler process, but it's
-  a new dependency: `JobQueue` requires the `python-telegram-bot[job-queue]`
-  extra (currently just `python-telegram-bot` in `environment.yml`), which
-  pulls in APScheduler — add this to `environment.yml` via `mamba` (not
-  `conda`, per the `use-mamba-not-conda` skill) when this item is built.
-- Each scheduled run would reuse the existing `run_agent`/`search_news`
-  path per user/topic — no new fetch logic needed, just a new caller.
-- Worth a dedupe pass if multiple users end up watching the same topic
-  (e.g. "OpenAI") — fetch once, push to all interested users — rather than
-  repeating the same source calls per subscriber. Not needed at current
-  scale (owner + a friend or two) but cheap to note now.
-- Confirmed lowest priority of the five — the user explicitly said this
-  one "can be later." Listed here for completeness and because it shares
-  the DB dependency with #2 and #4, so it's worth designing the schema in
-  #3 with this in mind even if #5 itself isn't built yet.
-- **Intent recognition split from scheduling, per `docs/context-management-plan.md`**:
-  the natural-language *toggle* ("start/stop pushing me news") is being
-  built alongside that doc's router design — a `push_enabled` column and a
-  `set_push_enabled` tool the agent can call, controlled entirely by
-  conversation (no `/command`, since voice input is an eventual goal and
-  voice has no slash commands) — but the actual scheduled sending stays
-  out of scope for now, unchanged from the original "later" call above.
-  Recognizing the intent and flipping a flag is cheap; building the
-  scheduler is the part still deferred.
+**The problem that shaped the design, found before writing any scheduler
+code**: the user reported that on-demand trend queries "always return
+similar news." Root cause: `news_sources.py`'s fetchers already normalized
+a `published` timestamp per article, but `agent.py`'s `search_news` tool
+was dropping it before it ever reached the model — so the model had no
+way to judge recency or notice it was reporting the same items again. Any
+push feature built on top of that would have had the same problem, just
+on a timer. Fixed at the root first:
+
+- `news_sources.py`: every fetcher now also returns `published_dt`, a
+  parsed, timezone-aware `datetime` (UTC) alongside the existing raw
+  `published` string — via `_parse_iso_published` (HN/NewsAPI/GNews/
+  Perigon's ISO-8601-ish date fields) or `_parse_rss_published`
+  (feedparser's `published_parsed`, more reliable than parsing RSS/arXiv's
+  raw date string by hand).
+- `agent.py`'s `search_news` tool now includes the raw `published` string
+  in its output to the model, for on-demand queries.
+
+**Design decision: push does not go through the tool-calling agent.** If
+periodic push reused `run_agent`/`search_news` (as originally sketched
+below), the model would decide on its own how to search, with no
+guarantee it wouldn't just re-report the same top-N-by-recency results
+every cycle — the exact bug above, recurring on a timer. Instead
+`news_push.py` fetches deterministically via `news_sources.enabled_sources()`
+directly, filters to genuinely-new articles, and only then does one plain
+(non-agentic) `model.invoke()` call to write a digest from that
+pre-filtered list. Guarantees no repeats instead of hoping the model
+avoids them.
+
+**"New" is judged two ways** (per the user's explicit request not to
+receive the same news repeatedly): primarily by `published_dt` (skip
+anything published at or before the subscriber's last push), and as a
+fallback for sources whose date didn't parse, by checking against
+`users_db`'s remembered `pushed_links` from recent pushes (capped at 200,
+newest first).
+
+**Schema** (`users_db.py`, all migrated via the existing `_ensure_column`
+pattern): `push_interval_hours` (int, default 24), `last_push_at` (ISO
+string), `pushed_links` (JSON array). New functions:
+`get_push_interval_hours`/`set_push_interval_hours` (floored at 1h —
+`MIN_PUSH_INTERVAL_HOURS` — so a typo or an over-eager agent can't
+schedule sub-hourly pushes), `get_pushed_links`, `get_last_push_at`,
+`record_push`, `list_push_enabled_subscribers`.
+
+**Interval control is natural language**, per the router design
+(`docs/context-management-plan.md`), not a `/command` — same reasoning as
+`push_enabled`: voice input is an eventual goal and voice has no slash
+commands. A new `set_push_interval` tool joins `set_push_enabled`; the
+router's `start_push` category (`guardrails.py`) now also covers "change
+how often an already-enabled push sends." User-requested presets: 24h
+(daily, the default), 12h, 6h, 4h — the tool accepts any integer ≥1h, the
+presets are just what the agent is instructed to suggest.
+
+**Scheduler**: `python-telegram-bot`'s `JobQueue` (wraps APScheduler, now
+a real dependency — `apscheduler` added to `environment.yml` via `mamba`
+per the `use-mamba-not-conda` skill; confirmed live that `Application.builder().build()`
+only gets a working `job_queue` once apscheduler is importable).
+`bot.register_push_job(app)` schedules a single repeating tick
+(`PUSH_TICK_SECONDS = 900`, i.e. every 15 min) that calls
+`news_push.run_push_cycle()` — a tick-based design, not one APScheduler
+job per subscriber, because `push_interval_hours` is user-changeable at
+runtime and a DB-driven due-check (`is_subscriber_due`) is simpler to
+reason about than dynamically rescheduling individual jobs. Wired into
+both `bot.py`'s standalone `main()` and `combined_bot.py`'s
+`build_info_app()` (the actual deployed entry point), since
+`Application.start()`/`.stop()` auto-start/stop the JobQueue — confirmed
+via reading `python-telegram-bot`'s source, not assumed.
+
+**Output guardrail applies to pushes too**: a subscriber's stored
+`interests` are unsanitized user text that end up embedded in the digest
+prompt — the same injection surface `guardrails.is_output_on_topic`
+already guards against for chat replies applies here, since this is also
+model output about to reach a real user unread. `run_push_cycle` runs it
+before sending; if blocked, the cycle still advances `last_push_at`/
+`pushed_links` (so a bad interest string doesn't cause a retry loop every
+tick) but doesn't send.
+
+**Send path reuses `bot.py`'s existing safety nets**: `send_push_digest`
+calls the same `_normalize_markdown_bold` → `split_for_telegram` →
+`send_message(parse_mode=HTML)` → `BadRequest` fallback-to-plain-text
+pipeline as `handle_message`, since push digests go through the same
+HTML-formatting prompt (`agent.HTML_FORMATTING_RULES`, extracted as a
+shared constant so this and `_NEWS_QUERY_INSTRUCTIONS` can't drift apart)
+and can fail the same way.
+
+**Per-source-call dedup across subscribers watching the same topic**
+(e.g. many users watching "OpenAI") is still not implemented — each
+subscriber's cycle fetches independently. Noted as a future optimization,
+not needed at current scale (owner + a friend or two).
 
 ## Other messaging platforms (evaluated, not pursued)
 

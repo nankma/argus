@@ -369,3 +369,40 @@ def test_handle_message_sends_raw_user_text_unmodified(isolated_subscribers_db, 
 
     sent_messages = run_agent_mock.call_args[0][1]  # run_agent(agent, messages)
     assert sent_messages[-1]["content"] == "What's new?"
+
+
+def test_send_push_digest_normalizes_markdown_and_sends_html():
+    fake_bot = MagicMock()
+    fake_bot.send_message = AsyncMock()
+
+    asyncio.run(bot.send_push_digest(fake_bot, 42, "已將 **AI** 加入"))
+
+    fake_bot.send_message.assert_called_once()
+    args, kwargs = fake_bot.send_message.call_args
+    assert kwargs["chat_id"] == 42
+    assert kwargs["text"] == "已將 <b>AI</b> 加入"
+    assert kwargs["parse_mode"] is not None
+
+
+def test_send_push_digest_falls_back_to_plain_text_on_bad_request():
+    fake_bot = MagicMock()
+    fake_bot.send_message = AsyncMock(side_effect=[BadRequest("can't parse entities"), None])
+
+    asyncio.run(bot.send_push_digest(fake_bot, 42, "<b>Broken</b> tag <i>oops"))
+
+    assert fake_bot.send_message.call_count == 2
+    second_args, second_kwargs = fake_bot.send_message.call_args_list[1]
+    assert "<" not in second_kwargs["text"]
+    assert "parse_mode" not in second_kwargs
+
+
+def test_register_push_job_schedules_one_repeating_job():
+    from telegram.ext import Application
+
+    app = Application.builder().token("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11").build()
+
+    bot.register_push_job(app)
+
+    jobs = app.job_queue.jobs()
+    assert len(jobs) == 1
+    assert jobs[0].trigger.interval.total_seconds() == bot.PUSH_TICK_SECONDS

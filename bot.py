@@ -33,9 +33,17 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from langchain_deepseek import ChatDeepSeek
 from agent import MODEL, build_agent, run_agent, setup_telemetry
 import guardrails
+import news_push
 import users_db
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+
+# How often the periodic-push scheduler checks who's due (see
+# register_push_job below) -- independent of any individual subscriber's
+# push_interval_hours (users_db.MIN_PUSH_INTERVAL_HOURS floors that at 1h),
+# just fine-grained enough that a due subscriber isn't kept waiting long
+# past their actual interval.
+PUSH_TICK_SECONDS = 900
 
 # Per-chat conversation history. In-memory only — lost on restart, same as
 # the CLI's messages list. Not persisted; fine for now, revisit if needed.
@@ -254,6 +262,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(_strip_html_tags(chunk))
 
 
+async def send_push_digest(bot: Bot, chat_id: int, text: str) -> None:
+    """The `send` callback news_push.run_push_cycle() calls per due
+    subscriber. Push digests go through the same HTML-formatting prompt
+    (agent.HTML_FORMATTING_RULES) as a normal chat reply and can fail the
+    same two ways, so this reuses handle_message's exact pipeline instead
+    of a simpler one-off send: the Markdown-leak safety net, chunking for
+    messages over Telegram's limit, and the BadRequest-on-bad-HTML
+    fallback to plain text."""
+    normalized = _normalize_markdown_bold(text)
+    chunks = split_for_telegram(normalized)
+    for i, chunk in enumerate(chunks):
+        if i > 0:
+            await asyncio.sleep(1)
+        try:
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
+        except BadRequest:
+            await bot.send_message(chat_id=chat_id, text=_strip_html_tags(chunk))
+
+
+async def _push_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    model = context.bot_data["guard_model"]
+
+    async def send(chat_id: int, text: str) -> None:
+        await send_push_digest(context.bot, chat_id, text)
+
+    await news_push.run_push_cycle(model, send)
+
+
+def register_push_job(app: Application) -> None:
+    """Wires up the periodic-push scheduler (docs/bot-features-plan.md item
+    5) -- requires the apscheduler dependency (see environment.yml) for
+    Application.job_queue to exist at all. Called by both bot.py's own
+    main() and combined_bot.py's, so standalone and combined deployment
+    both get push. `first=10` just avoids doing real work in the same
+    instant as startup; the actual per-subscriber due-check is time-based
+    (users_db's push_interval_hours / last_push_at), not this delay."""
+    app.job_queue.run_repeating(_push_job, interval=PUSH_TICK_SECONDS, first=10)
+
+
 def main():
     setup_telemetry()
     users_db.init_db()
@@ -270,6 +317,7 @@ def main():
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
     app.add_handler(CommandHandler("interests", handle_interests_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    register_push_job(app)
 
     print("Telegram bot ready (polling). Ctrl+C to stop.")
     app.run_polling()
