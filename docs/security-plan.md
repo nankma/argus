@@ -66,12 +66,23 @@ docker inspect myfirstagent-bot --format '{{json .Config.Env}}'
 ```
 
 returns `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ADMIN_CHAT_ID`, and
-`ADMIN_BOT_TOKEN` in cleartext (names and values both) — anyone with
-access to the Docker daemon on the host can read all four secrets. On a
-single-user personal machine this is low risk (whoever has Docker access
-already has full control of the box anyway). It matters more once this
-runs on a cloud host or in Kubernetes, where more principals might have
-some level of access to the node/cluster without needing full ownership.
+`ADMIN_BOT_TOKEN` in cleartext (names and values both). Of these, three
+are real bearer credentials that grant real access if leaked — the
+DeepSeek API key and the two Telegram bot tokens (one per bot, from
+BotFather). `ADMIN_CHAT_ID` is different in kind: it's just the owner's
+numeric Telegram user ID, not a credential — leaking it doesn't let anyone
+impersonate the admin, since `check_access()`/`handle_decision()` trust
+Telegram's own server-verified `chat_id`/`from_user.id` fields (see
+finding 12), which a client can't forge. It's grouped here only because
+it's part of the same env-var surface `docker inspect` exposes, not
+because it carries the same risk as the other three.
+
+Anyone with access to the Docker daemon on the host can read all four
+values. On a single-user personal machine this is low risk (whoever has
+Docker access already has full control of the box anyway). It matters
+more once this runs on a cloud host or in Kubernetes, where more
+principals might have some level of access to the node/cluster without
+needing full ownership.
 
 This is the same gap `docs/deployment-plan.md`'s "Secrets management" open
 question already flags — worth resolving as part of choosing a cloud
@@ -140,8 +151,8 @@ industry, relevant if this project ever needs them:
   considering when the K8s manifests get written.
 - **Automatic secret rotation** — cloud secret managers (including OCI
   Vault) support scheduled/triggered rotation of stored credentials. This
-  project doesn't rotate anything today (all four secrets are static,
-  set-once). Not urgent at this scale, but worth designing for once a
+  project doesn't rotate anything today (the DeepSeek key and the two
+  Telegram bot tokens are all static, set-once). Not urgent at this scale, but worth designing for once a
   real vault is in place — rotation is far easier to bolt on early than
   retrofit later.
 
