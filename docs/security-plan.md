@@ -287,6 +287,13 @@ per-user source selection, proactive push) don't meaningfully raise this
 risk on their own, but keep it in mind for anything added later that
 expands what a tool call can actually do.
 
+**Related but distinct, and now live**: a real *benign* scope-drift
+incident (not malicious external content — an ambiguous user question
+pulled the agent off its assigned role and into discussing its own
+implementation) — see `docs/guardrails-plan.md` for the incident and the
+four-layer mitigation plan (pre-filter, secondary classifier gateway,
+hardened system prompt, output-side check). Not built yet.
+
 ### 6. `admin_bot.py` confirms its own existence to non-admins
 
 `reject_non_admin` replies "This bot is private." to anyone who isn't the
