@@ -25,7 +25,10 @@ Run:
 
 import asyncio
 import os
+import re
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from langchain_deepseek import ChatDeepSeek
 from agent import MODEL, build_agent, run_agent, setup_telemetry
@@ -37,10 +40,31 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 # the CLI's messages list. Not persisted; fine for now, revisit if needed.
 chat_histories: dict[int, list] = {}
 
+_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>")
+
+
+def _is_html_balanced(text: str) -> bool:
+    """True if `text` has no unclosed HTML tag — open/close tag counts
+    match. Doesn't validate proper nesting, just depth — good enough given
+    the small, LLM-produced tag vocabulary this bot actually asks for
+    (b, i, a), not arbitrary/adversarial HTML."""
+    depth = 0
+    for m in _HTML_TAG_RE.finditer(text):
+        depth += -1 if m.group(0).startswith("</") else 1
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def _strip_html_tags(text: str) -> str:
+    return _HTML_TAG_RE.sub("", text)
+
 
 def split_for_telegram(text: str) -> list[str]:
     """Telegram rejects messages over 4096 characters. Split on that
-    boundary, preferring to break at the last newline within a chunk."""
+    boundary, preferring to break at a newline, and never at a point that
+    would leave an HTML tag open in one chunk with its closing tag in the
+    next — Telegram would reject that chunk as unparseable entities."""
     if len(text) <= TELEGRAM_MESSAGE_LIMIT:
         return [text]
     chunks = []
@@ -51,6 +75,9 @@ def split_for_telegram(text: str) -> list[str]:
         split_at = text.rfind("\n", 0, TELEGRAM_MESSAGE_LIMIT)
         if split_at <= 0:
             split_at = TELEGRAM_MESSAGE_LIMIT
+        while split_at > 0 and not _is_html_balanced(text[:split_at]):
+            prev_newline = text.rfind("\n", 0, split_at)
+            split_at = prev_newline if prev_newline > 0 else split_at - 1
         chunks.append(text[:split_at])
         text = text[split_at:].lstrip("\n")
     return chunks
@@ -123,8 +150,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     chat_histories[chat_id] = messages
 
-    for chunk in split_for_telegram(messages[-1].content):
-        await update.message.reply_text(chunk)
+    chunks = split_for_telegram(messages[-1].content)
+    for i, chunk in enumerate(chunks):
+        if i > 0:
+            # Small gap between sequential messages -- avoids hitting
+            # Telegram's rate limit on rapid-fire sends and reads as a
+            # steady stream instead of a burst.
+            await asyncio.sleep(1)
+        try:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        except BadRequest:
+            # The model didn't produce valid HTML (unescaped &/</>, a tag
+            # it wasn't asked to use, etc.) -- fall back to plain text so
+            # the user still gets an answer instead of silence.
+            await update.message.reply_text(_strip_html_tags(chunk))
 
 
 def main():

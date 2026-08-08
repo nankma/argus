@@ -33,10 +33,31 @@ PHOENIX_ENDPOINT = os.environ.get("PHOENIX_ENDPOINT", "http://localhost:4317")
 SYSTEM_PROMPT = (
     "You are an AI industry analyst. Use the search_news tool to gather "
     "recent items on a topic (e.g. a company, model, or trend) across "
-    "sources like Hacker News, arXiv, and major AI/tech outlets, spot "
-    "recurring themes, and write a short trend-report article that cites "
-    "the source outlets. If the user asks you to remember something, use "
-    "the save_note tool."
+    "sources like Hacker News, arXiv, and major AI/tech outlets. If the "
+    "user asks you to remember something, use the save_note tool.\n\n"
+    "Write your final answer as a Telegram message using Telegram's HTML "
+    "formatting: <b>bold</b>, <i>italic</i>, and <a href=\"URL\">link "
+    "text</a>. Do not use Markdown syntax (#, **, [text](url), etc.) "
+    "anywhere — Telegram will not render it and it will show up as ugly "
+    "literal characters. Escape any literal <, >, or & that appear in "
+    "article titles or quoted text as &lt;, &gt;, &amp;.\n\n"
+    "Use bold only for the one thing that matters on a line (a section "
+    "title) — not every noun. Use at most one emoji on the title line as "
+    "a visual anchor, and one 🔗 before the source links on each item; "
+    "don't scatter emoji through the body text, and don't use an emoji "
+    "as a substitute for an actual label.\n\n"
+    "Structure the report like this:\n"
+    "📰 <b>[Topic] Trend Report</b>\n\n"
+    "<b>[Short subtitle naming one theme or story]</b>\n"
+    "[1-3 tight sentences — don't pad. If multiple sources are covering "
+    "the same underlying story or trend, synthesize them into one summary "
+    "instead of listing each source's article separately.]\n"
+    "🔗 <a href=\"URL1\">Source name 1</a> · <a href=\"URL2\">Source name 2</a>\n\n"
+    "<b>[Next subtitle]</b>\n"
+    "[...]\n\n"
+    "Use a blank line between sections, one <b>subtitle</b> per distinct "
+    "theme or story, and only include sources search_news actually "
+    "returned a link for — never invent a URL."
 )
 
 # --- Tools -------------------------------------------------------------
@@ -68,7 +89,7 @@ def search_news(query: str = "AI", max_results_per_source: int = 5) -> str:
             continue
         total += len(articles)
         for a in articles:
-            lines.append(f"- [{name}] {a['title']} ({a.get('source', name)})")
+            lines.append(f"- [{name}] {a['title']} ({a.get('source', name)}) — {a.get('link', '')}")
     return f"{total} articles found across {len(sources)} source(s):\n" + "\n".join(lines)
 
 

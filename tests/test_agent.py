@@ -57,6 +57,7 @@ def test_search_news_aggregates_and_isolates_errors(monkeypatch):
     assert len(tool_messages) == 1
     tool_output = tool_messages[0].content
     assert "Test Article" in tool_output
+    assert "https://example.com" in tool_output  # link must be surfaced so the model can cite it
     assert "ERROR: simulated network failure" in tool_output
     # one failing source must not prevent the other source's results from
     # reaching the model, or the final answer from being produced

@@ -2,9 +2,11 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from telegram.error import BadRequest
+
 import bot
 import users_db
-from bot import TELEGRAM_MESSAGE_LIMIT, split_for_telegram
+from bot import TELEGRAM_MESSAGE_LIMIT, _is_html_balanced, _strip_html_tags, split_for_telegram
 
 
 def test_split_for_telegram_short_text_unchanged():
@@ -30,6 +32,32 @@ def test_split_for_telegram_prefers_newline_boundary():
     chunks = split_for_telegram(text)
     assert chunks[0] == first_line
     assert chunks[1] == second_line
+
+
+def test_split_for_telegram_does_not_split_mid_tag():
+    # Put a <b>...</b> tag straddling where the naive newline-based split
+    # would otherwise land, and confirm every chunk still has all its tags
+    # closed rather than being cut in half.
+    padding = "x" * (TELEGRAM_MESSAGE_LIMIT - 20)
+    text = f"{padding}\n<b>this tag spans the naive split point</b>\nmore text after"
+    chunks = split_for_telegram(text)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert _is_html_balanced(chunk)
+    assert "<b>this tag spans the naive split point</b>" in "".join(chunks)
+
+
+def test_is_html_balanced():
+    assert _is_html_balanced("plain text") is True
+    assert _is_html_balanced("<b>bold</b>") is True
+    assert _is_html_balanced("<b>bold and <i>italic</i></b>") is True
+    assert _is_html_balanced("<b>unclosed") is False
+    assert _is_html_balanced("closed</b> with no opener") is False
+
+
+def test_strip_html_tags():
+    assert _strip_html_tags("<b>bold</b> and <a href=\"x\">link</a>") == "bold and link"
+    assert _strip_html_tags("plain text") == "plain text"
 
 
 def _make_update(chat_id, username="alice", first_name="Alice"):
@@ -90,3 +118,36 @@ def test_check_access_registers_new_request_and_notifies_admin(isolated_subscrib
     assert asyncio.run(bot.check_access(update, _make_context())) is False
     assert users_db.get_status(4) == users_db.PENDING
     notify.assert_called_once()
+
+
+def test_handle_message_sends_with_html_parse_mode(isolated_subscribers_db, monkeypatch):
+    update = _make_update(chat_id=999)  # admin -- bypasses check_access
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    monkeypatch.setattr(bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="<b>Hi</b>")]))
+
+    asyncio.run(bot.handle_message(update, context))
+
+    update.message.reply_text.assert_called_once()
+    args, kwargs = update.message.reply_text.call_args
+    assert args[0] == "<b>Hi</b>"
+    assert kwargs["parse_mode"] is not None
+
+
+def test_handle_message_falls_back_to_plain_text_on_bad_request(isolated_subscribers_db, monkeypatch):
+    update = _make_update(chat_id=999)  # admin -- bypasses check_access
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    monkeypatch.setattr(
+        bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="<b>Broken</b> tag <i>oops")])
+    )
+    update.message.reply_text = AsyncMock(side_effect=[BadRequest("can't parse entities"), None])
+
+    asyncio.run(bot.handle_message(update, context))
+
+    assert update.message.reply_text.call_count == 2
+    first_args, first_kwargs = update.message.reply_text.call_args_list[0]
+    assert first_kwargs["parse_mode"] is not None
+    second_args, second_kwargs = update.message.reply_text.call_args_list[1]
+    assert "<" not in second_args[0]  # tags stripped in the fallback
+    assert "parse_mode" not in second_kwargs
