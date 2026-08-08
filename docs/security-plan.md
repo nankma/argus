@@ -33,6 +33,7 @@ limiting** (finding 3) — worth fixing, not an active exploit today.
 | 14 | Cloud VM OS-level hardening (SSH, patching) | Medium | Partially done — see below. Now live: Oracle `us-sanjose-1`, `VM.Standard.E2.1.Micro` |
 | 15 | IAM policy scoping for whichever secret manager is used | Low | Design-time reminder, not a current gap (nothing built yet) |
 | 16 | No audit logging on secret access | Low | Comes largely free once a real vault is adopted (finding 2) |
+| 17 | Phoenix telemetry access control | Resolved | **Done and verified live** — native auth, network isolation, Vault-stored API key, see below |
 
 ## Findings
 
@@ -395,6 +396,68 @@ secret manager is adopted: OCI Vault (like Azure Key Vault, AWS Secrets
 Manager, etc.) logs every secret read via the platform's audit service by
 default. Not something to build separately — just confirm it's turned on
 when finding 2 is implemented.
+
+### 17. Phoenix telemetry access control
+
+Phoenix went from "not deployed" to "live and receiving real trace data
+(conversation content, tool calls, token usage)" this session, which
+raised its own access-control surface — worth a dedicated finding rather
+than folding into finding 14 (that one's about OS-level VM hardening;
+this is about Phoenix's own application-level access design). Full setup
+detail lives in `docs/deployment-plan.md`'s "Live Phoenix deployment"
+section; this is the security-relevant summary.
+
+**Isolated on its own VM.** `myfirstagent-phoenix`, separate from the bot
+— not primarily a security boundary (the main reason was Phoenix's memory
+spikes potentially OOMing the bot too), but it does mean a Phoenix
+compromise doesn't automatically hand over the bot's process/secrets, and
+vice versa.
+
+**Native auth, with the actual default-credential trap avoided.**
+`PHOENIX_ENABLE_AUTH=true` plus a random `PHOENIX_SECRET` — but enabling
+auth alone leaves the login as the well-known `admin`/`admin`, which
+would have been a real hole (an authenticated-but-default-credentialed
+instance is barely better than no auth). Fixed by also setting
+`PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD` to a random value, caught by
+reading `phoenix.auth`'s source rather than assuming enabling auth was
+sufficient on its own. Login identifier is an email (`admin@localhost`),
+not the username — a UX trap, not a security one, but worth recording
+since it looks like a login failure otherwise.
+
+**Network isolation, not just app-level auth — defense in depth.** Ports
+6006 (web UI) and 4317 (OTLP) are not open to the public internet at all;
+confirmed by testing from outside that the ports are unreachable. Human
+access to the UI is SSH-tunnel-only. The bot's OTLP traffic is allowed
+only from the VCN's private subnet (`10.0.0.0/24`), not the internet —
+requiring changes at **two independent firewall layers** (OCI's
+cloud-level Security List, and the VM's own local `iptables`, which
+Oracle's Ubuntu images ship with a restrictive default — SSH allowed,
+everything else `REJECT`ed). Missing either layer would have left the
+port effectively closed anyway, so the two layers aren't fully redundant
+with each other, but the practical effect is the same principle as the
+bot's own "no inbound ports needed" design (finding 11): even if
+Phoenix's own auth were somehow bypassed, the port isn't reachable from
+outside the VCN to begin with.
+
+**OTLP ingestion needs its own credential — not just human login.** A
+real gotcha: `PHOENIX_ENABLE_AUTH` blocks the trace-ingestion endpoint
+too, not only the web UI — the bot ran with zero errors while every trace
+was silently rejected, until a **Phoenix System API Key** was created
+(via GraphQL `createSystemApiKey` — no REST/UI shortcut exists for this)
+and passed as `PHOENIX_API_KEY`. This key is now a fifth OCI Vault secret
+(`phoenix-api-key`), fetched by `docker-entrypoint.sh` exactly like the
+other four in finding 2 — no plaintext credential in `docker run -e` or
+`docker inspect`, same as everything else.
+
+**No separate credential needed for future diagnostic access, human or
+otherwise.** The same System API Key doubles as a bearer token for
+*read* queries (`/v1/projects`, span data, etc.), confirmed directly —
+not just write/ingestion. This means diagnosing a future issue (in this
+session or any later one) never needs the human admin's password: fetch
+`phoenix-api-key` from Vault via the bot VM's existing Instance Principal
+access (the same mechanism `docker-entrypoint.sh` already uses), then
+query Phoenix's API directly. One fewer shared human credential in the
+loop, and one fewer thing that needs rotating/protecting outside Vault.
 
 ## Remaining work
 
