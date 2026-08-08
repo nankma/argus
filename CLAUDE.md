@@ -25,7 +25,7 @@ There is no lint config or build step. There is a test suite (`tests/`, pytest) 
 
 ## Architecture
 
-Three files: `agent.py` (agent/tools/CLI), `news_sources.py` (the pluggable source registry `search_news` draws on — see below), and `bot.py` (Telegram entry point — see **Telegram Bot** section below).
+Core files: `agent.py` (agent/tools/CLI), `news_sources.py` (the pluggable source registry `search_news` draws on — see below), `bot.py` (Telegram entry point — see **Telegram Bot** section below), `admin_bot.py` (the access-control companion bot), and `users_db.py` (the SQLite store both bots share for approval state).
 
 `agent.py`:
 
@@ -67,6 +67,8 @@ See `docs/telemetry-and-testing-plan.md` item 3 for the full story (why the orig
 conda activate myfirstagent
 $env:DEEPSEEK_API_KEY = "<your-deepseek-key>"
 $env:TELEGRAM_BOT_TOKEN = "<your-bot-token>"   # from @BotFather
+$env:ADMIN_CHAT_ID = "<your-telegram-numeric-user-id>"
+$env:ADMIN_BOT_TOKEN = "<second-bot-token-for-admin_bot.py>"
 python bot.py
 ```
 
@@ -74,6 +76,23 @@ python bot.py
 - `run_agent` is synchronous but python-telegram-bot's handlers are async — `handle_message` calls it via `asyncio.to_thread(...)` rather than blocking the bot's event loop.
 - Per-chat history is an in-memory `dict[chat_id, messages]`, same non-persistence as the CLI's `messages` list — lost on restart.
 - Telegram rejects messages over 4096 characters, which this agent's trend reports can easily exceed. `split_for_telegram()` chunks long replies (preferring a newline boundary) and sends each as a separate message — covered by `tests/test_bot.py`.
+
+### Access control
+
+`bot.py` is gated by an admin-approval workflow, not open to anyone who finds it — see `docs/bot-features-plan.md` item 1 for the full design rationale. Summary:
+
+- `ADMIN_CHAT_ID` (your own numeric Telegram user ID, not username) always passes `check_access()` in `bot.py`.
+- Anyone else's first message inserts a `pending` row into `users_db.py`'s SQLite `subscribers` table and pings the admin — via **`admin_bot.py`, a second bot with its own token** — with an inline-keyboard message (Approve / Deny buttons, not a text reply). This keeps approval controls off the same bot a stranger can message.
+- Tapping a button fires a `callback_query` that `admin_bot.py`'s `CallbackQueryHandler` catches: updates `subscribers`, edits the message to show the decision, and messages the requester (via `bot.py`'s token) with the outcome.
+- Run `admin_bot.py` alongside `bot.py` (same env, needs `ADMIN_BOT_TOKEN`, `ADMIN_CHAT_ID`, and `TELEGRAM_BOT_TOKEN` — the last one so it can notify approved/denied users):
+  ```powershell
+  conda activate myfirstagent
+  $env:ADMIN_BOT_TOKEN = "<second-bot-token-from-botfather>"
+  $env:ADMIN_CHAT_ID = "<your-telegram-numeric-user-id>"
+  $env:TELEGRAM_BOT_TOKEN = "<the-info-bot-token>"
+  python admin_bot.py
+  ```
+- Both processes must point at the same SQLite file — `SUBSCRIBERS_DB_FILE` env var (defaults to `subscribers.db` in the working directory), same configurability reasoning as `agent.py`'s `PHOENIX_ENDPOINT`. Not yet solved for the containerized/multi-container case — see `docs/deployment-plan.md`.
 
 ### Running it in Docker
 
@@ -84,6 +103,7 @@ docker run -d --name myfirstagent-bot -e DEEPSEEK_API_KEY=$env:DEEPSEEK_API_KEY 
 
 `Dockerfile` uses `mambaorg/micromamba` and installs straight from `environment.yml` — same dependency source as local dev and CI, no separate pip requirements file. `CMD` runs `bot.py` (the headless entry point), not the CLI. Image is ~900MB — a deliberate tradeoff for conda-forge consistency over a smaller `pip`+slim image; see `docs/deployment-plan.md` if that needs revisiting. `PHOENIX_ENDPOINT` is configurable via env var for this reason — `localhost` only resolves correctly for local dev, not once Phoenix runs as a separate container/service.
 - Verified end-to-end against the real Telegram API, not just "the code runs": confirmed the token via `getMe`, then had a human message the live bot and confirmed a real reply came back.
+- Four further requested features (translation, DB-backed per-user preferences, per-user search-source selection, proactive push) are planned but not built — see `docs/bot-features-plan.md`. Access control (the fifth, and the urgent one) is done — see **Access control** above.
 
 ## Testing
 
@@ -96,9 +116,11 @@ No `DEEPSEEK_API_KEY` or network access needed — the whole suite runs in ~1.5s
 
 - `tests/fakes.py` — `FakeToolCallingModel` (see the `build_agent` note above for why it's custom, not a LangChain built-in) and `RecordingCallbackHandler` (in-memory stand-in for a real telemetry backend).
 - `tests/fixtures.py` — mock response payloads for `news_sources.py`'s fetchers, matching real responses captured during live verification (Perigon excepted — unverified, no API key available).
-- `tests/conftest.py` — `isolated_notes_file` fixture, monkeypatches `agent.NOTES_FILE` so `save_note` tests never touch the real `notes.jsonl`.
+- `tests/conftest.py` — `isolated_notes_file` and `isolated_subscribers_db` fixtures, monkeypatching `agent.NOTES_FILE` / `users_db.DB_FILE` so tests never touch the real `notes.jsonl` / `subscribers.db`.
 - `tests/test_telemetry.py` — only the `PHOENIX_ENABLED` gating logic (register not called when unset, called with expected args when set). Does not test actual tracing — that needs the real Docker container and is verified manually instead (see **Telemetry** above).
-- `tests/test_bot.py` — only `split_for_telegram()`'s chunking logic (pure function, no Telegram API needed). The actual bot integration is verified manually against the real Telegram API instead (see **Telegram Bot** above).
+- `tests/test_bot.py` — `split_for_telegram()`'s chunking logic, plus `check_access()`'s branching (admin bypass, approved/pending/denied, new-request registration + admin notification), with `notify_admin` and the Telegram `Update`/`context` objects mocked. The actual bot integration is verified manually against the real Telegram API instead (see **Telegram Bot** above).
+- `tests/test_admin_bot.py` — `handle_decision()`'s approve/deny/non-admin-tap branching, with `telegram.Bot` mocked.
+- `tests/test_users_db.py` — the `subscribers` SQLite table's CRUD functions, via the `isolated_subscribers_db` fixture (temp DB file per test).
 - HTTP mocking via the `requests_mock` pytest fixture (auto-registered by the `requests-mock` package).
 
 See `docs/telemetry-and-testing-plan.md` for what's covered, what's explicitly not, and what's still planned (CI/CD, LLM-judged end-to-end evaluation). See `docs/deployment-plan.md` for the plan to containerize `agent.py` itself and deploy to Kubernetes/cloud (separate from, but related to, the Docker usage here).

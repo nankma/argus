@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
 notes.jsonl
+subscribers.db
 .claude/settings.local.json
 .pytest_cache/
+*.out.log
+*.err.log
+*.pid.txt
