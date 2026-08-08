@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-An AI-industry news-trend agent built on **LangChain**, using DeepSeek as the LLM (`langchain-deepseek`'s `ChatDeepSeek`). It calls `search_news` to pull recent items from multiple AI-focused sources (Hacker News, arXiv, company blogs, tech press — see `docs/ai-news-sources.md`), then writes a short trend-report article from what it finds, citing sources. It also has `save_note` for the model to persist arbitrary short notes.
+A technology-industry news-trend agent built on **LangChain**, using DeepSeek as the LLM (`langchain-deepseek`'s `ChatDeepSeek`). It calls `search_news` to pull recent items from multiple tech-focused sources (Hacker News, arXiv, company blogs, tech press — see `docs/ai-news-sources.md`), then writes a short trend-report article from what it finds, citing sources. It also has `save_note` for the model to persist arbitrary short notes. Scope was AI-industry-only originally; broadened to technology industry generally (AI included, not AI-only) alongside per-user `interests` (see **Telegram Bot** below and `docs/bot-features-plan.md` item 3) — different subscribers can care about different tech topics, so the shared scope had to stop being hardcoded to one person's interest.
 
 This was originally a raw `openai`-SDK script (DeepSeek is OpenAI Chat Completions–compatible) with a hand-written tool-calling loop. It was migrated to LangChain's `create_agent` to get a framework-managed agent loop, and — per `docs/telemetry-and-testing-plan.md` — to make the model and telemetry swappable for CI testing later (fake LLM + fake logger, no real API calls in tests). See that doc for what's built vs. still planned.
 
@@ -78,6 +78,7 @@ python bot.py
 - `run_agent` is synchronous but python-telegram-bot's handlers are async — `handle_message` calls it via `asyncio.to_thread(...)` rather than blocking the bot's event loop.
 - Per-chat history is an in-memory `dict[chat_id, messages]`, same non-persistence as the CLI's `messages` list — lost on restart.
 - Telegram rejects messages over 4096 characters, which this agent's trend reports can easily exceed. `split_for_telegram()` chunks long replies (preferring a newline boundary, and never splitting in a way that would leave an HTML tag open in one chunk and its closing tag in the next) and sends each as a separate message with a 1s gap between chunks — covered by `tests/test_bot.py`. If Telegram rejects a chunk's HTML (`BadRequest` — usually the model produced unescaped `&`/`<`/`>` or an unexpected tag), `handle_message` retries that chunk as plain text via `_strip_html_tags()` rather than failing silently.
+- `/interests` command (a `CommandHandler`, separate from the plain-text `MessageHandler`) — show/set/clear a per-chat list of topics, stored via `users_db.get_interests()`/`set_interests()`. `handle_message()` prepends a bracketed note with the caller's interests to the *agent-facing* copy of their message only (not what the guardrail classifiers see, and not what gets echoed back) — see `docs/bot-features-plan.md` item 3.
 
 ### Access control
 

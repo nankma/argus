@@ -11,7 +11,7 @@ questions before implementation starts, same pattern as
 |---|------|--------|----------|
 | 1 | Bot access control (admin-approval workflow) | **Done — see below** | Was urgent — bot was live and unrestricted |
 | 2 | Per-user response language / translation | Not started | Normal — benefits from #1's DB existing |
-| 3 | Multi-user subscribers + DB-backed sessions | Partially done — `users_db.py`'s `subscribers` table exists (built for #1) but only tracks approval status, not language/sources/topics yet | Normal — extend for #2/#4/#5 |
+| 3 | Multi-user subscribers + DB-backed sessions | Partially done — approval status (#1) and per-user `interests` are both live; language/sources/conversation-history persistence still missing | Normal — extend for #2/#4/#5 |
 | 4 | Per-user search-source configuration | Not started | Normal — depends on #3 |
 | 5 | Proactive news push (hourly digest) | Not started | Explicitly deferred by request — depends on #3 |
 
@@ -119,9 +119,10 @@ respond in.
 still in-memory only — lost on every restart. The subscriber/approval
 side of this item shipped as part of #1: **`users_db.py`'s SQLite
 `subscribers` table already exists**, tracking `chat_id`, `username`,
-`first_name`, `status`, `requested_at`, `decided_at`. What's still missing
-is the per-user *preference* state #2, #4, and #5 need (language, enabled
-sources, watched topics) and persisted conversation history.
+`first_name`, `status`, `requested_at`, `decided_at`. **Per-user
+interests are now built too** (see below) — extended the same table
+rather than a new one, as planned. Still missing: #2's language
+preference, #4's source selection, and persisted conversation history.
 
 - **Store: SQLite**, not a separate database server — already the choice
   made for #1's `subscribers` table, for the same reasons: a single file,
@@ -132,16 +133,42 @@ sources, watched topics) and persisted conversation history.
   owner-plus-a-few-friends subscriber list; revisit only if the user count
   grows enough for concurrent-write contention to become a real concern,
   which SQLite handles poorly.
-- Likely shape going forward: extend the existing `subscribers` table with
-  nullable columns (`language`, etc.) rather than a new table, plus
-  whatever #4 and #5 need — exact schema to be finalized when one of those
-  is actually built, not now.
-- **"Session data lifetime"** (raised in the original request) is an open
-  question, not yet decided: does conversation history expire after N days
-  of inactivity, or persist indefinitely? A personal-scale bot probably
-  doesn't need aggressive expiry, but this should be a deliberate choice,
-  not an accident — flagging it here so it isn't forgotten when the schema
-  is designed.
+- **Also evaluated and rejected: Oracle NoSQL Database Cloud Service**
+  (Cosmos-DB-like — shard key + additional key columns, native JSON
+  column type). Its Always Free allocation (3 tables, 25GB/50 RU/50 WU
+  each) is genuinely generous for this project's scale, but it's
+  **region-locked to Phoenix (us-phoenix-1)**, and this tenancy's Free
+  tier account type is hard-capped at **one subscribed region with no
+  increase path** (confirmed via Oracle's own docs and this tenancy's
+  actual "exceeded maximum regions" warning when attempting to subscribe).
+  Creating a table in the home region instead showed no "Always Free
+  eligible" indicator and offered only Provisioned/On-Demand paid capacity
+  modes — would have started incurring real charges. Not revisitable
+  without a paid account tier.
+- **Interests, built**: `interests` column (JSON-encoded list of topic
+  strings), added via a checked `ALTER TABLE` migration since the live
+  `subscribers.db` predates this column and `CREATE TABLE IF NOT EXISTS`
+  alone wouldn't add it to an existing table. `get_interests()`/
+  `set_interests()` in `users_db.py`; `set_interests()` upserts since a
+  chat_id may have no row at all yet (the admin, who bypasses
+  `request_access()` entirely via the `check_access()` fast path).
+  `bot.py`'s `/interests` command lets a user show/set/clear their own
+  (comma-separated topics). `handle_message()` prepends a bracketed note
+  with the user's interests to the *agent-facing* copy of their message
+  only — the guardrail classifiers (`docs/guardrails-plan.md`) still judge
+  the user's actual raw text, not a synthetic wrapper.
+- **This drove a scope change beyond just storage**: the original
+  `SYSTEM_PROMPT` and `docs/guardrails-plan.md`'s classifiers were
+  hardcoded to "AI industry" specifically, because that's the owner's own
+  interest — but subscribers can care about different tech topics. Both
+  were broadened to "technology industry" generally (AI included, not
+  AI-only), so the guardrails don't reject the bot's own on-topic answers
+  to a subscriber's non-AI tech questions.
+- **"Session data lifetime"** (raised in the original request) is still an
+  open question, not yet decided: does conversation history expire after N
+  days of inactivity, or persist indefinitely? A personal-scale bot
+  probably doesn't need aggressive expiry, but this should be a deliberate
+  choice, not an accident.
 - **Deployment implication:** a SQLite file needs a persistent volume — a
   bind mount for local Docker, and a Kubernetes `PersistentVolumeClaim`
   once `docs/deployment-plan.md` item 2 (K8s manifests) is written. Add
