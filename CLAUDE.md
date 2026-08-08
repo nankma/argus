@@ -92,7 +92,8 @@ python bot.py
   $env:TELEGRAM_BOT_TOKEN = "<the-info-bot-token>"
   python admin_bot.py
   ```
-- Both processes must point at the same SQLite file — `SUBSCRIBERS_DB_FILE` env var (defaults to `subscribers.db` in the working directory), same configurability reasoning as `agent.py`'s `PHOENIX_ENDPOINT`. Not yet solved for the containerized/multi-container case — see `docs/deployment-plan.md`.
+- Both processes must point at the same SQLite file — `SUBSCRIBERS_DB_FILE` env var (defaults to `subscribers.db` in the working directory), same configurability reasoning as `agent.py`'s `PHOENIX_ENDPOINT`. Solved for local Docker via a shared named volume (`myfirstagent-data`) mounted into both containers — not yet solved for Kubernetes, see `docs/deployment-plan.md`.
+- See `docs/security-plan.md` for a full security review (secrets handling, rate limiting, prompt-injection surface, CI scanning gaps) done before moving to cloud deployment.
 
 ### Running it in Docker
 

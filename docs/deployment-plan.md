@@ -13,6 +13,7 @@ starts, same pattern as `docs/telemetry-and-testing-plan.md`.
 | 2 | Kubernetes manifests (Deployment, Service, Secret, etc.) | Not started |
 | 3 | Cloud provider / hosting target | Not decided |
 | 4 | Refactor `main()` from interactive CLI to a headless service | Done — Telegram bot, polling mode |
+| 5 | Security review + hardening | Reviewed — see `docs/security-plan.md`. No blocking issues found; secrets-management decision (that doc's finding 2) should be made alongside item 3, not after |
 
 ## The blocking architectural gap
 
@@ -121,12 +122,18 @@ that scheme inside it).
   Kubernetes flavor (EKS/GKE/AKS/self-managed) and how secrets are managed.
   This is now the only remaining blocker before Kubernetes manifests (item
   2) can be written.
-- **Secrets management** — `DEEPSEEK_API_KEY` (and any telemetry
-  credentials) currently come from a local env var / `docker run -e`. In
-  Kubernetes this becomes a `Secret` object at minimum; a cloud-native
-  secret manager (e.g. AWS Secrets Manager, GCP Secret Manager) integrated
-  via the cluster's CSI driver is the more production-grade option — not
-  decided which.
+- **Secrets management** — `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`,
+  `ADMIN_CHAT_ID`, `ADMIN_BOT_TOKEN` (and any telemetry credentials)
+  currently come from a local env var / `docker run -e`, confirmed
+  readable in plaintext via `docker inspect` by anyone with Docker daemon
+  access on the host — see `docs/security-plan.md` finding 2. In
+  Kubernetes this becomes a `Secret` object at minimum (base64, not
+  encrypted, by default); a cloud-native secret manager (e.g. AWS Secrets
+  Manager, GCP Secret Manager) integrated via the cluster's CSI driver, or
+  a tool like Sealed Secrets, is the more production-grade option — not
+  decided which, but should be decided alongside the cloud provider choice
+  since the right answer depends on which provider's native secret
+  manager is available.
 - **CI/CD overlap** — `docs/telemetry-and-testing-plan.md` item 4 (test
   CI) and this deployment work are related but distinct: one runs `pytest`
   on every push, the other builds/pushes a container image and deploys it.
