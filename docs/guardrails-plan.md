@@ -105,6 +105,16 @@ grow unwieldy.
 
 ### 2. Cheap secondary classifier — the "gateway" (item 2 from the ask)
 
+**Planned evolution, not built yet**: `is_input_on_topic`'s plain boolean
+is becoming a richer router — see `docs/context-management-plan.md`'s
+"router design" section. The same classification call that decides
+on-topic/off-topic will also return a `category` (news query vs. setting
+an interest vs. toggling proactive push, etc.), feeding directly into
+which instructions/tool the main agent reaches for that turn — one call
+doing double duty instead of stacking a separate intent-classification
+call on top. This section describes the *current*, still-boolean-only
+behavior; update once the router ships.
+
 A second, separate DeepSeek call — not a different/smaller model, per the
 user's own framing ("now just the same one") — with a tightly-scoped
 prompt whose only job is answering one question: *is this message a

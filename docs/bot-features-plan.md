@@ -225,6 +225,15 @@ request-then-respond-only shape.
   one "can be later." Listed here for completeness and because it shares
   the DB dependency with #2 and #4, so it's worth designing the schema in
   #3 with this in mind even if #5 itself isn't built yet.
+- **Intent recognition split from scheduling, per `docs/context-management-plan.md`**:
+  the natural-language *toggle* ("start/stop pushing me news") is being
+  built alongside that doc's router design — a `push_enabled` column and a
+  `set_push_enabled` tool the agent can call, controlled entirely by
+  conversation (no `/command`, since voice input is an eventual goal and
+  voice has no slash commands) — but the actual scheduled sending stays
+  out of scope for now, unchanged from the original "later" call above.
+  Recognizing the intent and flipping a flag is cheap; building the
+  scheduler is the part still deferred.
 
 ## Other messaging platforms (evaluated, not pursued)
 

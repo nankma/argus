@@ -136,52 +136,122 @@ LangGraph's `Store` abstraction on top would be a second persistence
 mechanism to keep in sync for no functional gain at this project's scale.
 Layer 3's middleware can just call `users_db.get_interests()` directly.
 
-## Sketch of how this maps onto the existing code
+## Verified: the middleware API this design uses
 
-Not a full implementation plan — exact LangChain middleware API details
-(decorator name, exact `ModelRequest`/state shape) need verifying against
-the actually-installed LangChain version before writing real code, same
-practice as checking `ParseMode`/`BadRequest` import paths earlier this
-project rather than assuming from memory.
+Confirmed directly against the installed `langchain==1.3.14`, not assumed:
 
-- **Layer 1**: `agent.py`'s `SYSTEM_PROMPT` shrinks to identity + scope
-  confinement + anti-role-play only — the part that's already effectively
-  layer 3 in `docs/guardrails-plan.md`'s terms. Telegram formatting and
-  tool-usage notes move out.
-- **Layer 2**: one or more middleware functions registered on
-  `create_agent(..., middleware=[...])`. Telegram formatting rules become
-  a middleware that always fires (since every response goes to Telegram
-  regardless of topic) — arguably this one is unconditional in practice,
-  which is fine, conditionality is a spectrum, not a hard rule for every
-  layer-2 fragment. Tool-usage/workflow notes become middleware that
-  fires only when relevant — "relevant" needs a decision: reuse the same
-  lightweight-classifier-call pattern already established in
-  `guardrails.py`, or simpler rule-based heuristics (e.g. presence of
-  certain keywords, or just always include tool-usage notes too since
-  they're small). Not decided — a real design choice for implementation
-  time, not this doc.
-- **Layer 3**: a middleware that calls `users_db.get_interests()` (and
-  whatever other per-user preferences exist later) and formats them into
-  a consistent prompt segment, replacing the current ad hoc
-  string-prepend in `bot.py`'s `handle_message()`.
-- **Layer 4**: unchanged — the user's raw message, already lowest in the
-  message list's actual order.
+```python
+from langchain.agents.middleware import dynamic_prompt
+from langchain.agents.middleware.types import ModelRequest
+
+@dynamic_prompt
+def my_prompt(request: ModelRequest) -> str:
+    # request.state (messages, etc.) and request.runtime.context are both
+    # available here -- runtime.context is how per-call data like chat_id
+    # gets threaded in (via create_agent's context_schema / passed at
+    # invoke time), not a global.
+    return "the full system prompt string for this call"
+
+agent = create_agent(model, tools=TOOLS, middleware=[my_prompt])
+```
+
+`dynamic_prompt` replaces the whole system message per call (not
+"append") — so layers 1-3 get composed into one string inside a single
+`dynamic_prompt` function, computed fresh each call, rather than three
+separate middleware functions each contributing a fragment. `AgentMiddleware`
+also exposes `wrap_model_call`/`before_model`/`after_model` hooks directly
+for anything `dynamic_prompt` doesn't cover (it's a thin convenience
+wrapper around `wrap_model_call` specifically for this use case).
+
+## The router design: one classifier call feeds both the guardrail and layer 2
+
+This is the piece that ties this doc together with `docs/guardrails-plan.md`
+and the newly-requested natural-language subscription management
+(subscribe/unsubscribe to topics, start/stop periodic push — all via plain
+conversation, not just `/interests`, since voice input is an eventual goal
+and voice doesn't have slash commands).
+
+**The insight**: `guardrails.py`'s layer-2 check (`is_input_on_topic`) and
+"what kind of request is this" are the same underlying question, asked
+separately today. One classification call can answer both, replacing two
+(or more) sequential LLM calls with one:
+
+```python
+class MessageClassification(BaseModel):
+    on_topic: bool
+    category: Literal[
+        "news_query", "set_interest", "remove_interest",
+        "start_push", "stop_push", "off_topic",
+    ]
+```
+
+Built with structured output (a Pydantic model via `.with_structured_output()`,
+not free-text "yes"/"no" parsing — more robust, and the natural way to
+return more than one field). This becomes the **first LLM call** per turn.
+
+**The second LLM call is the existing `create_agent` tool-calling loop —
+now doing more than search+format.** `category` from the first call feeds
+directly into the `dynamic_prompt` middleware's layer 2: which instructions
+and which tool the agent should reach for this turn.
+
+- `category == "news_query"` → layer 2 = search_news usage notes +
+  Telegram formatting rules (today's behavior, unchanged).
+- `category in ("set_interest", "remove_interest")` → layer 2 = "the user
+  wants to update their interests; use the `update_interests` tool, then
+  confirm conversationally what changed." Needs a **new tool** exposed to
+  the agent (`update_interests(action: "add"|"remove", topic: str)` calling
+  `users_db`'s existing `set_interests()`/`get_interests()`).
+- `category in ("start_push", "stop_push")` → layer 2 = "the user wants to
+  toggle periodic push; use the `set_push_enabled` tool." Needs a **new
+  tool** + a **new `users_db` column** (`push_enabled`) — this turn only
+  covers recognizing the intent and flipping the flag; the actual
+  scheduled sending is out of scope for now (`docs/bot-features-plan.md`
+  item 5, still deferred — explicitly agreed when scoping this work).
+- `category == "off_topic"` → same as today: skip the second call
+  entirely, send the redirect message.
+
+**Why this is designed for extensibility, not just this feature**: adding
+a future capability (translation, per-user source selection) means adding
+one more `category` value, one more tool, and one more `dynamic_prompt`
+branch — not touching the classifier's core shape or the agent's
+construction. `guardrails.py`'s `is_input_on_topic`/`is_output_on_topic`
+evolve into this richer classifier rather than staying a separate,
+narrower check — `docs/guardrails-plan.md` needs a corresponding update
+once this is built, since its four-layer design currently assumes a plain
+boolean gate, not a router.
+
+**Tools stay a single fixed list, not swapped per category.** `create_agent`
+takes `tools=` once at construction time; making the actual tool list
+different per request would mean rebuilding the agent per call, which is
+wasteful. Simpler and sufficient: keep one growing `TOOLS` list
+(`search_news`, `save_note`, `update_interests`, `set_push_enabled`, ...)
+always available, and let the `dynamic_prompt`-injected layer 2 text guide
+*which* tool the model reaches for this turn — LLMs are generally reliable
+at picking the right tool from a fixed set given clear per-turn framing,
+so dynamic tool-list swapping isn't needed to get the conditional-behavior
+goal.
 
 ## Open questions
 
-- Exact LangChain middleware API surface for this installed version — not
-  verified yet, needed before implementation.
-- How layer 2 decides what's "relevant" for a given turn — reuse a
-  classifier call (cost: another DeepSeek call, same tradeoff already
-  discussed in `docs/guardrails-plan.md`) vs. cheap heuristics vs. just
-  not bothering to conditionalize every fragment (some layer-2 content,
-  like Telegram formatting, is arguably always relevant anyway).
+- ~~Exact LangChain middleware API surface~~ — **verified**, see above.
+- ~~How layer 2 decides what's "relevant"~~ — **mostly resolved**: the
+  router's `category` output drives it directly for anything with a
+  distinct intent (interests, push); content that's relevant regardless
+  of category (Telegram formatting) just stays unconditional. No separate
+  relevance-classifier call needed beyond the one router call itself.
+- Exact tool signatures for `update_interests`/`set_push_enabled`, and the
+  `users_db` schema addition (`push_enabled` column) — not finalized, a
+  real design step at implementation time, not this doc.
+- How `docs/guardrails-plan.md` needs to change once `is_input_on_topic`
+  becomes this router — it currently documents a boolean layer 2; needs a
+  follow-up pass once this is built, not before.
 - Whether to formally adopt LangGraph's `Store` API later if per-user
   memory grows more complex, or keep extending `users_db.py` directly —
   leaning toward the latter unless a concrete need for `Store`-specific
   features (e.g. built-in semantic search over memories) shows up.
-- Migration order relative to `docs/guardrails-plan.md`'s own open
-  questions (cost/latency of the extra classifier calls, false-positive
-  tuning from the "What's trending?" incident) — these two efforts share
-  the same "extra LLM call per turn" cost concern and should probably be
-  reasoned about together, not in isolation.
+- Net call count per turn once this ships: **one router call (replacing
+  guardrails' old input check) + the agent's own 1-2 calls + the existing
+  output check (layer 4 in `docs/guardrails-plan.md`)** — likely a wash or
+  slight improvement over today's count, not an addition, since the router
+  absorbs what used to be a separate guardrail call. Worth confirming with
+  real latency numbers once built, not assumed.
