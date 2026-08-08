@@ -1,18 +1,17 @@
 # Security Plan
 
-A security review of the codebase and current local Docker deployment,
-done before committing to a cloud provider (`docs/deployment-plan.md` item
-3). Nothing here is a blocker for *choosing* a cloud provider — but a few
-items are worth deciding before building Kubernetes manifests, since
-retrofitting secrets handling after the fact is more work than deciding it
-upfront.
+A security review of the codebase and Docker deployment, originally done
+before committing to a cloud provider (`docs/deployment-plan.md` item 3).
+**Oracle Cloud is now chosen and the bot is live** on a
+`VM.Standard.E2.1.Micro` instance — findings below updated where the move
+from "local only" to "actually on the internet" changes anything.
 
 ## Bottom line
 
 No critical, actively-exploitable vulnerability found. The two real gaps
 are **secrets stored in plaintext** (findings 1-2) and **no rate limiting**
-(finding 3) — both worth fixing, neither urgent enough to block picking a
-cloud provider and starting on Kubernetes manifests in parallel.
+(finding 3) — both worth fixing now that this is genuinely live rather than
+a local test, but neither is an active exploit today.
 
 ## Status
 
@@ -30,8 +29,8 @@ cloud provider and starting on Kubernetes manifests in parallel.
 | 10 | Non-root container user | Good — already correct | No action needed |
 | 11 | No inbound ports (polling-only architecture) | Good — already correct | No action needed |
 | 12 | Admin identity check relies on Telegram-verified `chat_id`/`from_user.id` | Good — already correct | No action needed |
-| 13 | `subscribers.db` has no backup — single Docker volume, no copy anywhere | Medium | Not started — availability risk, not a vulnerability |
-| 14 | Cloud VM OS-level hardening (SSH, patching) not yet planned | Medium | Not started — needs deciding once a specific provider/VM is chosen |
+| 13 | `subscribers.db` has no backup — single Docker volume, no copy anywhere | Medium | Not started — availability risk, now live on the real VM, not just local |
+| 14 | Cloud VM OS-level hardening (SSH, patching) | Medium | Partially done — see below. Now live: Oracle `us-sanjose-1`, `VM.Standard.E2.1.Micro` |
 | 15 | IAM policy scoping for whichever secret manager is used | Low | Design-time reminder, not a current gap (nothing built yet) |
 | 16 | No audit logging on secret access | Low | Comes largely free once a real vault is adopted (finding 2) |
 
@@ -318,14 +317,22 @@ a couple of friends" scale.
 
 ### 14. Cloud VM OS-level hardening
 
-Not yet relevant since no cloud host exists — but whichever provider gets
-picked (`docs/deployment-plan.md` item 3), if it's a plain Compute VM
-(rather than a fully managed service), standard hardening applies: SSH
-key-only auth (no password login), restrict SSH source IPs where
-possible, keep the OS patched, disable unused services. None of this is
-built or decided yet; flagging so it isn't skipped when the VM is actually
-provisioned. Not a concern at all for fully-managed/serverless options
-that don't expose SSH.
+Now live and relevant: Oracle `VM.Standard.E2.1.Micro`, `us-sanjose-1`,
+Ubuntu 24.04 Minimal, see `docs/deployment-plan.md`.
+
+- **Done**: SSH is key-only by default (OCI's instance creation only
+  offers SSH-key auth for the `ubuntu` login, no password auth was ever
+  enabled — nothing to disable). A 1GB swap file was added (see
+  deployment-plan.md) — availability/stability, not strictly security, but
+  related to keeping the box from falling over under memory pressure.
+- **Not done yet**: restricting SSH source IPs (currently open to `0.0.0.0/0`
+  on port 22 via the default security list — fine for a single-owner
+  personal box, but worth narrowing to the owner's actual IP range if that's
+  stable enough to maintain); an OS patching cadence (no unattended-upgrades
+  or manual patching schedule set up); disabling unused default services.
+  None are urgent for a single-user personal VM, but worth doing before
+  approving more subscribers or if this box starts holding anything more
+  sensitive than it does today.
 
 ### 15. IAM policy scoping (design-time reminder)
 

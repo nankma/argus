@@ -11,9 +11,58 @@ starts, same pattern as `docs/telemetry-and-testing-plan.md`.
 |---|------|--------|
 | 1 | Containerize `agent.py` (Dockerfile) | Done — see below |
 | 2 | Kubernetes manifests (Deployment, Service, Secret, etc.) | Not started |
-| 3 | Cloud provider / hosting target | Not decided |
+| 3 | Cloud provider / hosting target | **Decided and live: Oracle Cloud Always Free** — see below |
 | 4 | Refactor `main()` from interactive CLI to a headless service | Done — Telegram bot, polling mode |
-| 5 | Security review + hardening | Reviewed — see `docs/security-plan.md`. No blocking issues found; secrets-management decision (that doc's finding 2) should be made alongside item 3, not after |
+| 5 | Security review + hardening | Reviewed — see `docs/security-plan.md`. Secrets still plaintext env vars (finding 2) — OCI Vault integration not built yet |
+
+## Live deployment: Oracle Cloud Always Free
+
+Running today on **`VM.Standard.E2.1.Micro`** (AMD, 1/8 OCPU, 1GB RAM),
+region `us-sanjose-1`, Ubuntu 24.04 Minimal. Not the originally-planned
+Ampere A1 shape — switched after repeatedly hitting
+`Out of capacity for shape VM.Standard.A1.Flex in availability domain AD-1`
+(a well-known, long-running Always Free A1 capacity shortage; `us-sanjose-1`
+also only has a single AD, so "try another AD" wasn't an option, and
+Always Free A1 eligibility is home-region-only — creating it in a
+different region would have meant real charges). E2.1.Micro has no such
+capacity problem and is reliably available.
+
+What's running: `combined_bot.py` (see `docs/bot-features-plan.md` item 1
+and `CLAUDE.md`) in a single Docker container, `--restart unless-stopped`,
+using the shared `myfirstagent-data` volume for `subscribers.db` — the
+same setup verified locally, rebuilt and redeployed on the VM. **Verified
+end-to-end for real**: sent a live Telegram message to `@mnkInfo_bot` and
+got a real reply back through the deployed instance, not just "the
+container is Up."
+
+Setup notes for whoever revisits this:
+- Public IP assignment during instance creation got stuck (the
+  "Automatically assign public IPv4 address" toggle stayed disabled even
+  with a public subnet selected) — a known OCI console bug where inline
+  subnet creation during the instance wizard doesn't propagate subnet-type
+  state correctly. Fixed by creating the VCN/public subnet separately via
+  the VCN Wizard first (fully provisioned/saved), then selecting the
+  already-existing VCN/subnet from the dropdown in Create Instance instead
+  of creating either inline.
+- Added a 1GB swap file (`/swapfile`, via `fallocate`/`mkswap`/`swapon`,
+  persisted in `/etc/fstab`) as OOM insurance — the VM only has 1GB RAM
+  and no swap existed by default. The running container uses roughly
+  130-160MB at idle, well within budget, but swap is cheap insurance
+  against spikes.
+- Docker installed via the official `get.docker.com` script; image built
+  directly on the VM (native x86_64) after `scp`-ing the source files over
+  — sidesteps any cross-architecture build complexity entirely, and avoids
+  needing to set up git credentials on the VM for a private repo clone.
+- Same Docker-volume-ownership gotcha as local testing: a fresh named
+  volume is root-owned by default, and the non-root `mambauser` in the
+  container can't write to it until `chown`'d — see `docs/security-plan.md`
+  finding 13's spirit, fixed the same way as the local Docker setup was.
+
+**Revisit later if Ampere A1 capacity frees up**: 2 OCPU/12GB is a lot more
+headroom than E2.1.Micro's 1/8 OCPU/1GB. `bot.py`/`admin_bot.py` could be
+split back into two containers at that point if isolation becomes more
+valuable than the memory savings `combined_bot.py` was built for. Not
+urgent — the current setup is stable and verified working.
 
 ## The blocking architectural gap
 
@@ -130,22 +179,20 @@ that scheme inside it).
 
 ## Open questions
 
-- **Cloud provider** — not decided (AWS/GCP/Azure/other). Affects which
-  Kubernetes flavor (EKS/GKE/AKS/self-managed) and how secrets are managed.
-  This is now the only remaining blocker before Kubernetes manifests (item
-  2) can be written.
+- ~~**Cloud provider** — not decided~~ **Decided: Oracle Cloud**, live on
+  `VM.Standard.E2.1.Micro` (see above). Kubernetes flavor is now an open
+  sub-question — OCI's managed option is OKE (Oracle Kubernetes Engine);
+  not decided whether that's worth it at this scale vs. staying on plain
+  Docker on the VM.
 - **Secrets management** — `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`,
   `ADMIN_CHAT_ID`, `ADMIN_BOT_TOKEN` (and any telemetry credentials)
-  currently come from a local env var / `docker run -e`, confirmed
-  readable in plaintext via `docker inspect` by anyone with Docker daemon
-  access on the host — see `docs/security-plan.md` finding 2. In
-  Kubernetes this becomes a `Secret` object at minimum (base64, not
-  encrypted, by default); a cloud-native secret manager (e.g. AWS Secrets
-  Manager, GCP Secret Manager) integrated via the cluster's CSI driver, or
-  a tool like Sealed Secrets, is the more production-grade option — not
-  decided which, but should be decided alongside the cloud provider choice
-  since the right answer depends on which provider's native secret
-  manager is available.
+  currently come from a local env var / `docker run -e` **on the live VM**
+  now too, confirmed readable in plaintext via `docker inspect` by anyone
+  with Docker daemon access on the host — see `docs/security-plan.md`
+  finding 2. Oracle's answer is OCI Vault + Instance Principals + Dynamic
+  Groups (researched and documented in that finding, Always-Free-eligible)
+  — not implemented yet. This is the top remaining item now that the
+  provider is chosen and the bot is actually live.
 - **CI/CD overlap** — `docs/telemetry-and-testing-plan.md` item 4 (test
   CI) and this deployment work are related but distinct: one runs `pytest`
   on every push, the other builds/pushes a container image and deploys it.
