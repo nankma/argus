@@ -46,6 +46,21 @@ image.
    command). `docker load` replaces the `myfirstagent-bot:latest` tag but
    doesn't restart anything using the old image automatically.
 
+## After every deploy: check `docker logs` actually has output
+
+**Step 3.5, before the smoke test below:** run
+`sudo docker logs myfirstagent-bot` and confirm you see the startup
+messages (Phoenix's OTel registration banner, "Both bots ready
+(polling)..."). Real incident, 2026-08-09: `docker logs` returned zero
+lines for this container's *entire* uptime across this whole session's
+deploys — not a subtle bug, but nobody checked `docker logs` itself
+until a user asked a timing question that needed it. Root cause: Python
+block-buffers stdout when it isn't a TTY (true for any `docker run -d`
+container), so every `print()` in this codebase was silently never
+reaching the log stream. Fixed with `PYTHONUNBUFFERED=1` in the
+Dockerfile — if this check ever comes up empty again, that env var is
+the first thing to verify is still set.
+
 ## After every deploy: run the smoke test
 
 **Step 4, always, no exceptions:** after the container is restarted on the
