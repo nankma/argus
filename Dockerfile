@@ -11,6 +11,17 @@ WORKDIR /app
 COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py guardrails.py users_db.py docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
+# Real incident, 2026-08-09: `docker logs` returned zero lines for this
+# container's entire uptime -- not even the "Both bots ready (polling)"
+# startup print(), despite the process clearly running. Python
+# block-buffers stdout when it isn't a TTY (true for any `docker run -d`
+# container), so print() output -- including news_push.py's per-cycle
+# outcome logging, added specifically for production visibility into the
+# push scheduler -- was silently never reaching the log stream at all.
+# PYTHONUNBUFFERED forces unbuffered stdout/stderr regardless of TTY
+# status; standard fix for exactly this class of Docker logging gap.
+ENV PYTHONUNBUFFERED=1
+
 # DEEPSEEK_API_KEY, TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, and ADMIN_BOT_TOKEN
 # are never baked into the image. On OCI, docker-entrypoint.sh fetches them
 # from OCI Vault at startup via Instance Principal auth -- pass the

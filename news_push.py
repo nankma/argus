@@ -120,19 +120,42 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     doesn't stop the others, same isolation pattern as search_news's
     per-source error handling -- but unlike that isolation, every outcome
     here is printed (docker logs captures stdout) rather than swallowed
-    silently. Real incident, 2026-08-09: a subscriber reported never
-    receiving a push despite users_db showing a completed cycle (fetched
-    articles, wrote a digest, passed the guardrail, recorded the push) --
-    there was no way to confirm from logs alone whether `send` actually
-    ran or what it returned, since nothing was ever printed either way."""
+    silently, including ticks where nobody was due -- not just when
+    something actually sends.
+
+    Real incident, 2026-08-09, two parts: (1) a subscriber reported never
+    receiving a push despite users_db showing a completed cycle -- there
+    was no way to confirm from logs alone whether `send` actually ran,
+    since nothing was ever printed either way; (2) fixing that alone
+    turned out insufficient -- the container's stdout was block-buffered
+    (Python's default when stdout isn't a TTY, true for any `docker run
+    -d` container), so prints were never reaching `docker logs` at all
+    regardless of what they said (fixed separately: PYTHONUNBUFFERED=1
+    in the Dockerfile). Once both were fixed, a THIRD gap remained: the
+    same subscriber asked why a nominal 30-minute interval sometimes took
+    close to 45 -- unanswerable because only *due* subscribers were ever
+    logged, not the tick itself or why a not-yet-due subscriber was
+    skipped. This function now logs every tick's summary and every
+    subscriber's due-check outcome, not just successful sends."""
     now = now or datetime.now(timezone.utc)
-    for subscriber in users_db.list_push_enabled_subscribers():
+    subscribers = users_db.list_push_enabled_subscribers()
+    print(f"[news_push] tick at {now.isoformat()}: {len(subscribers)} push-enabled subscriber(s)")
+    for subscriber in subscribers:
         chat_id = subscriber["chat_id"]
         interests = subscriber["interests"]
         if not interests:
+            print(f"[news_push] chat_id={chat_id}: push enabled but no interests set -- skipping")
             continue
-        if not is_subscriber_due(subscriber["last_push_at"], subscriber["push_interval_hours"], now):
+        last_push_at = subscriber["last_push_at"]
+        interval_hours = subscriber["push_interval_hours"]
+        if not is_subscriber_due(last_push_at, interval_hours, now):
+            elapsed = (now - last_push_at).total_seconds() / 3600 if last_push_at else None
+            print(
+                f"[news_push] chat_id={chat_id}: not due yet "
+                f"(interval={interval_hours}h, elapsed={elapsed:.2f}h)"
+            )
             continue
+        print(f"[news_push] chat_id={chat_id}: due -- checking for new articles")
 
         try:
             new_articles = fetch_new_articles(
