@@ -38,8 +38,8 @@ REDIRECT_MESSAGE = (
     "regulation?\"\n"
     "⭐ <b>Interests</b> — \"Add robotics to my interests\", \"Remove "
     "crypto\", or use /interests to view/set them directly\n"
-    "🔔 <b>Push notifications</b> — \"Start/stop pushing me news\" (saves "
-    "your preference — scheduled sending isn't live yet)"
+    "🔔 <b>Push notifications</b> — \"Start/stop pushing me news every 4/6/"
+    "12/24 hours\""
 )
 
 Category = Literal[
