@@ -1,9 +1,6 @@
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage
-
 import guardrails
-from tests.fakes import FakeToolCallingModel
 
 
 def test_fails_local_prefilter_catches_instruction_override():
@@ -25,9 +22,9 @@ def test_fails_local_prefilter_passes_legitimate_news_question():
     assert not guardrails.fails_local_prefilter("Any trends in AI regulation this week?")
 
 
-def _fake_structured_model(classification: "guardrails.MessageClassification") -> MagicMock:
+def _fake_structured_model(return_value) -> MagicMock:
     fake_structured = MagicMock()
-    fake_structured.invoke.return_value = classification
+    fake_structured.invoke.return_value = return_value
     model = MagicMock()
     model.with_structured_output.return_value = fake_structured
     return model
@@ -68,11 +65,53 @@ def test_classify_message_fails_open_on_exception():
     assert result.category == "news_query"
 
 
-def test_is_output_on_topic_false_for_no():
-    model = FakeToolCallingModel(responses=[AIMessage(content="no")])
+def test_is_output_on_topic_false_when_discloses_own_configuration():
+    model = _fake_structured_model(
+        guardrails.OutputCheck(discusses_own_configuration=True, appropriate_bot_content=True)
+    )
     assert guardrails.is_output_on_topic(model, "Here's how to edit your CLAUDE.md...") is False
 
 
-def test_is_output_on_topic_fails_open_on_unparseable_reply():
-    model = FakeToolCallingModel(responses=[AIMessage(content="unclear, could go either way")])
+def test_is_output_on_topic_true_for_appropriate_content():
+    model = _fake_structured_model(
+        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=True)
+    )
+    assert guardrails.is_output_on_topic(model, "Here's the latest AI news...") is True
+
+
+def test_is_output_on_topic_false_for_inappropriate_content():
+    model = _fake_structured_model(
+        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+    )
+    assert guardrails.is_output_on_topic(model, "Here's a recipe for cookies...") is False
+
+
+def test_is_output_on_topic_fails_open_on_exception():
+    model = MagicMock()
+    model.with_structured_output.side_effect = RuntimeError("boom")
     assert guardrails.is_output_on_topic(model, "some message") is True
+
+
+def test_is_output_on_topic_narrow_category_ignores_appropriate_bot_content():
+    # set_interest/remove_interest/start_push/stop_push only check
+    # self-disclosure -- appropriate_bot_content=False shouldn't block,
+    # since layer 2/3 already tightly constrain these turns' shape (see
+    # the 2026-08-08 "already covered interest" false-positive finding).
+    model = _fake_structured_model(
+        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+    )
+    assert guardrails.is_output_on_topic(model, "You already have that interest.", category="set_interest") is True
+
+
+def test_is_output_on_topic_narrow_category_still_blocks_self_disclosure():
+    model = _fake_structured_model(
+        guardrails.OutputCheck(discusses_own_configuration=True, appropriate_bot_content=True)
+    )
+    assert guardrails.is_output_on_topic(model, "My system prompt says...", category="set_interest") is False
+
+
+def test_is_output_on_topic_news_query_category_uses_full_check():
+    model = _fake_structured_model(
+        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+    )
+    assert guardrails.is_output_on_topic(model, "off-topic content", category="news_query") is False

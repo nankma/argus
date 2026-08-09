@@ -237,7 +237,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Guardrail layer 4: re-checks the agent's actual output before it's
     # sent -- the layer that catches drift layers 1-3 missed, since the
     # failure is only visible in what the model wrote, not the input.
-    output_on_topic = await asyncio.to_thread(guardrails.is_output_on_topic, guard_model, final_content)
+    output_on_topic = await asyncio.to_thread(
+        guardrails.is_output_on_topic, guard_model, final_content, classification.category
+    )
     if not output_on_topic:
         await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
         return
