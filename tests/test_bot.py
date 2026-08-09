@@ -242,6 +242,51 @@ def test_check_access_registers_new_request_and_notifies_admin(isolated_subscrib
     notify.assert_called_once()
 
 
+def test_handle_start_command_new_user_registers_request_only(isolated_subscribers_db, monkeypatch):
+    # Real incident, 2026-08-09: /start is Telegram's own client-generated
+    # first message to any bot, and the plain-text MessageHandler excludes
+    # all commands -- without a dedicated handler, a brand-new user's
+    # first-ever interaction went completely unhandled (no reply, no
+    # pending-request row, no error). This must behave exactly like a new
+    # user's first free-text message: register pending, notify admin, and
+    # NOT also send the capabilities message (check_access already replied).
+    notify = AsyncMock()
+    monkeypatch.setattr(bot, "notify_admin", notify)
+    update = _make_update(chat_id=5, username="erin", first_name="Erin", text="/start")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_start_command(update, context))
+
+    assert users_db.get_status(5) == users_db.PENDING
+    notify.assert_called_once()
+    update.message.reply_text.assert_called_once()  # only check_access's own reply
+
+
+def test_handle_start_command_approved_user_gets_capabilities_message(isolated_subscribers_db):
+    users_db.request_access(6, "frank", "Frank")
+    users_db.decide(6, approved=True)
+    update = _make_update(chat_id=6, text="/start")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_start_command(update, context))
+
+    update.message.reply_text.assert_called_once_with(
+        bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML
+    )
+
+
+def test_handle_start_command_pending_user_blocked(isolated_subscribers_db, monkeypatch):
+    monkeypatch.setattr(bot, "notify_admin", AsyncMock())
+    users_db.request_access(7, "grace", "Grace")
+    update = _make_update(chat_id=7, text="/start")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_start_command(update, context))
+
+    reply = update.message.reply_text.call_args[0][0]
+    assert "pending" in reply.lower()
+
+
 def test_handle_message_sends_with_html_parse_mode(isolated_subscribers_db, monkeypatch):
     _bypass_guardrails(monkeypatch)
     update = _make_update(chat_id=999)  # admin -- bypasses check_access

@@ -219,6 +219,28 @@ async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     return False
 
 
+async def handle_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/start -- Telegram's standard bot-initiation command, sent
+    automatically by the client's own "START" button on first contact
+    with any bot. Real incident, 2026-08-09: a genuinely new user's very
+    first interaction is /start, not free text -- and the plain-text
+    MessageHandler explicitly excludes all commands (~filters.COMMAND),
+    so without a dedicated handler here, that first message went
+    completely unhandled: no reply, no pending-request DB row, no error
+    anywhere. Every brand-new user hit this, not just one -- it's the
+    literal first thing Telegram prompts someone to do.
+
+    check_access() already handles the new/pending/denied cases fully
+    (registers the request, notifies the admin, replies to the user) and
+    returns False for all of them, so there's nothing more to do here in
+    those cases. Only an *already-approved* user typing /start again
+    falls through to the capabilities message below, since check_access
+    returns True silently for them."""
+    if not await check_access(update, context):
+        return
+    await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
+
+
 async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/interests -- show current interests. /interests <comma, separated,
     topics> -- set them. /interests clear -- clear them. Stored per-chat
@@ -421,6 +443,7 @@ def main():
     app.bot_data["guard_model"] = model
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
+    app.add_handler(CommandHandler("start", handle_start_command))
     app.add_handler(CommandHandler("interests", handle_interests_command))
     app.add_handler(CommandHandler("language", handle_language_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

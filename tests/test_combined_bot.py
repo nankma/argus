@@ -1,6 +1,6 @@
 import asyncio
 
-from telegram.ext import CallbackQueryHandler, MessageHandler
+from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler
 import agent as agent_module
 import combined_bot
 
@@ -22,6 +22,13 @@ def test_build_info_app_wires_bot_data(monkeypatch):
     # the periodic-push scheduler (docs/bot-features-plan.md item 5) must
     # be wired up in the combined process too, not just standalone bot.py
     assert len(app.job_queue.jobs()) == 1
+    # Real incident, 2026-08-09: /start went unhandled (only checking "any
+    # MessageHandler" wouldn't have caught this -- it needs its own
+    # CommandHandler, since the plain-text MessageHandler excludes all
+    # commands). Assert the exact command set so a future missing command
+    # fails loudly here instead of silently in production.
+    commands = {next(iter(h.commands)) for h in handlers if isinstance(h, CommandHandler)}
+    assert commands == {"start", "interests", "language"}
 
 
 def test_build_admin_app_wires_bot_data(monkeypatch):
