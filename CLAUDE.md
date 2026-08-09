@@ -65,7 +65,7 @@ See `docs/telemetry-and-testing-plan.md` item 3 for the full story (why the orig
 
 ## Telegram Bot
 
-`bot.py` is the headless entry point — the CLI REPL's `input()` loop can't run in a container (see `docs/deployment-plan.md`), so this is what a real deployment would actually run. Polling mode (`Application.run_polling()`), not webhooks — no public HTTPS endpoint/TLS needed, and it's the same shape locally and in a future Kubernetes `Deployment`.
+`bot.py` is the headless entry point — the CLI REPL's `input()` loop can't run in a container (see `docs/deployment-plan.md`), so this is what a real deployment would actually run. Polling mode (`Application.run_polling()`), not webhooks — no public HTTPS endpoint/TLS needed, and it's the same shape locally and in a future Kubernetes `Deployment`. See `docs/multi-channel-plan.md` for the design (not built) to add LINE as a second client — LINE is webhook-only, so that's a deliberate architectural departure from the polling-only design here, not just a second bot token.
 
 ```powershell
 conda activate myfirstagent
