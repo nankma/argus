@@ -66,6 +66,8 @@ instead of immediately after deploy.
 | 6 | `/interests` | Current interest list (or the "you haven't set any" message) | `/interests` command handler broken independent of the natural-language path |
 | 7 | `Start pushing me news every 6 hours` | Confirmation naming both "enabled" and "every 6 hour(s)" | `set_push_interval` tool not wired, or the `start_push` layer-2 instructions not calling it when a frequency is stated |
 | 8 | `Interested in <topic>` where `<topic>` is already covered by an existing interest (e.g. re-send #2 for the same topic) | A conversational reply explaining it's already covered — **not** the redirect message | Layer 4's "does it discuss internal configuration" check misfiring on the bot reviewing the *user's* stored interests (confused with the bot revealing its *own* config) — see the 2026-08-08 incident below |
+| 9 | `Always reply to me in Spanish from now on`, then a follow-up `What's new with OpenAI?` | A confirmation in Spanish, then the trend report also in Spanish | `set_language` tool/router category not wired, or `_compose_prompt` not injecting the stored language preference for every category |
+| 10 | `/language`, then `/language clear` | Current language (or "no reply language set"), then a "cleared" confirmation, and subsequent replies go back to matching your message's language | `/language` command handler broken independent of the natural-language path |
 
 Case 7 only proves the *setting* is recognized and saved — it doesn't
 prove a push actually arrives, since the shortest real interval (1h) is

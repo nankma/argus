@@ -73,17 +73,27 @@ def fetch_new_articles(
     return new_articles
 
 
-def write_push_digest(model, articles: list[dict]) -> str:
+def write_push_digest(model, articles: list[dict], language: str | None = None) -> str:
     """A single direct model call (no tool loop -- see module docstring)
-    that turns a pre-filtered article list into a Telegram HTML digest."""
+    that turns a pre-filtered article list into a Telegram HTML digest.
+    `language`, when set, is the subscriber's stored reply-language
+    preference (users_db.get_language) -- pushes go through this module's
+    own prompt rather than agent.py's dynamic_prompt middleware, so the
+    preference has to be threaded in here too, not just in _compose_prompt."""
     listing = "\n".join(
         f"- [{a.get('topic')}] {a['title']} ({a.get('source')}, "
         f"published {a.get('published') or 'date unknown'}) — {a.get('link')}"
         for a in articles
     )
+    system_prompt = _PUSH_DIGEST_PROMPT
+    if language:
+        system_prompt += (
+            f"\n\nWrite your ENTIRE reply in {language}, regardless of what "
+            "language the article titles/summaries above are in."
+        )
     response = model.invoke(
         [
-            {"role": "system", "content": _PUSH_DIGEST_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": listing},
         ]
     )
@@ -126,7 +136,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                 users_db.record_push(chat_id, [], now)
                 continue
 
-            digest = write_push_digest(model, new_articles)
+            digest = write_push_digest(model, new_articles, subscriber["language"])
 
             # A stored interest is user-supplied, unsanitized text (see
             # agent.py's update_interests) that ends up embedded in the

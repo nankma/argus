@@ -154,20 +154,41 @@ _STOP_PUSH_INSTRUCTIONS = (
     "\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
 )
 
+_SET_LANGUAGE_INSTRUCTIONS = (
+    "This turn: the user wants to set (or asked about) their preferred "
+    "reply language -- a standing preference, not just the language of "
+    "this one message. If they named a language, call the set_language "
+    "tool with it (write it as a normal language name, e.g. \"Spanish\", "
+    "\"Traditional Chinese\" -- not a code), then confirm IN THAT NEW "
+    "LANGUAGE that you'll now always reply in it, so they immediately see "
+    "it take effect. If they only asked what it's currently set to "
+    "(without naming a new one), don't call the tool -- just answer based "
+    "on this user's stated preference below in this prompt, or say it's "
+    "not set (meaning you match whichever language they write in).\n\n"
+    + _PLAIN_REPLY_FORMATTING_NOTE
+)
+
 _LAYER2_BY_CATEGORY = {
     "news_query": _NEWS_QUERY_INSTRUCTIONS,
     "set_interest": _SET_INTEREST_INSTRUCTIONS,
     "remove_interest": _REMOVE_INTEREST_INSTRUCTIONS,
     "start_push": _START_PUSH_INSTRUCTIONS,
     "stop_push": _STOP_PUSH_INSTRUCTIONS,
+    "set_language": _SET_LANGUAGE_INSTRUCTIONS,
 }
 
 
 def _compose_prompt(request) -> str:
     """Builds the full system prompt for one model call: layer 1 (always)
     + layer 2 (this turn's category, defaulting to news_query if the
-    caller didn't classify one) + layer 3 (this user's stored interests,
-    if any). See docs/context-management-plan.md."""
+    caller didn't classify one) + layer 3 (this user's stored interests
+    and language preference, if any). See docs/context-management-plan.md.
+
+    The language directive is appended last (after layer 2's category
+    instructions) and applies regardless of category -- unlike interests,
+    which only matter for news_query, a language preference should govern
+    every reply, including set_interest/push confirmations, so it isn't
+    gated by category the way _LAYER2_BY_CATEGORY's fragments are."""
     context = request.runtime.context or {}
     parts = [LAYER1_IDENTITY, _LAYER2_BY_CATEGORY.get(context.get("category"), _NEWS_QUERY_INSTRUCTIONS)]
 
@@ -179,6 +200,15 @@ def _compose_prompt(request) -> str:
                 f"This user's stated interests: {', '.join(interests)}. "
                 "Prioritize these when their request is general, but still "
                 "answer whatever they specifically asked."
+            )
+        language = users_db.get_language(chat_id)
+        if language:
+            parts.append(
+                f"This user has set a preferred reply language: {language}. "
+                "Always write your ENTIRE reply in this language, "
+                "regardless of what language their message is written in, "
+                "and regardless of any other instruction above about "
+                "matching their language -- this preference always wins."
             )
     return "\n\n".join(parts)
 
@@ -257,7 +287,19 @@ def set_push_interval(hours: int, runtime: ToolRuntime) -> str:
     return f"Push interval set to every {hours} hour(s)."
 
 
-TOOLS = [save_note, search_news, update_interests, set_push_enabled, set_push_interval]
+@tool
+def set_language(language: str, runtime: ToolRuntime) -> str:
+    """Set the calling user's preferred reply language -- every future
+    reply (news summaries, push digests, confirmations) will be written
+    in this language regardless of what language the user writes in.
+    `language` should be a plain language name (e.g. "Spanish",
+    "Traditional Chinese"), not a code."""
+    chat_id = runtime.context["chat_id"]
+    users_db.set_language(chat_id, language)
+    return f"Reply language set to {language}."
+
+
+TOOLS = [save_note, search_news, update_interests, set_push_enabled, set_push_interval, set_language]
 
 
 # --- Agent construction & invocation ------------------------------------

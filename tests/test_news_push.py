@@ -72,6 +72,38 @@ def test_write_push_digest_returns_model_output():
     assert result == "<b>Digest</b>"
 
 
+def test_write_push_digest_includes_language_directive_when_set():
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["system_prompt"] = messages[0]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [{**_article("https://example.com/a"), "topic": "AI"}]
+
+    news_push.write_push_digest(model, articles, language="Spanish")
+
+    assert "Spanish" in captured["system_prompt"]
+
+
+def test_write_push_digest_no_language_directive_when_unset():
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["system_prompt"] = messages[0]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [{**_article("https://example.com/a"), "topic": "AI"}]
+
+    news_push.write_push_digest(model, articles)
+
+    assert captured["system_prompt"] == news_push._PUSH_DIGEST_PROMPT
+
+
 def test_is_subscriber_due_true_when_never_pushed():
     assert news_push.is_subscriber_due(None, 24, datetime.now(timezone.utc)) is True
 
@@ -88,13 +120,14 @@ def test_is_subscriber_due_true_after_interval():
     assert news_push.is_subscriber_due(last_push, 24, now) is True
 
 
-def _subscriber(chat_id, interests=("AI",), interval=24, last_push_at=None, pushed_links=()):
+def _subscriber(chat_id, interests=("AI",), interval=24, last_push_at=None, pushed_links=(), language=None):
     return {
         "chat_id": chat_id,
         "interests": list(interests),
         "push_interval_hours": interval,
         "last_push_at": last_push_at,
         "pushed_links": list(pushed_links),
+        "language": language,
     }
 
 
@@ -142,6 +175,23 @@ def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch):
 
     send.assert_called_once_with(3, "<b>Digest</b>")
     record_push.assert_called_once_with(3, ["https://example.com/new"], now)
+
+
+def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch):
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        users_db, "list_push_enabled_subscribers", lambda: [_subscriber(8, language="French")]
+    )
+    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
+    monkeypatch.setattr(news_push, "fetch_new_articles", MagicMock(return_value=new_articles))
+    write_digest = MagicMock(return_value="<b>Digest</b>")
+    monkeypatch.setattr(news_push, "write_push_digest", write_digest)
+    monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
+
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+
+    write_digest.assert_called_once_with("fake-model", new_articles, "French")
 
 
 def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch):

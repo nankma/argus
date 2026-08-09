@@ -189,6 +189,40 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text("Interests updated: " + ", ".join(interests))
 
 
+async def handle_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/language -- show current reply-language preference. /language
+    <name> -- set it (e.g. "/language Spanish"). /language clear --
+    reset to matching whatever language the user writes in (the default).
+    Mirrors handle_interests_command; also settable via natural language
+    (the set_language tool, routed by the "set_language" category -- see
+    guardrails.py) since this is the same command-or-conversation dual
+    surface every other subscription feature in this bot has."""
+    if not await check_access(update, context):
+        return
+
+    chat_id = update.effective_chat.id
+    text_after_command = update.message.text.partition(" ")[2].strip()
+
+    if not text_after_command:
+        language = users_db.get_language(chat_id)
+        if language:
+            await update.message.reply_text(f"Your reply language is set to: {language}")
+        else:
+            await update.message.reply_text(
+                "No reply language set -- I match whichever language you write in. "
+                "Use /language <name> (e.g. /language Spanish) to set one."
+            )
+        return
+
+    if text_after_command.lower() == "clear":
+        users_db.set_language(chat_id, None)
+        await update.message.reply_text("Reply language cleared -- back to matching your message's language.")
+        return
+
+    users_db.set_language(chat_id, text_after_command)
+    await update.message.reply_text(f"Reply language set to: {text_after_command}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await check_access(update, context):
         return
@@ -318,6 +352,7 @@ def main():
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
     app.add_handler(CommandHandler("interests", handle_interests_command))
+    app.add_handler(CommandHandler("language", handle_language_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     register_push_job(app)
 

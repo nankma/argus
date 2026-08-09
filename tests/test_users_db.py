@@ -216,3 +216,37 @@ def test_list_push_enabled_subscribers_only_returns_approved_and_enabled(isolate
     assert subscribers[0]["push_interval_hours"] == users_db.DEFAULT_PUSH_INTERVAL_HOURS
     assert subscribers[0]["last_push_at"] is None
     assert subscribers[0]["pushed_links"] == []
+    assert subscribers[0]["language"] is None
+
+
+def test_get_language_none_for_unset_chat(isolated_subscribers_db):
+    assert users_db.get_language(25) is None
+
+
+def test_set_and_get_language(isolated_subscribers_db):
+    users_db.request_access(25, "quinn2", "Quinn2")
+    users_db.set_language(25, "Spanish")
+    assert users_db.get_language(25) == "Spanish"
+
+
+def test_set_language_upserts_when_no_existing_row(isolated_subscribers_db):
+    users_db.set_language(999, "Chinese")
+    assert users_db.get_language(999) == "Chinese"
+    assert users_db.get_status(999) == users_db.APPROVED
+
+
+def test_set_language_none_clears_it(isolated_subscribers_db):
+    users_db.request_access(26, "rita", "Rita")
+    users_db.set_language(26, "Japanese")
+    users_db.set_language(26, None)
+    assert users_db.get_language(26) is None
+
+
+def test_list_push_enabled_subscribers_includes_language(isolated_subscribers_db):
+    users_db.request_access(27, "sam2", "Sam2")
+    users_db.decide(27, approved=True)
+    users_db.set_push_enabled(27, True)
+    users_db.set_language(27, "French")
+
+    subscribers = users_db.list_push_enabled_subscribers()
+    assert subscribers[0]["language"] == "French"

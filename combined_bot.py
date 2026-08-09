@@ -56,6 +56,7 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["admin_bot_token"] = admin_bot_token
     app.add_handler(CommandHandler("interests", info_bot.handle_interests_command))
+    app.add_handler(CommandHandler("language", info_bot.handle_language_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, info_bot.handle_message))
     info_bot.register_push_job(app)
     return app

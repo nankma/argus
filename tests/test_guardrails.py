@@ -57,6 +57,12 @@ def test_classify_message_start_push():
     assert result.category == "start_push"
 
 
+def test_classify_message_set_language():
+    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, category="set_language"))
+    result = guardrails.classify_message(model, "Always reply to me in Spanish from now on")
+    assert result.category == "set_language"
+
+
 def test_classify_message_fails_open_on_exception():
     model = MagicMock()
     model.with_structured_output.side_effect = RuntimeError("boom")
@@ -108,6 +114,13 @@ def test_is_output_on_topic_narrow_category_still_blocks_self_disclosure():
         guardrails.OutputCheck(discusses_own_configuration=True, appropriate_bot_content=True)
     )
     assert guardrails.is_output_on_topic(model, "My system prompt says...", category="set_interest") is False
+
+
+def test_is_output_on_topic_set_language_is_a_narrow_category():
+    model = _fake_structured_model(
+        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+    )
+    assert guardrails.is_output_on_topic(model, "D'accord ! Je répondrai en français.", category="set_language") is True
 
 
 def test_is_output_on_topic_news_query_category_uses_full_check():

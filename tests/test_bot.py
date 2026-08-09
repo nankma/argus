@@ -272,6 +272,29 @@ def test_handle_message_passes_chat_id_and_category_to_run_agent(isolated_subscr
     assert kwargs["context"] == {"chat_id": 999, "category": "set_interest"}
 
 
+def test_handle_message_passes_category_to_output_guardrail(isolated_subscribers_db, monkeypatch):
+    monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
+    monkeypatch.setattr(
+        bot.guardrails,
+        "classify_message",
+        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category="set_language")),
+    )
+    is_output_on_topic_mock = MagicMock(return_value=True)
+    monkeypatch.setattr(bot.guardrails, "is_output_on_topic", is_output_on_topic_mock)
+    monkeypatch.setattr(
+        bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="D'accord, je répondrai en français.")])
+    )
+    update = _make_update(chat_id=999, text="Reply to me in French from now on")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+
+    asyncio.run(bot.handle_message(update, context))
+
+    is_output_on_topic_mock.assert_called_once_with(
+        context.bot_data["guard_model"], "D'accord, je répondrai en français.", "set_language"
+    )
+
+
 def test_handle_message_blocked_by_output_classifier(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
     monkeypatch.setattr(
@@ -350,6 +373,61 @@ def test_handle_interests_command_requires_access(isolated_subscribers_db, monke
     asyncio.run(bot.handle_interests_command(update, context))
 
     assert users_db.get_interests(555) == []  # never set, the request was blocked
+
+
+def test_handle_language_command_shows_unset_state(isolated_subscribers_db):
+    update = _make_update(chat_id=999, text="/language")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_language_command(update, context))
+
+    reply = update.message.reply_text.call_args[0][0]
+    assert "no reply language set" in reply.lower()
+
+
+def test_handle_language_command_sets_language(isolated_subscribers_db):
+    update = _make_update(chat_id=999, text="/language Spanish")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_language_command(update, context))
+
+    assert users_db.get_language(999) == "Spanish"
+    reply = update.message.reply_text.call_args[0][0]
+    assert "Spanish" in reply
+
+
+def test_handle_language_command_shows_set_language(isolated_subscribers_db):
+    users_db.set_language(999, "Spanish")
+    update = _make_update(chat_id=999, text="/language")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_language_command(update, context))
+
+    reply = update.message.reply_text.call_args[0][0]
+    assert "Spanish" in reply
+
+
+def test_handle_language_command_clears(isolated_subscribers_db):
+    users_db.set_language(999, "Spanish")
+    update = _make_update(chat_id=999, text="/language clear")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_language_command(update, context))
+
+    assert users_db.get_language(999) is None
+    reply = update.message.reply_text.call_args[0][0]
+    assert "cleared" in reply.lower()
+
+
+def test_handle_language_command_requires_access(isolated_subscribers_db, monkeypatch):
+    notify = AsyncMock()
+    monkeypatch.setattr(bot, "notify_admin", notify)
+    update = _make_update(chat_id=555, text="/language Spanish")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_language_command(update, context))
+
+    assert users_db.get_language(555) is None  # never set, the request was blocked
 
 
 def test_handle_message_sends_raw_user_text_unmodified(isolated_subscribers_db, monkeypatch):

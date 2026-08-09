@@ -67,7 +67,8 @@ def init_db() -> None:
                 push_enabled INTEGER,
                 push_interval_hours INTEGER,
                 last_push_at TEXT,
-                pushed_links TEXT
+                pushed_links TEXT,
+                language TEXT
             )
             """
         )
@@ -76,6 +77,7 @@ def init_db() -> None:
         _ensure_column(conn, "push_interval_hours", "INTEGER")
         _ensure_column(conn, "last_push_at", "TEXT")
         _ensure_column(conn, "pushed_links", "TEXT")
+        _ensure_column(conn, "language", "TEXT")
 
 
 def get_status(chat_id: int) -> str | None:
@@ -281,14 +283,14 @@ def list_push_enabled_subscribers() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT chat_id, interests, push_interval_hours, last_push_at, pushed_links
+            SELECT chat_id, interests, push_interval_hours, last_push_at, pushed_links, language
             FROM subscribers
             WHERE status = ? AND push_enabled = 1
             """,
             (APPROVED,),
         ).fetchall()
     result = []
-    for chat_id, interests_json, interval_hours, last_push_at, pushed_links_json in rows:
+    for chat_id, interests_json, interval_hours, last_push_at, pushed_links_json, language in rows:
         result.append(
             {
                 "chat_id": chat_id,
@@ -296,6 +298,30 @@ def list_push_enabled_subscribers() -> list[dict]:
                 "push_interval_hours": interval_hours if interval_hours is not None else DEFAULT_PUSH_INTERVAL_HOURS,
                 "last_push_at": datetime.fromisoformat(last_push_at) if last_push_at else None,
                 "pushed_links": json.loads(pushed_links_json) if pushed_links_json else [],
+                "language": language,
             }
         )
     return result
+
+
+def get_language(chat_id: int) -> str | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT language FROM subscribers WHERE chat_id = ?", (chat_id,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def set_language(chat_id: int, language: str | None) -> None:
+    """Upserts -- same reasoning as set_interests(). `language` is free
+    text (e.g. "Spanish", "繁體中文"), not a constrained code list -- same
+    trust-the-LLM approach as interests' topic strings. None/empty clears
+    the preference, falling back to matching whatever language the user's
+    own message is written in (the existing default behavior)."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, status, requested_at, language)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET language = excluded.language
+            """,
+            (chat_id, APPROVED, datetime.now().isoformat(), language or None),
+        )
