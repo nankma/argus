@@ -122,10 +122,28 @@ explicitly carving out the user's-own-data case in the prompt. Verified
 before deploying: 25/25 on the existing self-disclosure/confirm/news-
 report regression cases (no reliability lost) and 13/15 (up from the
 observed 1/3 in the live incident) on the exact replies that were
-blocked -- not a full fix (LLM classifiers aren't 100% reliable, per the
-open caveat in `docs/guardrails-plan.md`), but a large, measured
-improvement over the prompt version that shipped with the redirect-
-message wording fix in `f1a812c`.
+blocked -- shipped in `f1a812c` as a large, measured improvement, but
+still visibly lossy.
+
+**Follow-up (`2a8c408`):** asked to improve the 13/15 further. First
+tried extracting the self-disclosure check into its own small standalone
+prompt (a narrower question should be more reliable, in theory) --
+verified before shipping and it was actually much *worse*: 1/15 on real
+self-disclosure text, since the surrounding "check in this exact order"
+framing turned out to be load-bearing for the model's reliability in a
+way the simplified rewrite lost. What actually worked: structured output
+with two independent boolean fields (`discusses_own_configuration`,
+`appropriate_bot_content`) instead of one staged yes/no text answer --
+60/60 across all live-tested cases. `is_output_on_topic` also now takes
+an optional `category` (the router's classification) and skips
+`appropriate_bot_content` entirely for `set_interest`/`remove_interest`/
+`start_push`/`stop_push` turns, since layers 2/3 already tightly
+constrain those replies' shape. `news_query` and unspecified categories
+still get both checks. Lesson for next time a prompt seems too strict or
+too loose: test the "obvious" fix live before trusting the intuition --
+this project has now hit two cases (this one, and the Markdown-leak
+follow-up) where the first plausible fix either didn't hold or actively
+made things worse.
 
 ## When this doesn't apply
 
