@@ -85,6 +85,7 @@ instead of immediately after deploy.
 | 10 | `/language`, then `/language clear` | Current language (or "no reply language set"), then a "cleared" confirmation, and subsequent replies go back to matching your message's language | `/language` command handler broken independent of the natural-language path |
 | 11 | `/language <specific script/variant>` (e.g. `/language Traditional Chinese`), then a news query | Reply uses exactly that script/variant (e.g. 繁體 not 簡體 characters), not a more common default variant | The 2026-08-09 incident below — a variant preference silently downgrading to the language's more common default |
 | 12 | Any off-topic/blocked message (e.g. #5) | Redirect message now also mentions the ~1h/20-message memory limit | `guardrails.REDIRECT_MESSAGE` reverted to an older version, or the memory-limit line got dropped |
+| 13 | `/start`, from an account with no prior history with the bot (a real second Telegram account, or a fresh `chat_id` never seen by `subscribers.db`) | For a brand-new chat_id: the "your access request was sent" message, a new `pending` row in `subscribers.db`, and an Approve/Deny notification arriving on the *admin* bot. For an already-approved chat_id: the capabilities message | The exact bug in the `436d8d8` incident — `/start` fell through with no handler at all, completely silently, blocking every new user's onboarding |
 
 Case 7 only proves the *setting* is recognized and saved — it doesn't
 prove a push actually arrives, since the shortest real interval
@@ -205,6 +206,25 @@ nothing on any outcome. Fixed alongside this incident: each subscriber's
 per-cycle outcome (sent / blocked by guardrail / no new articles /
 errored) is now printed, so `docker logs` alone can answer this next
 time.
+
+*Case 13's incident:* on 2026-08-09 the admin invited a second real user,
+who never triggered the approve/deny flow. A screenshot of the invited
+user's Telegram app was the key clue: they'd sent `/start`, Telegram's
+own client-generated first message to any bot (the "START" button, not
+something typed manually). `bot.py` only registered `CommandHandler`s
+for `/interests` and `/language`; the plain-text `MessageHandler` (`filters.TEXT
+& ~filters.COMMAND`) explicitly excludes every command. With no handler
+for `/start` at all, it matched nothing -- no reply, no
+`request_access()` call, no exception, completely silent. This affected
+every brand-new user's onboarding, not a one-off. Fixed with
+`handle_start_command`, which defers to `check_access()` (same
+new/pending/denied handling as any first message) and sends the
+capabilities message for an already-approved user re-sending `/start`.
+Also strengthened `test_combined_bot.py`'s handler test to assert the
+*exact* set of registered commands rather than "any `MessageHandler`
+exists" -- the looser version was already passing before this fix, since
+a `MessageHandler` genuinely was registered, just not one `/start` could
+ever match.
 
 ## When this doesn't apply
 
