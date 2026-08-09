@@ -1,23 +1,41 @@
 # Multi-Channel Plan: Adding LINE Alongside Telegram
 
-Nothing here is built yet — this doc exists to capture the goal, technical
-approach, and open questions before implementation starts, same pattern as
-`docs/bot-features-plan.md` and `docs/deployment-plan.md`.
+**On hold as of 2026-08-09 — see "Why this is on hold" below.** Nothing
+here is built. This doc still exists to capture the goal, technical
+approach, and open questions for whenever this gets picked back up, same
+pattern as `docs/bot-features-plan.md` and `docs/deployment-plan.md`.
 
 **The ask:** since the bot already runs on a cloud VM rather than a laptop,
 add LINE as a second client alongside Telegram, so users can talk to it from
 either app.
 
+## Why this is on hold
+
+Researched before writing any code (see "Verified findings" below): LINE's
+free tier caps **push** messages at 200/month, shared across the entire
+account, not per-user — and push (the periodic digest, `news_push.py`'s
+whole feature) is most of what makes this bot worth using over just asking
+a chat app's own assistant. Reply messages (on-demand chat) are free and
+unlimited, but a LINE integration that could only offer on-demand chat and
+not the periodic digest isn't worth the real new infrastructure this needs
+(public HTTPS webhook, a platform-aware `users_db.py` schema migration —
+see below). Paid LINE tiers remove the cap (¥5,000/month for 5,000
+messages) but that's a recurring cost with no revenue model behind it yet.
+**Decision: hold this until there's an actual business model that would
+justify either the paid LINE tier or accepting chat-only (no push) LINE
+support.** Revisit this doc when that's decided — the technical research
+below stays valid either way.
+
 ## Status
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Public HTTPS webhook infrastructure | Not started — see below, biggest open item |
-| 2 | Platform-aware identity in `users_db.py` | Not started — schema change touching most of the module |
-| 3 | LINE channel adapter (`line_bot.py`) | Not started |
-| 4 | Platform-conditional reply formatting | Not started |
-| 5 | Push notifications across platforms | Not started |
-| 6 | Admin approval flow extension | Not started |
+| 1 | Public HTTPS webhook infrastructure | On hold — see above |
+| 2 | Platform-aware identity in `users_db.py` | On hold — see above |
+| 3 | LINE channel adapter (`line_bot.py`) | On hold — see above |
+| 4 | Platform-conditional reply formatting | On hold — see above |
+| 5 | Push notifications across platforms | On hold — see above; the reason this whole plan is on hold |
+| 6 | Admin approval flow extension | On hold — see above |
 
 ## Why this is a bigger lift than "add a second bot token"
 
@@ -51,9 +69,16 @@ LINE requires:
 - A publicly reachable HTTPS URL, registered in the LINE Developers console
   as the channel's webhook endpoint.
 - A real CA-issued TLS certificate — self-signed won't work, and **Let's
-  Encrypt needs a real domain name, not a bare IP.** Open question: does the
-  project have a domain to use? Not assumed here — needs to be confirmed
-  before this item can be built at all.
+  Encrypt needs a real domain name, not a bare IP.** No domain owned yet.
+  **Verified, 2026-08-09**: Porkbun confirmed directly (not a
+  third-party estimate) at $11.08/year for a `.com`, flat forever — no
+  bait-and-switch renewal jump like Namecheap ($10.98 first year → $18.48
+  renewal). Bundles free WHOIS privacy, free DNS, and free Let's Encrypt
+  SSL (redundant with the Caddy setup below, but harmless). Cloudflare
+  Registrar is a close alternative (genuinely at-cost, no markup) if
+  Cloudflare's DNS/proxy is wanted for other reasons, but its orange-cloud
+  proxy can interfere with Caddy's automatic cert issuance unless run in
+  DNS-only mode or switched to a DNS-01 challenge.
 - A fast response (LINE expects an ack within a few seconds); heavy work
   (the actual agent call) should happen after acknowledging, not block the
   webhook response.
@@ -92,6 +117,17 @@ treatment as every other credential in this project: OCI Vault +
 `docker-entrypoint.sh`'s existing `*_SECRET_OCID` pattern, never baked into
 the image or passed as plain env vars in production. No new secrets-handling
 design needed — the existing pattern already generalizes.
+
+**Account setup, verified 2026-08-09**: the Messaging API is exclusively
+a LINE Official Account feature — confirmed directly from LINE's docs
+that a normal personal LINE account has no channel/webhook/API capability
+at all, so there's no way to avoid the requirements below by using a
+different account type. Creating the Official Account's "Business ID"
+requires phone verification (SMS or call) — a one-time step for whoever
+operates the bot, not something end users ever encounter (personal LINE
+accounts dropped their own phone-number requirement in November 2023;
+email/Apple/Google sign-up works fine for users messaging the bot). No
+company registration needed — an individual can create one.
 
 ## 2. Platform-aware identity in `users_db.py`
 
@@ -144,15 +180,19 @@ event) must use LINE's `pushMessage` API against the user's ID instead.
 fits this reasonably well, but the channel adapter layer needs to pick the
 right one of these two per situation.
 
-**Open question, needs verification in LINE's own docs/console before
-committing to a design**: LINE's free tier has historically capped monthly
-push messages (as distinct from replies, which are typically unlimited)
-— unlike Telegram's bot API, which has no comparable message-volume cap.
-If push notifications are meaningfully rate- or count-limited on LINE's
-free tier, that changes whether `news_push.py`'s per-subscriber,
-potentially-multiple-times-a-day design is viable there without hitting a
-quota. Confirm current limits before promising LINE users the same push
-experience Telegram users get.
+**Verified, 2026-08-09** (via LINE's own developer docs, not a
+third-party summary): reply messages are free and unlimited regardless
+of plan. Push/multicast/broadcast/narrowcast messages are not — the free
+"Light Plan" caps these at **200/month, for the whole LINE Official
+Account, shared across every subscriber**, not per-user. Paid tiers
+raise this (¥5,000/month for 5,000 messages) but that's a real recurring
+cost. `news_push.py`'s per-subscriber, potentially-multiple-times-a-day
+design would exhaust the free quota almost immediately with even one or
+two active push subscribers. **This is the finding that put the whole
+plan on hold** — see "Why this is on hold" at the top of this doc.
+LY Corp is also restructuring this pricing October 1, 2026; re-verify
+the exact numbers before this plan is picked back up, don't trust this
+note's figures as still-current without rechecking.
 
 ## 4. Platform-conditional reply formatting
 
@@ -211,7 +251,7 @@ Telegram message to a chat_id that doesn't exist for them.
 3. Items 3-6 (the actual LINE adapter, formatting, push, admin flow) once
    1 and 2 are both solid.
 
-Confirm the domain-name question (item 1) and the LINE push-quota question
-(item 3) before starting — both could change the shape of this plan
-materially, and neither can be resolved from this side without checking
-LINE's/the user's own accounts.
+This build order is moot until the plan comes off hold (see the top of
+this doc) — the domain-name and push-quota questions that used to gate
+starting are both answered now, and the answer to the push-quota one is
+why nothing here is starting yet.

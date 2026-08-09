@@ -15,7 +15,7 @@ starts, same pattern as `docs/telemetry-and-testing-plan.md`.
 | 4 | Refactor `main()` from interactive CLI to a headless service | Done — Telegram bot, polling mode |
 | 5 | Security review + hardening | Reviewed — see `docs/security-plan.md`. Secrets management (finding 2) done: OCI Vault + Instance Principals, live and verified |
 | 6 | CD (continuous deployment) | **Design decided, not built** — GitHub Actions self-hosted runner on the user's home machine, see "Open questions" below. Next infrastructure item, queued after a few pending features |
-| 7 | LINE as a second client, alongside Telegram | **Design decided, not built** — see `docs/multi-channel-plan.md`. First real requirement for a public HTTPS endpoint on this VM (LINE is webhook-only), a departure from the polling-only design item 4 chose specifically to avoid that |
+| 7 | LINE as a second client, alongside Telegram | **On hold** — see `docs/multi-channel-plan.md`. Researched (webhook/TLS approach, registrar pricing, account setup), but LINE's free tier caps push messages at 200/month account-wide, which would gut the periodic-push feature. Parked pending a business model decision |
 
 ## Live deployment: Oracle Cloud Always Free
 
