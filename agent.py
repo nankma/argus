@@ -97,7 +97,12 @@ TREND_REPORT_STRUCTURE = (
     "[...]\n\n"
     "Use a blank line between sections, one <b>subtitle</b> per distinct "
     "theme or story, and only include sources actually provided in the "
-    "source material below — never invent a URL."
+    "source material below — never invent a URL.\n\n"
+    "Your reply must consist ONLY of the final report above — no preamble "
+    "or narration about your process (never write things like \"Let me "
+    "compile these into a report\", \"I'll prioritize the recent ones\", "
+    "or \"Note: some items are older\"). Start directly with the 📰 title "
+    "line."
 )
 
 _NEWS_QUERY_INSTRUCTIONS = (
@@ -158,13 +163,20 @@ _SET_LANGUAGE_INSTRUCTIONS = (
     "This turn: the user wants to set (or asked about) their preferred "
     "reply language -- a standing preference, not just the language of "
     "this one message. If they named a language, call the set_language "
-    "tool with it (write it as a normal language name, e.g. \"Spanish\", "
-    "\"Traditional Chinese\" -- not a code), then confirm IN THAT NEW "
-    "LANGUAGE that you'll now always reply in it, so they immediately see "
-    "it take effect. If they only asked what it's currently set to "
-    "(without naming a new one), don't call the tool -- just answer based "
-    "on this user's stated preference below in this prompt, or say it's "
-    "not set (meaning you match whichever language they write in).\n\n"
+    "tool with it, but first correct it to a precise, unambiguous, "
+    "correctly-spelled language name -- fix obvious typos (e.g. "
+    "\"tranditional Chinese\" -> \"Traditional Chinese\"), and if what "
+    "they said could mean more than one script/variant, use the specific "
+    "one they implied rather than a generic default (e.g. \"Traditional "
+    "Chinese\" or \"Simplified Chinese\", not just \"Chinese\", if they "
+    "said or clearly meant one of those two; \"Brazilian Portuguese\" vs "
+    "\"European Portuguese\" similarly). Then confirm IN THAT NEW "
+    "LANGUAGE (using the corrected name, in its own correct script) that "
+    "you'll now always reply in it, so they immediately see it take "
+    "effect. If they only asked what it's currently set to (without "
+    "naming a new one), don't call the tool -- just answer based on this "
+    "user's stated preference below in this prompt, or say it's not set "
+    "(meaning you match whichever language they write in).\n\n"
     + _PLAIN_REPLY_FORMATTING_NOTE
 )
 
@@ -208,7 +220,11 @@ def _compose_prompt(request) -> str:
                 "Always write your ENTIRE reply in this language, "
                 "regardless of what language their message is written in, "
                 "and regardless of any other instruction above about "
-                "matching their language -- this preference always wins."
+                "matching their language -- this preference always wins. "
+                "If this is a specific script/variant (e.g. Traditional "
+                "vs Simplified Chinese, Brazilian vs European Portuguese), "
+                "use exactly that variant's script and spelling "
+                "conventions throughout, not a more common default one."
             )
     return "\n\n".join(parts)
 

@@ -89,7 +89,10 @@ def write_push_digest(model, articles: list[dict], language: str | None = None) 
     if language:
         system_prompt += (
             f"\n\nWrite your ENTIRE reply in {language}, regardless of what "
-            "language the article titles/summaries above are in."
+            "language the article titles/summaries above are in. If this "
+            "is a specific script/variant (e.g. Traditional vs Simplified "
+            "Chinese, Brazilian vs European Portuguese), use exactly that "
+            "variant's script and spelling conventions throughout."
         )
     response = model.invoke(
         [
@@ -115,7 +118,13 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     -- kept generic so this module doesn't need a live Bot/Application to
     be tested. One subscriber's failure (a bad fetch, a blocked send)
     doesn't stop the others, same isolation pattern as search_news's
-    per-source error handling."""
+    per-source error handling -- but unlike that isolation, every outcome
+    here is printed (docker logs captures stdout) rather than swallowed
+    silently. Real incident, 2026-08-09: a subscriber reported never
+    receiving a push despite users_db showing a completed cycle (fetched
+    articles, wrote a digest, passed the guardrail, recorded the push) --
+    there was no way to confirm from logs alone whether `send` actually
+    ran or what it returned, since nothing was ever printed either way."""
     now = now or datetime.now(timezone.utc)
     for subscriber in users_db.list_push_enabled_subscribers():
         chat_id = subscriber["chat_id"]
@@ -133,6 +142,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                 # Nothing new this cycle -- still advance last_push_at so
                 # the next check is a full interval away instead of
                 # re-fetching every tick until something new shows up.
+                print(f"[news_push] chat_id={chat_id}: due, but no new articles -- advancing last_push_at only")
                 users_db.record_push(chat_id, [], now)
                 continue
 
@@ -145,11 +155,15 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
             # also model output about to be sent to a real user unread.
             if guardrails.is_output_on_topic(model, digest):
                 await send(chat_id, digest)
+                print(f"[news_push] chat_id={chat_id}: sent digest with {len(new_articles)} article(s)")
+            else:
+                print(f"[news_push] chat_id={chat_id}: digest blocked by output guardrail, not sent")
 
             # Advance the dedup state regardless of whether the guardrail
             # blocked the send: these articles were considered this cycle
             # either way, and not recording them would just retry (and
             # re-fetch) every tick until the interval naturally moves on.
             users_db.record_push(chat_id, [a["link"] for a in new_articles], now)
-        except Exception:
+        except Exception as exc:
+            print(f"[news_push] chat_id={chat_id}: cycle failed with {exc!r}")
             continue

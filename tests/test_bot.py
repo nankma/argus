@@ -12,6 +12,7 @@ from bot import (
     _is_html_balanced,
     _normalize_markdown_bold,
     _strip_html_tags,
+    _strip_report_preamble,
     split_for_telegram,
 )
 
@@ -78,6 +79,24 @@ def test_normalize_markdown_bold_converts_stray_markdown():
 def test_normalize_markdown_bold_leaves_plain_and_html_text_unchanged():
     assert _normalize_markdown_bold("plain text, no markdown") == "plain text, no markdown"
     assert _normalize_markdown_bold("<b>already html</b>") == "<b>already html</b>"
+
+
+def test_strip_report_preamble_removes_leading_narration():
+    # Real incident, 2026-08-09: despite TREND_REPORT_STRUCTURE explicitly
+    # forbidding it, the model sometimes narrates its process before the
+    # report ("Let me compile these into a report...").
+    text = "Let me compile these into a report.\n\n📰 <b>Bitcoin Trend Report</b>\n\nSome content."
+    assert _strip_report_preamble(text) == "📰 <b>Bitcoin Trend Report</b>\n\nSome content."
+
+
+def test_strip_report_preamble_noop_when_marker_is_already_first():
+    text = "📰 <b>Bitcoin Trend Report</b>\n\nSome content."
+    assert _strip_report_preamble(text) == text
+
+
+def test_strip_report_preamble_noop_when_marker_absent():
+    text = "Done! I've added Bitcoin to your interests."
+    assert _strip_report_preamble(text) == text
 
 
 def _make_update(chat_id, username="alice", first_name="Alice", text="What's new with OpenAI?"):
@@ -212,6 +231,29 @@ def test_handle_message_normalizes_stray_markdown_before_sending(isolated_subscr
     assert args[0] == "已將 <b>AI</b> 加入你的興趣清單"
     assert "**" not in args[0]
     assert kwargs["parse_mode"] is not None
+
+
+def test_handle_message_strips_report_preamble_before_sending(isolated_subscribers_db, monkeypatch):
+    # Real incident, 2026-08-09: the model narrated its process before
+    # the actual trend report despite being told not to.
+    _bypass_guardrails(monkeypatch, category="news_query")
+    update = _make_update(chat_id=999, text="What's new with Bitcoin?")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    monkeypatch.setattr(
+        bot,
+        "run_agent",
+        MagicMock(
+            return_value=[
+                SimpleNamespace(content="Let me compile this.\n\n📰 <b>Bitcoin Trend Report</b>\n\nContent.")
+            ]
+        ),
+    )
+
+    asyncio.run(bot.handle_message(update, context))
+
+    args, _ = update.message.reply_text.call_args
+    assert args[0] == "📰 <b>Bitcoin Trend Report</b>\n\nContent."
 
 
 def test_handle_message_blocked_by_local_prefilter(isolated_subscribers_db, monkeypatch):
@@ -460,6 +502,18 @@ def test_send_push_digest_normalizes_markdown_and_sends_html():
     assert kwargs["chat_id"] == 42
     assert kwargs["text"] == "已將 <b>AI</b> 加入"
     assert kwargs["parse_mode"] is not None
+
+
+def test_send_push_digest_strips_report_preamble():
+    fake_bot = MagicMock()
+    fake_bot.send_message = AsyncMock()
+
+    asyncio.run(
+        bot.send_push_digest(fake_bot, 42, "Let me write this.\n\n📰 <b>Report</b>\n\nContent.")
+    )
+
+    args, kwargs = fake_bot.send_message.call_args
+    assert kwargs["text"] == "📰 <b>Report</b>\n\nContent."
 
 
 def test_send_push_digest_falls_back_to_plain_text_on_bad_request():

@@ -66,6 +66,25 @@ def _normalize_markdown_bold(text: str) -> str:
     return _MARKDOWN_BOLD_RE.sub(r"<b>\1</b>", text)
 
 
+_TREND_REPORT_MARKER = "📰"
+
+
+def _strip_report_preamble(text: str) -> str:
+    """Safety net for when the model narrates its process before the
+    actual trend report despite agent.TREND_REPORT_STRUCTURE explicitly
+    forbidding it ("no preamble... start directly with the 📰 title
+    line"). Real incident, 2026-08-09: verified live that this prompt-only
+    instruction alone did not reliably stop the model writing things like
+    "Let me compile these into a report" before the real content -- same
+    lesson as _normalize_markdown_bold. If the report marker appears
+    anywhere but the very start, strips everything before it; a no-op for
+    replies that never use the marker (confirmations, etc.)."""
+    idx = text.find(_TREND_REPORT_MARKER)
+    if idx > 0:
+        return text[idx:]
+    return text
+
+
 def _is_html_balanced(text: str) -> bool:
     """True if `text` has no unclosed HTML tag — open/close tag counts
     match. Doesn't validate proper nesting, just depth — good enough given
@@ -266,7 +285,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"Something went wrong: {exc}")
         return
 
-    final_content = _normalize_markdown_bold(result_messages[-1].content)
+    final_content = _strip_report_preamble(_normalize_markdown_bold(result_messages[-1].content))
 
     # Guardrail layer 4: re-checks the agent's actual output before it's
     # sent -- the layer that catches drift layers 1-3 missed, since the
@@ -300,13 +319,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def send_push_digest(bot: Bot, chat_id: int, text: str) -> None:
     """The `send` callback news_push.run_push_cycle() calls per due
-    subscriber. Push digests go through the same HTML-formatting prompt
-    (agent.HTML_FORMATTING_RULES) as a normal chat reply and can fail the
-    same two ways, so this reuses handle_message's exact pipeline instead
-    of a simpler one-off send: the Markdown-leak safety net, chunking for
-    messages over Telegram's limit, and the BadRequest-on-bad-HTML
-    fallback to plain text."""
-    normalized = _normalize_markdown_bold(text)
+    subscriber. Push digests go through the same HTML-formatting/trend-
+    report prompt (agent.HTML_FORMATTING_RULES/TREND_REPORT_STRUCTURE) as
+    a normal chat reply and can fail the same ways, so this reuses
+    handle_message's exact pipeline instead of a simpler one-off send: the
+    Markdown-leak and report-preamble safety nets, chunking for messages
+    over Telegram's limit, and the BadRequest-on-bad-HTML fallback to
+    plain text."""
+    normalized = _strip_report_preamble(_normalize_markdown_bold(text))
     chunks = split_for_telegram(normalized)
     for i, chunk in enumerate(chunks):
         if i > 0:
