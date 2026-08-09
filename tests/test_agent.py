@@ -1,10 +1,82 @@
 import json
+from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, ToolMessage
 
 import agent
 import news_sources
+import users_db
 from tests.fakes import FakeToolCallingModel, RecordingCallbackHandler
+
+
+def _fake_request(context):
+    """_compose_prompt only reads request.runtime.context -- a real
+    LangChain ModelRequest is unnecessary machinery for testing the
+    prompt-composition logic in isolation."""
+    return SimpleNamespace(runtime=SimpleNamespace(context=context))
+
+
+def test_compose_prompt_defaults_to_news_query_when_no_category():
+    prompt = agent._compose_prompt(_fake_request({}))
+    assert agent._NEWS_QUERY_INSTRUCTIONS in prompt
+    assert agent.LAYER1_IDENTITY in prompt
+
+
+def test_compose_prompt_defaults_to_news_query_when_context_is_none():
+    prompt = agent._compose_prompt(_fake_request(None))
+    assert agent._NEWS_QUERY_INSTRUCTIONS in prompt
+
+
+def test_compose_prompt_selects_instructions_per_category():
+    by_category = {
+        "news_query": agent._NEWS_QUERY_INSTRUCTIONS,
+        "set_interest": agent._SET_INTEREST_INSTRUCTIONS,
+        "remove_interest": agent._REMOVE_INTEREST_INSTRUCTIONS,
+        "start_push": agent._START_PUSH_INSTRUCTIONS,
+        "stop_push": agent._STOP_PUSH_INSTRUCTIONS,
+        "set_language": agent._SET_LANGUAGE_INSTRUCTIONS,
+    }
+    for category, expected in by_category.items():
+        prompt = agent._compose_prompt(_fake_request({"category": category}))
+        assert expected in prompt
+
+
+def test_compose_prompt_includes_interests_when_set(isolated_subscribers_db):
+    users_db.set_interests(101, ["AI", "robotics"])
+    prompt = agent._compose_prompt(_fake_request({"chat_id": 101, "category": "news_query"}))
+    assert "AI, robotics" in prompt
+
+
+def test_compose_prompt_omits_interests_when_unset(isolated_subscribers_db):
+    prompt = agent._compose_prompt(_fake_request({"chat_id": 102, "category": "news_query"}))
+    assert "stated interests" not in prompt
+
+
+def test_compose_prompt_omits_interests_when_no_chat_id():
+    prompt = agent._compose_prompt(_fake_request({"category": "news_query"}))
+    assert "stated interests" not in prompt
+
+
+def test_compose_prompt_includes_language_when_set(isolated_subscribers_db):
+    users_db.set_language(103, "Spanish")
+    prompt = agent._compose_prompt(_fake_request({"chat_id": 103, "category": "news_query"}))
+    assert "Spanish" in prompt
+    assert "preferred reply language" in prompt
+
+
+def test_compose_prompt_omits_language_when_unset(isolated_subscribers_db):
+    prompt = agent._compose_prompt(_fake_request({"chat_id": 104, "category": "news_query"}))
+    assert "preferred reply language" not in prompt
+
+
+def test_compose_prompt_language_applies_regardless_of_category(isolated_subscribers_db):
+    # Real requirement: unlike interests (news_query-only), a language
+    # preference must govern every reply, including subscription
+    # confirmations -- see docs/bot-features-plan.md item 2.
+    users_db.set_language(105, "French")
+    for category in ("news_query", "set_interest", "start_push", "set_language"):
+        prompt = agent._compose_prompt(_fake_request({"chat_id": 105, "category": category}))
+        assert "French" in prompt
 
 
 def test_save_note_writes_isolated_file(isolated_notes_file):
