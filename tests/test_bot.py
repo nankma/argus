@@ -1,7 +1,9 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from telegram.error import BadRequest
 
 import bot
@@ -13,8 +15,19 @@ from bot import (
     _normalize_markdown_bold,
     _strip_html_tags,
     _strip_report_preamble,
+    _trim_history,
     split_for_telegram,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_chat_histories():
+    """chat_histories is a module-level dict with no reset mechanism of
+    its own -- without this, tests sharing a chat_id (most use 999) would
+    see leaked state from whichever test ran first."""
+    bot.chat_histories.clear()
+    yield
+    bot.chat_histories.clear()
 
 
 def test_split_for_telegram_short_text_unchanged():
@@ -97,6 +110,58 @@ def test_strip_report_preamble_noop_when_marker_is_already_first():
 def test_strip_report_preamble_noop_when_marker_absent():
     text = "Done! I've added Bitcoin to your interests."
     assert _strip_report_preamble(text) == text
+
+
+def test_trim_history_drops_messages_older_than_max_age():
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    messages = ["old", "recent"]
+    timestamps = [now - timedelta(hours=2), now - timedelta(minutes=5)]
+
+    trimmed_messages, trimmed_timestamps = _trim_history(messages, timestamps, now)
+
+    assert trimmed_messages == ["recent"]
+    assert trimmed_timestamps == [now - timedelta(minutes=5)]
+
+
+def test_trim_history_caps_at_max_messages():
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    messages = [f"msg{i}" for i in range(bot.MAX_HISTORY_MESSAGES + 5)]
+    timestamps = [now] * len(messages)
+
+    trimmed_messages, trimmed_timestamps = _trim_history(messages, timestamps, now)
+
+    assert len(trimmed_messages) == bot.MAX_HISTORY_MESSAGES
+    assert trimmed_messages == messages[-bot.MAX_HISTORY_MESSAGES:]
+
+
+def test_trim_history_empty_input():
+    assert _trim_history([], [], datetime.now(timezone.utc)) == ([], [])
+
+
+def test_trim_history_keeps_recent_within_both_limits():
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    messages = ["a", "b", "c"]
+    timestamps = [now - timedelta(minutes=30), now - timedelta(minutes=10), now]
+
+    trimmed_messages, trimmed_timestamps = _trim_history(messages, timestamps, now)
+
+    assert trimmed_messages == messages
+    assert trimmed_timestamps == timestamps
+
+
+def test_get_trimmed_history_stores_trimmed_result_back(isolated_subscribers_db):
+    now = datetime.now(timezone.utc)
+    bot.chat_histories[42] = (["old"], [now - timedelta(hours=2)])
+
+    messages, timestamps = bot._get_trimmed_history(42)
+
+    assert messages == []
+    assert timestamps == []
+    assert bot.chat_histories[42] == ([], [])
+
+
+def test_get_trimmed_history_defaults_empty_for_unknown_chat():
+    assert bot._get_trimmed_history(9999) == ([], [])
 
 
 def _make_update(chat_id, username="alice", first_name="Alice", text="What's new with OpenAI?"):
@@ -352,14 +417,16 @@ def test_handle_message_blocked_by_output_classifier(isolated_subscribers_db, mo
     context = _make_context(admin_chat_id=999)
     context.bot_data["agent"] = "fake-agent"
 
-    history_before = list(bot.chat_histories.get(999, []))
     asyncio.run(bot.handle_message(update, context))
 
     update.message.reply_text.assert_called_once_with(
         bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML
     )
-    # the rejected exchange must not be persisted into chat history
-    assert bot.chat_histories.get(999, []) == history_before
+    # the rejected exchange must not be persisted into chat history (the
+    # trimmed-but-still-empty base may still get (re-)stored -- see
+    # _get_trimmed_history -- but no new messages should appear)
+    messages, _ = bot.chat_histories.get(999, ([], []))
+    assert messages == []
 
 
 def test_handle_interests_command_shows_empty_state(isolated_subscribers_db):
@@ -489,6 +556,39 @@ def test_handle_message_sends_raw_user_text_unmodified(isolated_subscribers_db, 
 
     sent_messages = run_agent_mock.call_args[0][1]  # run_agent(agent, messages)
     assert sent_messages[-1]["content"] == "What's new?"
+
+
+def test_handle_message_persists_history_with_fresh_timestamps(isolated_subscribers_db, monkeypatch):
+    _bypass_guardrails(monkeypatch)
+    update = _make_update(chat_id=999, text="What's new?")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    monkeypatch.setattr(bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="<b>Report</b>")]))
+
+    before = datetime.now(timezone.utc)
+    asyncio.run(bot.handle_message(update, context))
+    after = datetime.now(timezone.utc)
+
+    messages, timestamps = bot.chat_histories[999]
+    assert len(messages) == 1
+    assert len(timestamps) == 1
+    assert before <= timestamps[0] <= after
+
+
+def test_handle_message_excludes_history_older_than_max_age(isolated_subscribers_db, monkeypatch):
+    _bypass_guardrails(monkeypatch)
+    stale_time = datetime.now(timezone.utc) - timedelta(hours=2)
+    bot.chat_histories[999] = ([{"role": "user", "content": "old question"}], [stale_time])
+    update = _make_update(chat_id=999, text="new question")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="<b>Report</b>")])
+    monkeypatch.setattr(bot, "run_agent", run_agent_mock)
+
+    asyncio.run(bot.handle_message(update, context))
+
+    sent_messages = run_agent_mock.call_args[0][1]
+    assert sent_messages == [{"role": "user", "content": "new question"}]  # stale entry dropped
 
 
 def test_send_push_digest_normalizes_markdown_and_sends_html():

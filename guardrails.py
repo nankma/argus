@@ -41,7 +41,10 @@ REDIRECT_MESSAGE = (
     "🔔 <b>Push notifications</b> — \"Start/stop pushing me news every 4/6/"
     "12/24 hours\"\n"
     "🌐 <b>Reply language</b> — \"Always reply to me in Spanish\", or use "
-    "/language to view/set it directly"
+    "/language to view/set it directly\n\n"
+    "🧠 I only remember about the last hour of our conversation (up to 20 "
+    "messages) — older context isn't kept, since each answer is meant to "
+    "stand on its own rather than depend on what we discussed a while ago."
 )
 
 Category = Literal[

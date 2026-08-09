@@ -26,6 +26,7 @@ Run:
 import asyncio
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
@@ -47,7 +48,49 @@ PUSH_TICK_SECONDS = 900
 
 # Per-chat conversation history. In-memory only — lost on restart, same as
 # the CLI's messages list. Not persisted; fine for now, revisit if needed.
-chat_histories: dict[int, list] = {}
+# Each value is (messages, timestamps) -- a parallel list of when each
+# message was added, needed for the age-based trim below since LangChain
+# message objects/dicts carry no wall-clock timestamp of their own.
+chat_histories: dict[int, tuple[list, list[datetime]]] = {}
+
+# Real question, 2026-08-09: does the layered system prompt (agent.py's
+# _compose_prompt) or this conversation history risk a context-window
+# overflow over a long-lived process? The prompt layers don't -- they're
+# rebuilt fresh on every call, never accumulated. This history DOES:
+# run_agent resends the full accumulated list on every turn, with no
+# trimming anywhere, so an active chat on a long-uptime process would grow
+# without bound -- rising cost every turn, and eventually exceeding
+# DeepSeek's context window outright rather than degrading gracefully.
+# Trimmed aggressively on purpose: this bot's replies are effectively
+# stateless per-topic (a news summary from an hour ago has little bearing
+# on a new question), so there's little value in keeping much around.
+MAX_HISTORY_AGE = timedelta(hours=1)
+MAX_HISTORY_MESSAGES = 20
+
+
+def _trim_history(messages: list, timestamps: list[datetime], now: datetime) -> tuple[list, list[datetime]]:
+    """Drops messages older than MAX_HISTORY_AGE, then caps to the most
+    recent MAX_HISTORY_MESSAGES -- both constraints apply together, so
+    the result is always within both."""
+    kept = [(m, t) for m, t in zip(messages, timestamps) if now - t <= MAX_HISTORY_AGE]
+    kept = kept[-MAX_HISTORY_MESSAGES:]
+    if not kept:
+        return [], []
+    trimmed_messages, trimmed_timestamps = zip(*kept)
+    return list(trimmed_messages), list(trimmed_timestamps)
+
+
+def _get_trimmed_history(chat_id: int) -> tuple[list, list[datetime]]:
+    """Reads this chat's history and trims it, storing the trimmed result
+    back immediately -- stale entries get dropped every turn regardless
+    of whether *this* turn's exchange ends up persisted (see
+    handle_message), not just when a new message happens to push past
+    the limit."""
+    messages, timestamps = chat_histories.get(chat_id, ([], []))
+    messages, timestamps = _trim_history(messages, timestamps, datetime.now(timezone.utc))
+    chat_histories[chat_id] = (messages, timestamps)
+    return messages, timestamps
+
 
 _HTML_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>")
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -266,7 +309,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     chat_id = update.effective_chat.id
-    history = chat_histories.get(chat_id, [])
+    history, history_timestamps = _get_trimmed_history(chat_id)
     working_messages = history + [{"role": "user", "content": user_text}]
 
     # chat_id and category feed agent.py's dynamic-prompt middleware
@@ -298,8 +341,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Only persisted once accepted -- a rejected exchange doesn't pollute
-    # the conversation history the next turn sees.
-    chat_histories[chat_id] = result_messages
+    # the conversation history the next turn sees. The trimmed base
+    # (_get_trimmed_history, above) was already stored regardless of this
+    # turn's outcome; here we just add this turn's new messages with a
+    # fresh timestamp. new_messages is everything run_agent appended
+    # beyond the trimmed history it was given -- the new user message
+    # plus whatever AI/tool messages resulted from it.
+    new_messages = result_messages[len(history):]
+    now = datetime.now(timezone.utc)
+    chat_histories[chat_id] = (result_messages, history_timestamps + [now] * len(new_messages))
 
     chunks = split_for_telegram(final_content)
     for i, chunk in enumerate(chunks):
