@@ -10,8 +10,8 @@ questions before implementation starts, same pattern as
 | # | Item | Status | Priority |
 |---|------|--------|----------|
 | 1 | Bot access control (admin-approval workflow) | **Done — see below** | Was urgent — bot was live and unrestricted |
-| 2 | Per-user response language / translation | Not started | Normal — benefits from #1's DB existing |
-| 3 | Multi-user subscribers + DB-backed sessions | Partially done — approval status (#1) and per-user `interests` are both live; language/sources/conversation-history persistence still missing | Normal — extend for #2/#4/#5 |
+| 2 | Per-user response language / translation | **Done — see below** | Built 2026-08-08 |
+| 3 | Multi-user subscribers + DB-backed sessions | Partially done — approval status (#1), per-user `interests`, and now `language` (#2) are all live; sources/conversation-history persistence still missing | Normal — extend for #4 |
 | 4 | Per-user search-source configuration | Not started | Normal — depends on #3 |
 | 5 | Proactive news push (per-user configurable interval digest) | **Done — see below** | Was deferred, now built at the user's request (2026-08-08) |
 
@@ -87,31 +87,40 @@ list — was wanted).
   manually editing an env var and restarting the bot each time — the
   approval-workflow version handles that for free.
 
-## 2. Translation / per-user response language
+## 2. Translation / per-user response language — done
 
 The LLM itself can already write in any language — this doesn't need a
 translation API or library, just an instruction telling it which language to
-respond in.
+respond in. Built 2026-08-08, once `agent.py`'s `dynamic_prompt` middleware
+(built for interests/push) made the "small design decision" below moot —
+per-invocation prompt injection was already the established mechanism.
 
-- Add a `/language <code>` command (`CommandHandler`, not the existing
-  `MessageHandler` which explicitly filters commands out via
-  `~filters.COMMAND`) — e.g. `/language zh` for Chinese, `/language en` for
-  English (default).
-- The chosen language needs to be threaded into what the model sees on
-  every subsequent message for that chat — e.g. prepended as a system-style
-  instruction ("Respond in Chinese.") alongside the existing
-  `SYSTEM_PROMPT`, or appended to each user message. `create_agent`'s
-  `system_prompt` is fixed at agent-construction time (see `agent.py`'s
-  `build_agent`), so a per-chat language means either constructing one
-  agent per active language and routing to the right one, or injecting the
-  instruction per-invocation instead of relying on the static
-  `SYSTEM_PROMPT` — needs a small design decision when this is built, not
-  a structural blocker.
-- Preference needs to persist across messages (and ideally restarts) —
-  depends on #3 for real persistence. A stateless v0 (language resets to
-  default on bot restart, kept only in the same in-memory dict pattern as
-  `chat_histories`) is possible as an interim step without waiting on the
-  DB, if that's ever wanted.
+- `users_db.py`: `language` column (free text, e.g. "Spanish", "Traditional
+  Chinese" — same trust-the-LLM approach as interests' topic strings, not a
+  constrained code list), `get_language`/`set_language`.
+- `/language` command (show/set/clear), mirroring `/interests` — plus a
+  natural-language surface via a new `set_language` tool and router
+  category (`guardrails.py`), same command-or-conversation dual surface
+  every other subscription feature here has. The router prompt explicitly
+  notes that writing a message *in* a non-English language is not itself
+  `set_language` — only an explicit request to change the standing
+  preference is; verified live that a Chinese `set_interest` message still
+  classifies as `set_interest`, not `set_language`.
+- The preference is injected in `agent.py`'s `_compose_prompt` (layer 3,
+  alongside interests) **regardless of category** — unlike interests, which
+  only matter for `news_query`, a language preference should govern every
+  reply including subscription confirmations. Also added to layer 4's
+  narrow-check categories (same reasoning as `set_interest`/push: layers
+  2/3 already constrain the reply's shape).
+- `news_push.py`'s `write_push_digest` takes the subscriber's language
+  separately and appends the same directive to its own prompt, since push
+  digests don't go through `agent.py`'s `dynamic_prompt` middleware at all
+  — this was the one place the "which mechanism carries the preference"
+  question from the original design note below still applied.
+- Persists via `users_db.py`, same as interests/push (survives restarts,
+  shared across `bot.py`/`admin_bot.py`/`combined_bot.py`) — the "stateless
+  v0" idea below was skipped since the DB already existed by the time this
+  was built.
 
 ## 3. Multi-user subscribers + DB-backed sessions
 
