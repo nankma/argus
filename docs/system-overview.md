@@ -49,19 +49,16 @@ Each item is **synthesized across sources** — the first entry merges New
 Scientist, Wired, and TechCrunch coverage into one paragraph rather than
 listing three articles — and every claim carries its source links.
 
-The right-hand screenshot shows something I care about more than the
-formatting: the agent noting that its most recent sources on that topic
-were **weeks old** and recommending a live price feed instead. Being
-useful here means being honest about the freshness of what it found, not
-presenting stale material as current.
-
 ### What the motivation forced
 
 Three decisions follow directly from that original need, and recur
 throughout this document:
 
-- **Personalization** — "relevant to me" is inherently per-person, so
-  interests are stored per user and steer every query (§B3)
+- **Personalization** — the service is multi-user: anyone approved can
+  subscribe, and each subscriber customizes their own topics, reply
+  language, and delivery schedule. "Relevant" is inherently per-user, so
+  those preferences are stored per subscriber and steer every query
+  (§B3)
 - **Push, not pull** — the assistant comes to me. This is why the
   scheduled digest is the core feature rather than a nice-to-have, and why
   a messaging channel that couldn't support it was ultimately declined
@@ -74,11 +71,13 @@ throughout this document:
 
 ## Components chosen
 
-Each was a decision, not a default:
+These are the components chosen for this project, selected against its
+actual scope, the maturity of the available APIs, and what the service
+genuinely needed — not defaults carried over from another stack.
 
 | Component | Role | Why this over the obvious alternative |
 |---|---|---|
-| **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. |
+| **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. Model choice is injected rather than hardcoded into consumers, so it stays swappable — see `docs/model-portability-plan.md` |
 | **LangChain** | Agent framework | Framework-managed agent loop, and — critically — a swappable model interface. That's what lets the entire test suite run against a scripted fake with no network and no API cost. |
 | **Telegram** | Delivery channel | Supports *long polling*, so the bot needs no public endpoint, no TLS, no domain. Eliminates an entire class of attack surface and operational burden. |
 | **SQLite** | Persistence | Zero operational overhead and adequate at current scale. A known limitation, deliberately accepted — see §D2. |
@@ -86,24 +85,36 @@ Each was a decision, not a default:
 | **Docker** | Packaging | One artifact that runs identically locally and on the VM; makes the deploy step a single image transfer. |
 | **Arize Phoenix** | LLM observability | Self-hostable and OpenTelemetry-native — full trace fidelity with no per-trace SaaS billing, which matters when tracing every call. |
 
-### Design constraints
+### Design principles
 
-Four constraints drove nearly every decision that follows.
+Five priorities drove nearly every decision that follows, in this order.
 
-**C1 — Minimal infrastructure budget.** Everything runs on a free tier.
-The application VM is a `VM.Standard.E2.1.Micro`: **1 GB RAM, 1/8 OCPU** —
-not much headroom for a Python process loading LangChain.
+**P1 — Security ranks above features.** The bot is reachable by anyone who
+finds it, which makes it both a prompt-injection surface and a cost-abuse
+surface. Access control and guardrails were built *before* the service was
+opened to other people, not retrofitted afterwards (§B4).
 
-**C2 — The LLM is non-deterministic and cannot be unit tested.** There is
-no assertion for "the model follows this instruction." It mostly will.
-Occasionally it won't. Any behavior that *must* hold cannot be enforced by
-a prompt alone.
+**P2 — LLM behavior must be traceable and diagnosable.** The model is
+non-deterministic: there is no assertion for "the model follows this
+instruction." It mostly will; occasionally it won't. When it doesn't, it
+has to be possible to see exactly what the model was given and what it
+produced — which is why every call is traced (§C4), and why any behavior
+that *must* hold is enforced in code rather than by prompt (§D1).
 
-**C3 — Input comes from strangers.** Anyone can find and message the bot.
-That is both a prompt-injection surface and a cost-abuse surface.
+**P3 — Abnormal situations must surface by themselves.** With one operator
+and no on-call rotation, a failure nobody notices is indistinguishable
+from no failure. The system raises an alert rather than waiting to be
+asked (§C5).
 
-**C4 — One operator, no on-call rotation.** Every failure has to be
-diagnosable after the fact, from evidence the system recorded on its own.
+**P4 — Accuracy is raised by post-deployment testing, not assumption.**
+Unit tests running against a fake model cannot tell you whether a prompt
+actually works. Verification against the real model after deployment is
+what catches a problem before a user hits it (§C3).
+
+**P5 — Minimal infrastructure budget.** Everything runs on a free tier;
+the application VM is a `VM.Standard.E2.1.Micro` — **1 GB RAM, 1/8 OCPU**.
+The least important of the five, but it shaped topology decisions
+throughout (§D1).
 
 ---
 
@@ -117,59 +128,65 @@ path is designed and covered below.
 
 ```mermaid
 flowchart TB
-    DEV["Local development<br/>build + test"]
+    DEV["Developer workstation"]
+    GH["GitHub<br/>source of truth<br/>CI: 160 tests per change"]
+    BUILD["Local build server<br/>self-hosted runner<br/>builds image, deploys on commit"]
     TG["Telegram servers"]
-    V["OCI Vault<br/>secrets"]
     EXT["10 news sources"]
     LLM["DeepSeek API"]
 
-    subgraph VCN["Oracle Cloud VCN - private network"]
-        subgraph BotVM["Main server - 1GB RAM, 1/8 OCPU"]
-            C["Docker container<br/>public bot + admin bot<br/>+ push scheduler"]
+    subgraph OCI["Oracle Cloud"]
+        V["OCI Vault<br/>secrets"]
+        subgraph VCN["VCN - private network"]
+            subgraph BotVM["Main server"]
+                C["Docker container<br/>public bot + admin bot<br/>+ push scheduler"]
+            end
+            subgraph PhxVM["Management server"]
+                P["Phoenix<br/>LLM tracing<br/>30-day retention"]
+            end
+            C -->|OTLP / gRPC| P
         end
-        subgraph PhxVM["Management server"]
-            P["Phoenix<br/>LLM tracing<br/>30-day retention"]
-        end
-        C -->|OTLP / gRPC| P
     end
 
-    DEV -->|"CI: 160 tests on every change"| DEV
-    DEV -->|"docker save over SSH"| C
-    C -->|"long polling — no inbound port"| TG
+    DEV -->|push| GH
+    GH -->|triggers on new commit| BUILD
+    BUILD -->|"docker save over SSH"| C
+    C <-->|long polling| TG
     C -->|Instance Principal auth| V
     C -->|fetch articles| EXT
     C -->|inference| LLM
 ```
 
-**Note the direction of the Telegram arrow.** The bot polls outbound;
-there is no inbound port, no TLS termination, no public endpoint on the
-application server. That was deliberate — it removes an entire class of
-attack surface at no cost.
+**CI/CD.** GitHub is the source of truth, and the full test suite runs on
+every change (§C2). Deployment is handled by a **local build server**
+acting as a self-hosted runner: on a new commit it builds the image and
+ships it to production with `docker save | ssh … docker load`. Building
+happens there rather than on the VM itself, because a build's resource
+spike doesn't fit comfortably alongside the running service.
 
-**CI/CD.** Every change runs the full test suite before commit (§C2).
-Deployment builds the image locally and transfers it with
-`docker save | ssh … docker load`, never building on the VM itself — a
-build's resource spike doesn't fit comfortably in 1 GB. The automated
-path is designed but not yet built: a GitHub Actions **self-hosted
-runner** on a machine I already control, so no deployment credential ever
-needs to live in a third-party secret store — the same principle as the
-vault design in §A3.
+Using a self-hosted runner rather than a cloud runner is deliberate: the
+deployment credential stays on a machine already trusted and never has to
+live in a third-party secret store — the same principle as the vault
+design in §A3. **The automated trigger is designed but not yet wired up;
+deployment is currently run manually through the same path.**
 
 ## A2. Main server and management server
 
 | | Main server | Management server |
 |---|---|---|
 | **Runs** | The bot container — both Telegram bots and the push scheduler | Phoenix, the LLM tracing backend |
-| **Exposure** | No inbound ports; outbound only | No public exposure; private network + SSH only |
-| **Why separate** | Application compute stays predictable under a 1 GB ceiling | A tracing backend retaining 30 days of spans has a very different memory and disk profile than the bot; co-locating them would put the observability tool in competition with the thing it observes — and take both down together |
-
-Separating them also means that if the management server is down, the
-service itself keeps running. Observability is not on the critical path.
+| **Role** | The public-facing service | Internal tooling, for the operator only |
+| **Exposure** | Public-facing in role, but **no inbound port is open today** — the bot pulls from Telegram rather than receiving callbacks. A channel requiring webhooks would change this | No public exposure at all; private network plus SSH only |
+| **Why separate** | **Scalability** — the public service is the part that would need to scale out (e.g. behind Kubernetes), and it can only do that if it isn't tied to a co-located stateful tool. **Isolation** — one going down must not take the other with it: the service keeps running if tracing is unavailable, and tracing survives to diagnose a service failure | A tracing backend retaining 30 days of spans has a very different memory and disk profile from the bot; co-locating them would put the observability tool in competition with the very thing it observes |
 
 ## A3. Identity and secrets
 
-**Zero stored credentials.** Every secret — LLM API key, both bot tokens,
-telemetry key — lives in **OCI Vault** and is fetched at container startup
+**The governing rule: no standing credential should have to leave a
+machine that already holds a trusted identity.**
+
+Credentials and tokens are kept **separate from the service** and stored
+in **OCI Vault** rather than travelling with the code. Every secret — LLM
+API key, both bot tokens, telemetry key — is fetched at container startup
 using **Instance Principal** authentication: the VM proves its own
 identity to the cloud provider, so there is no bootstrap credential to
 leak in the first place.
@@ -187,9 +204,9 @@ flowchart LR
     D --> E["Export into process env<br/>and start the application"]
 ```
 
-The same design principle recurs in the planned CD (§A1): **no standing
-credential should have to leave a machine that already holds a trusted
-identity.**
+The same rule drives the deployment design in §A1 — which is why the build
+server is self-hosted rather than a cloud runner that would need its own
+copy of a deployment credential.
 
 ## A4. Management access
 
@@ -239,20 +256,44 @@ flowchart TB
 
 ### The request pipeline
 
-Every message goes through the same three stages, regardless of what the
-user is asking for.
+**The first LLM call is a router.** Its job is to decide which route the
+request takes — not to answer it. Different routes then do genuinely
+different work, because a request to change a setting has nothing in
+common with a request to research a topic.
 
 ```mermaid
 flowchart TB
     M["incoming message"] --> R{"regex pre-filter<br/>zero LLM cost"}
-    R -->|obvious injection attempt| REJ["reject with guidance"]
-    R -->|pass| S1["Stage 1 — Classify<br/>structured-output LLM call<br/>on_topic? + category?"]
+    R -->|known attack pattern| REJ["reject, with guidance<br/>on what is supported"]
+    R -->|pass| S1{"<b>Router — LLM call 1</b><br/>structured output:<br/>in scope? which route?"}
+
     S1 -->|off-topic| REJ
-    S1 -->|on-topic + category| S2["Stage 2 — Act<br/>tool-calling agent<br/>prompt composed per-call"]
-    S2 --> S3["Stage 3 — Verify<br/>independent check<br/>of generated output"]
-    S3 -->|fail| REJ
-    S3 -->|pass| OUT["send to user"]
+    S1 -->|news query| RA["<b>Route A — Research</b><br/>tool-calling agent:<br/>search sources, synthesize,<br/>cite links"]
+    S1 -->|"interests / language / schedule"| RB["<b>Route B — Settings</b><br/>bounded state change:<br/>update the subscriber record"]
+
+    RA --> V{"<b>Verify — final LLM call</b><br/>check what was actually written"}
+    RB --> V
+    V -->|fail| REJ
+    V -->|pass| OUT["send to user"]
 ```
+
+| Route | Work | Why it's separate |
+|---|---|---|
+| **A — Research** | Search across sources, synthesize themes, cite links | Open-ended. Needs tool use, multiple steps, and real generation — the only route that genuinely requires an agent loop |
+| **B — Settings** | Change interests, reply language, or push schedule | A bounded state change. There is nothing to research and nothing to reason about multi-step; the router has already determined the intent |
+
+**Current implementation vs. intended design.** Today both routes are
+served by the same agent object, differentiated by the instructions and
+tool set the router selects for that turn (§B3). It works, but Route B is
+paying for an agent loop it doesn't need — a settings change is one
+deterministic write, not a reasoning problem.
+
+**Planned refactor:** dispatch Route B out of the agent entirely, so
+settings changes execute as a direct call and only Route A enters the
+tool-calling loop. That would cut latency and cost on the highest-volume
+non-news operations and make the routing boundary explicit in the code
+rather than implicit in prompt selection. Not yet implemented — tracked in
+`docs/context-management-plan.md`.
 
 ### Why multiple LLM calls
 
@@ -260,14 +301,14 @@ A single call would be cheaper per message. Three exist because they do
 genuinely different jobs, and collapsing them costs either safety or
 quality:
 
-| Call | Job | Why it can't be merged into the agent call |
+| Call | Job | Why it can't be folded into the agent |
 |---|---|---|
-| **Stage 1 — Classify** | Is this in scope, and what kind of request is it? | Runs *before* the expensive agent call, so off-topic input is rejected without paying for tool use and a long generation. It also selects which instructions and tools the agent gets. |
-| **Stage 2 — Act** | Do the work: search, synthesize, or update settings | This is the agent proper — the only stage that calls tools. |
-| **Stage 3 — Verify** | Is what the model actually wrote acceptable to send? | Some failures are only visible in the output. A model asked to check its own output in the same breath as producing it is grading its own work. |
+| **Router** | Is this in scope, and which route does it take? | Runs *before* any expensive work, so off-topic input is rejected without paying for tool use and a long generation. Its decision also determines what the chosen route is allowed to do. |
+| **Route A agent** | Search, synthesize, cite | The only call that needs tools and multiple steps. Route B doesn't invoke this at all. |
+| **Verify** | Is what was actually written acceptable to send? | Some failures are only visible in the output. A model asked to check its own output in the same breath as producing it is grading its own work. |
 
-Stage 1 is deliberately doing **two jobs in one call** — safety gate *and*
-intent router. The obvious implementation is two separate calls; both
+The router deliberately does **two jobs in one call** — safety gate *and*
+route selection. The obvious implementation is two separate calls; both
 questions need the same understanding of the message, so merging them
 halves the cost and latency of the gate on every message.
 
@@ -280,7 +321,7 @@ reviewer to look at.
 The requirement is "never send the same article twice." An agent choosing
 its own search calls will re-fetch the same top-N-by-recency results and
 re-report them — you'd be *hoping* the model notices repetition, and per
-C2, hope is not a mechanism.
+P2, hope is not a mechanism.
 
 ```mermaid
 flowchart TB
@@ -433,21 +474,36 @@ inference.
 Trace retention is explicitly bounded at 30 days. The default was
 unbounded growth, which on a small disk is a slow-motion outage.
 
-## C5. Incident reporting
+## C5. Incident reporting and alerting
 
-The loop is: **user-visible symptom → gather evidence before theorizing →
-root cause → fix → close the hole that let it through.**
+Per principle P3, a failure nobody notices is indistinguishable from no
+failure — so the system reports its own problems rather than waiting to be
+asked.
 
-That last step is the one that compounds. Every incident resolves into
-either a new test case or a new post-deploy check, so the same class of
-failure can't recur silently. The checklist in C3 is entirely built from
-past incidents.
+**Alerts go to the admin bot.** When something breaks that isn't
+user-visible — for example the telemetry pipeline becoming unreachable —
+the system sends a message to the admin Telegram bot, so a human is
+actually made aware at the time rather than discovering it later through
+a gap in the data. That reuses the same admin channel already built for
+access approvals, so alerting needed no new delivery mechanism, no email
+service, and no paging tool.
 
-Operational failures that aren't user-visible get their own alerting: if
-the telemetry pipeline itself becomes unreachable, the admin is notified
-on Telegram rather than discovering it later through missing data.
+**The handling loop** is: *user-visible symptom or alert → gather evidence
+before theorizing → root cause → fix → close the hole that let it
+through.* That last step is the one that compounds — every incident
+resolves into either a new test case or a new post-deploy check, so the
+same class of failure can't recur silently. The 13-case checklist in §C3
+is built entirely from past incidents.
 
-A worked example follows in §D1.
+**Possible extension, not built:** the same alert path could carry an
+automated remediation step — triggering a fix workflow, or opening a pull
+request against the detected fault — since the alert already knows what
+failed and the deployment path is scripted. It's deliberately left out for
+now on budget and cost grounds; alerting a human who can decide is
+sufficient at this scale, and automated remediation adds a class of risk
+(acting on a false positive) that isn't worth taking on for a pilot.
+
+A worked example of the loop follows in §D1.
 
 ---
 
@@ -489,7 +545,7 @@ false-positive problem, occasionally rejecting perfectly good replies.
 **The obvious fix** was to split the harder check into its own smaller,
 focused prompt. A narrower question should be more reliable.
 
-**Measured, it was dramatically worse.** Because C2 rules out unit-testing
+**Measured, it was dramatically worse.** Because P2 rules out unit-testing
 model behavior, the substitute is N-trial measurement against the real
 model before shipping. That caught it:
 
@@ -612,7 +668,7 @@ acceptable.
 | **Probabilistic guardrails** | A legitimate message can occasionally be rejected; a bad one can occasionally pass | Four independent layers; classifiers fail *open*, so an outage never blocks legitimate use | Inherent — reduced by measurement (§D1), not eliminated |
 | **In-memory conversation history** | Restart loses in-flight context | Deliberate — history is capped at 1 h / 20 messages anyway | Only if conversations become genuinely multi-turn |
 | **No rate limiting** | An approved user could burn API quota | Access is approval-gated, bounding exposure | Before opening access more widely |
-| **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access | When a second host or real concurrency is needed |
+| **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access. All access sits behind one module, keeping migration cheap — see `docs/data-layer-plan.md` | When a second host or real concurrency is needed |
 | **Linear cost scaling** | Each push subscriber costs LLM calls per interval | Cheap model; conservative 1-hour interval floor | Before any open signup |
 | **Manual deploy step** | Human error surface each release | Documented workflow plus the 13-case checklist | CD is designed (§A1), not built |
 | **Silent source degradation** | An upstream format change makes that source quietly return nothing | Per-source isolation keeps the request succeeding on the rest | Needs a source-health check; not built |
@@ -632,7 +688,8 @@ users doesn't support it. Decision: hold until there's a business model
 that justifies the paid tier. The research is written up rather than
 discarded.
 
-**A managed database.** SQLite on one VM doesn't scale and can't be
+**A managed database.** Deferred with the reasoning recorded in
+`docs/data-layer-plan.md`. SQLite on one VM doesn't scale and can't be
 shared — a real limitation, and an understood one. But migrating now,
 with no paying users, means paying migration cost twice: once today, once
 again when the actual requirements are known.

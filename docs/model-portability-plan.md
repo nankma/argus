@@ -1,0 +1,197 @@
+# Model Portability Plan (LLM Gateway / Dynamic Model Switching)
+
+Nothing here is built yet — this doc captures the goal, what's already
+possible, and the decisions to make before implementing, same pattern as
+`docs/deployment-plan.md` and `docs/multi-channel-plan.md`.
+
+**The question that prompted it:** the architecture has no AI gateway.
+Can we switch the LLM model dynamically, and do we need one?
+
+**Short answer: yes, and no.** Yes we can switch models — LangChain
+provides the mechanisms natively and the codebase's dependency-injection
+design already accommodates it. No, we don't need a separate gateway
+service for that; a gateway would mostly add operational features
+(budget caps, caching, multi-provider key management) that don't earn
+their cost at current scale.
+
+## Status
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | Config-driven model selection | **Not built** — recommended first step |
+| 2 | Per-stage model routing (cheap model for classifiers) | **Not built** — recommended; the seam already exists |
+| 3 | Provider failover | Not built — deferred until availability is a real requirement |
+| 4 | Dedicated AI gateway (LiteLLM / OpenRouter / Cloudflare) | **Evaluated, not recommended at current scale** |
+| 5 | Re-validating guardrail reliability after any model change | **Blocking prerequisite** for 1–3 — see "The behavioral caveat" |
+
+## Where things stand today
+
+Model choice is hardcoded in two ways:
+
+- `agent.py` defines `MODEL = "deepseek-chat"`.
+- `ChatDeepSeek(model=MODEL)` is constructed in three places —
+  `agent.main()`, `bot.main()`, and `combined_bot.main()`.
+
+Everything downstream is already provider-agnostic. These all take the
+model as a parameter rather than constructing one:
+
+| Consumer | Signature |
+|---|---|
+| Agent construction | `build_agent(model)` |
+| Stage 1 router | `classify_message(model, user_message)` |
+| Stage 3 output check | `is_output_on_topic(model, response_text, category)` |
+| Push digest writer | `write_push_digest(model, articles, language)` |
+| Push cycle | `run_push_cycle(model, send, now)` |
+
+That injection point exists because of testability (it's what lets the
+suite run against a scripted fake — see
+`docs/telemetry-and-testing-plan.md`), but it happens to give most of what
+a gateway would provide: **the ability to substitute the model without
+touching consumer code.** The gap is only that construction is pinned to
+one provider class.
+
+## Verified capabilities
+
+Tested against the installed `langchain==1.3.14`, constructing real
+objects (no API calls):
+
+| Capability | Result |
+|---|---|
+| `init_chat_model("deepseek:deepseek-chat")` | Works — returns `ChatDeepSeek`, `model_name == "deepseek-chat"`. Provider becomes a **string**, so it can come from config. |
+| `init_chat_model(configurable_fields=("model", "model_provider"))` | Works — returns `_ConfigurableModel`, allowing the model to be chosen **per invocation** via runtime config. |
+| `Runnable.with_fallbacks([...])` | Works — returns `RunnableWithFallbacks`. Automatic failover to a secondary model. |
+| `configurable_alternatives` / `configurable_fields` on `RunnableSerializable` | Present. (Not on the base `Runnable` — confirmed, so target the right class if used.) |
+
+## Level 1 — Config-driven model selection
+
+Replace the three hardcoded constructions with a single string read from
+configuration:
+
+```python
+# instead of: ChatDeepSeek(model=MODEL)
+model = init_chat_model(os.environ.get("LLM_MODEL", "deepseek:deepseek-chat"))
+```
+
+**Effect:** switching provider or model becomes an environment-variable
+change plus a restart — no code change, no rebuild.
+
+**Cost:** roughly ten lines across three files. The target provider's
+LangChain package must be installed (e.g. `langchain-openai`), and its API
+key must be added to OCI Vault following the existing secrets pattern
+(`docs/security-plan.md` finding 2) — no new secrets design needed.
+
+**Recommended.** Low cost, and it makes the "which model?" decision
+reversible instead of baked in.
+
+## Level 2 — Per-stage model routing
+
+The most valuable item, and nearly free, because **the architecture
+already separates the calls.**
+
+The three-stage pipeline (`docs/system-overview.md` §B2) makes three
+distinct kinds of LLM call, and each already receives its model as a
+separate argument:
+
+| Stage | Work | Model requirement |
+|---|---|---|
+| Stage 1 — Classify | Short structured classification | Small/fast is sufficient; must support structured output |
+| Stage 2 — Act | Synthesis, tool use, prose | Benefits most from a stronger model |
+| Stage 3 — Verify | Short structured classification | Small/fast is sufficient; must support structured output |
+
+Today all three receive the *same* instance, but nothing requires that.
+Passing a cheaper model to the two classifier stages and reserving a
+stronger one for synthesis is a **wiring change in `main()`, not a
+refactor** — the seam is already in place.
+
+**Why it matters:** the classifiers run on *every* message, including
+rejected ones. They're the highest-volume calls in the system and the
+least demanding. This is where cost optimization actually lands.
+
+**Prerequisite:** any model used for Stages 1 or 3 must support
+structured output, since both depend on it (and per `§D1`, structured
+output is what made the Stage 3 check reliable in the first place).
+
+## Level 3 — Provider failover
+
+`.with_fallbacks([secondary_model])` gives automatic retry against
+another provider when the primary fails or rate-limits.
+
+**Deferred, with two caveats to resolve first:**
+
+1. The fallback model must support **both tool calling and structured
+   output**, or Stages 1–3 and the agent loop will fail on the fallback
+   path. Not all models do; this needs verifying per candidate, not
+   assuming.
+2. Failover needs testing against `create_agent`, since the agent wraps
+   the model — the fallback behavior through that wrapper is unverified.
+
+Worth building when provider availability becomes a real operational
+concern. It isn't yet — there's been no observed DeepSeek outage
+affecting the service.
+
+## Level 4 — A dedicated AI gateway
+
+Evaluated and **not recommended at current scale.**
+
+| Option | What it adds beyond Levels 1–3 | Cost here |
+|---|---|---|
+| **LiteLLM (self-hosted)** | Budget caps, caching, unified multi-provider routing, per-key quotas | Another process competing for the same **1 GB** — directly against constraint C1. The single-process topology exists precisely to avoid loading a second runtime (`docs/system-overview.md` §D1) |
+| **OpenRouter / Portkey (hosted)** | Same, without local memory cost; one key for many providers | Adds a network hop to every call, a third-party dependency in the critical path, and (for some) per-token markup |
+| **Cloudflare AI Gateway** | Caching, analytics, rate limiting; generous free tier | Still an extra hop; overlaps with Phoenix, which already provides full trace fidelity |
+
+The distinctive benefits of a gateway are **budget enforcement, response
+caching, and managing many providers at once**. None are pressing:
+spending is bounded by approval-gated access, the workload is
+poorly-suited to caching (news changes constantly), and there's one
+provider.
+
+**Revisit when:** open signup makes hard budget caps necessary, or more
+than two providers are in play simultaneously.
+
+## The behavioral caveat (blocking prerequisite)
+
+Switching models is mechanically easy. It is **not behaviorally free.**
+
+The guardrail reliability figures recorded in `docs/system-overview.md`
+§D1 — the structured-output check scoring 15/15, and the narrow-prompt
+variant scoring 1/15 — were measured **against DeepSeek specifically**.
+They are properties of a prompt/model pair, not of the prompt alone.
+
+Therefore, before any model change reaches production:
+
+1. Re-run the N-trial measurement for Stage 1 (classification accuracy)
+   and Stage 3 (self-disclosure detection, false-positive rate) against
+   the new model.
+2. Re-run the 13-case post-deploy checklist, which covers output
+   formatting — the Markdown-vs-HTML compliance behavior in §D1 is also
+   model-specific.
+
+This is the same discipline §D1 argues for, applied to a config change
+rather than a prompt change. **A model swap is a behavioral change and
+must be measured like one.** Cheap models in particular are likelier to
+be weaker at instruction-following, which is exactly what the guardrails
+depend on — so Level 2's cost saving must be validated, not assumed.
+
+## Suggested order
+
+1. **Level 1** — config-driven selection. Small, reversible, unblocks
+   everything else.
+2. **Level 5 harness** — a repeatable script for the §D1 measurements, so
+   validating a candidate model is a command rather than a manual
+   exercise. This should exist *before* Level 2, not after.
+3. **Level 2** — per-stage routing, with the cheap model validated by
+   that harness.
+4. **Level 3** — failover, when availability warrants it.
+5. **Level 4** — only on the triggers above.
+
+## Open questions
+
+- Which second provider? Choice should be driven by structured-output and
+  tool-calling support, not headline price — a cheaper model that can't
+  do structured output is unusable for Stages 1 and 3.
+- Should the classifier model be configurable *separately* from the agent
+  model (two env vars), or should routing be a single named "profile"
+  (e.g. `LLM_PROFILE=economy|balanced`)? The profile approach is less
+  flexible but harder to misconfigure into an unsafe combination.
+- Does the measurement harness belong in CI? It costs real API calls, so
+  probably not on every commit — likely a manually-triggered job.

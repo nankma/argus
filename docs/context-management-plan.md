@@ -231,6 +231,66 @@ at picking the right tool from a fixed set given clear per-turn framing,
 so dynamic tool-list swapping isn't needed to get the conditional-behavior
 goal.
 
+## Planned refactor: dispatch settings routes out of the agent
+
+**Status: not built.** Identified 2026-08-09 while documenting the request
+pipeline for `docs/system-overview.md` §B2.
+
+**The observation.** The router (built, live) classifies every message
+into a category, and the agent's layer-2 instructions and tool set are
+selected from that. Functionally this works — but *every* category still
+runs through the same tool-calling agent loop, differentiated only by
+prompt content. That's the wrong shape for half of them.
+
+The categories split cleanly into two kinds of work:
+
+| Route | Categories | Work required |
+|---|---|---|
+| **A — Research** | `news_query` | Genuinely open-ended: search multiple sources, synthesize across them, cite links. Needs tool use and multiple model steps — an agent loop is the right tool. |
+| **B — Settings** | `set_interest`, `remove_interest`, `start_push`, `stop_push`, `set_language` | A bounded state change against one subscriber's record. The router has *already* determined the intent; there is nothing left to reason about multi-step. |
+
+**The problem.** Route B pays for an agent loop it doesn't need. Changing
+a push interval is one deterministic write, but currently costs a full
+agent invocation — model call, tool-selection reasoning, and a second call
+to produce the confirmation. That's latency and token cost spent on a
+decision the router already made.
+
+**Proposed change.** Dispatch Route B directly: the router's category maps
+to a handler that performs the state change and returns a confirmation,
+without entering the tool-calling loop. Only `news_query` enters the
+agent.
+
+**Expected benefits:**
+
+- Lower latency and cost on the highest-volume non-news operations
+- The routing boundary becomes explicit in code rather than implicit in
+  which prompt fragment got selected
+- Route B becomes deterministic and therefore fully unit-testable — no
+  model call means no non-determinism to measure (see the reliability
+  discussion in `docs/guardrails-plan.md`)
+
+**Open design points:**
+
+- Does Route B still need the layer-4 output check? If the confirmation
+  text is generated from a template rather than by a model, there is no
+  model output to verify, and that call could be dropped too — a further
+  saving. If it stays model-generated for tone/language, the check stays.
+- Route B must still honor the per-user reply-language preference. A
+  templated confirmation would need translation handled explicitly rather
+  than falling out of the prompt, which is an argument for keeping one
+  small model call on that path.
+- Argument extraction (e.g. *which* topic to add) currently happens inside
+  the agent via tool-call arguments. Dispatching out of the agent means
+  the router must return that too — expanding its structured output from
+  `{on_topic, category}` to include an optional argument payload.
+
+That last point is the real design question: it makes the router do more,
+and the router is a single point of failure for every message. Worth
+measuring whether a richer structured output degrades its classification
+accuracy before committing — the same discipline applied in
+`docs/system-overview.md` §D1, where a plausible prompt change measured
+dramatically worse.
+
 ## Open questions
 
 - ~~Exact LangChain middleware API surface~~ — **verified**, see above.
