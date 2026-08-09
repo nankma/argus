@@ -1,44 +1,30 @@
-<!-- mdr-guide v="3"
-Review notes are HTML comments whose body starts with "mdr". Apply each note to
-the content it anchors, then delete its marker(s); never change unmarked content.
-("»" = the comment close.)
-• POINT — <!-- mdr id="ID" kind="K" … : NOTE »  → the element right before it.
-• PAIR  — <!-- mdr-start id="ID" kind="text" : NOTE » …text… <!-- mdr-end id="ID" »  → the wrapped text.
-kind: text=prose; code=preceding fenced block (span="sr:sc-er:ec" 0-based, quote="code"); diagram=preceding mermaid/plantuml.
-mermaid-element=preceding mermaid fence, one node/edge (ref=native id; span/quote point to the
-fence-internal line(s), 0-based fence-relative): edit those fence line(s) per NOTE.
-svg-element=block referencing a local .svg (src=relative path; ref=element id; nth=fallback index):
-target lives in the EXTERNAL file named by src, not here — edit that file, or report to a human.
-frontmatter=the leading YAML block, anchored by key= (a top-level key). Edit INSIDE the --- block;
-the marker itself sits after it. No span= → the NOTE is about that whole key/value. With span="s-e"
-(0-based chars within that key's VALUE) → it is about just quote= inside the value; revise only that.
-Decode in NOTE: \| \< \> \n \r \\ → | < > ⏎ CR \
-Remove POINT = its one comment; PAIR = both markers (keep the revised text). When no mdr markers remain, delete this guide.
--->
-
 # Autonomous Technology-Trend Intelligence Agent
+### Proactive, customized news search and delivery service
 
-<!-- mdr id="c-phigwjza" kind="text": There should be a sub title like "Proactive customized new search and deliver service" -->
-### Design, Build, and Operations
+**An LLM agent that monitors 10 technology sources, works out what's
+genuinely new, and delivers a personalized trend briefing on Telegram —
+on a schedule, without being asked. Live in production on cloud
+infrastructure.**
 
-<!-- mdr id="c-8nitgjuw" kind="text": More like What is the doc about. -->
+## What this document covers
 
-**An LLM agent that monitors 10 technology sources and delivers
-personalized trend intelligence on Telegram. Live in production on a cloud
-VM, <!-- mdr-start id="c-d2mhg3aj" kind="text": No one care 0 cost. Can removed -->running at $0 infrastructure cost.<!-- mdr-end id="c-d2mhg3aj" -->**
+An end-to-end walkthrough of the service: the architecture it runs on, how
+the agent is designed, how quality is assured, and the difficulties hit
+along the way with how each was solved. It covers the full lifecycle —
+design, security, deployment, observability, testing, and live incident
+response — with the reasoning and measurements behind each decision.
 
-Small in scope by design; complete in lifecycle — architecture, security,
-deployment, observability, testing, and live incident response are all
-built and in use. This document explains the engineering decisions, the
-constraints that forced them, and the measurements that justified them.
-
-<!-- mdr id="c-xdisxejc" kind="text": Brifily talk about what this document is talking about -->
+| Part | Contents |
+|---|---|
+| **A. Architecture** | Cloud topology, servers, secrets and identity, management access |
+| **B. System design** | Components, agent workflow, prompt structure, message safety |
+| **C. Quality assurance** | Test strategy, CI, post-deployment testing, monitoring, incident reporting |
+| **D. Difficulties** | Problems encountered and how each was solved; known limits; work deliberately declined |
+| **Appendix** | How AI was used to build this |
 
 ---
 
 ## Why I built it
-
-<!-- mdr id="c-c95wn8pq" kind="text": MAy be add two image to tell what is the results?\n\n<local-key-directory>\\t1.jpg and t2.jpg -->
 
 I follow several areas of technology closely, but keeping current meant
 working through a dozen sites and forums on a regular basis — Hacker News,
@@ -51,152 +37,62 @@ across the major sources, work out what's genuinely new, summarize the
 *trends* rather than the individual headlines, and deliver the result to
 me rather than waiting for me to go ask.
 
-That original motivation directly shaped three decisions that recur
+### What it actually produces
+
+<p align="center">
+  <img src="images/digest-briefing.jpg" alt="Telegram digest: a Tech News Briefing grouped by the user's topics, AI and Robotics, each with a synthesized summary and multiple source links" width="47%">
+  <img src="images/digest-sources.jpg" alt="End of a digest: the agent notes its sources are weeks old and recommends checking a live price feed, then offers to adjust topics or push schedule" width="47%">
+</p>
+
+A scheduled briefing, grouped by the topics that subscriber asked for.
+Each item is **synthesized across sources** — the first entry merges New
+Scientist, Wired, and TechCrunch coverage into one paragraph rather than
+listing three articles — and every claim carries its source links.
+
+The right-hand screenshot shows something I care about more than the
+formatting: the agent noting that its most recent sources on that topic
+were **weeks old** and recommending a live price feed instead. Being
+useful here means being honest about the freshness of what it found, not
+presenting stale material as current.
+
+### What the motivation forced
+
+Three decisions follow directly from that original need, and recur
 throughout this document:
 
-- **<!-- mdr-start id="c-4rhd4tfd" kind="text": Move to last. Personalized and Push should be higher priority -->Synthesis, not aggregation<!-- mdr-end id="c-4rhd4tfd" -->** — merging coverage of the same story
-  across sources is the entire point. A list of headlines is the problem
-  I had, not the solution (§1)
 - **Personalization** — "relevant to me" is inherently per-person, so
-  interests are stored per user and steer every general query (§3)
+  interests are stored per user and steer every query (§B3)
 - **Push, not pull** — the assistant comes to me. This is why the
-  scheduled digest is a core feature rather than a nice-to-have, and why
+  scheduled digest is the core feature rather than a nice-to-have, and why
   a messaging channel that couldn't support it was ultimately declined
-  (§11)
+  (§D3)
+- **Synthesis, not aggregation** — merging coverage of the same story
+  across sources is the point. A list of headlines is the problem I had,
+  not the solution (§B2)
 
 ---
 
-## At a glance
+## Components chosen
 
+Each was a decision, not a default:
 
-| | |
-|---|---|
-| **<!-- mdr-start id="c-uddfy9a8" kind="text": Remove the current table from What to documented incident history. Redunt information with later detail -->What<!-- mdr-end id="c-uddfy9a8" -->** | Telegram bot delivering synthesized tech-industry news + trend reports, personalized per user |
-| **Status** | Live in production, serving real users |
-| **Scale** | Deliberately small — 1 GB RAM VM, zero infrastructure cost |
-| **Tests** | 160 tests, ~2.5 s, $0 API cost per run |
-| **Ops** | Managed-vault secrets, distributed tracing, 13-case post-deploy checklist, documented incident history |
-
-### Stack, and why
-
-<!-- mdr id="c-qzszcfvz" kind="text": More like overall component we choose? -->
-
-Each choice below was a decision, not a default:
-
-| Choice | Why this over the obvious alternative |
-|---|---|
-| **DeepSeek** | Roughly an order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis; the cost difference is what makes an always-on push feature viable at all. |
-| **LangChain** | Framework-managed agent loop, and — critically — a swappable model interface. That's what allows the entire test suite to run against a scripted fake with no network and no API cost. |
-| **Telegram** | Supports *long polling*, so the bot needs no public endpoint, no TLS, no domain. Eliminates an entire class of attack surface and ops burden. (LINE, evaluated later, is webhook-only — see §11.) |
-| **SQLite** | Zero cost, zero operational overhead, adequate for current scale. A known limitation, deliberately accepted and scheduled for revisit — see §10. |
-| **Oracle Cloud Always Free** | A genuinely perpetual free tier, not time-limited trial credits. Two VMs and a managed secrets vault at $0/month indefinitely. |
-| **Arize Phoenix** | Self-hostable OpenTelemetry-native LLM tracing — full trace fidelity with no per-trace SaaS billing, which matters when tracing every call. |
-
----
-
-## What this project demonstrates
-
-<!-- mdr id="c-guaanan7" kind="text": Move to appendix: How leverage AI to this project? -->
-
-<!-- mdr-start id="c-zim545xc" kind="text": This document covered...\n\nNo need to mention side project, and other project. And it seems can move to up before why I build it? -->Most side projects stop at *built*. This one covers the full loop:<!-- mdr-end id="c-zim545xc" -->
-**design → secure → deploy → observe → operate → measure → decline the
-wrong work.** It is a small service, but nothing in that loop is missing
-or simulated — it's deployed, it has real users, and it has been debugged
-in production from recorded evidence.
-
-### How it was built — human + AI, deliberately
-
-
-I built this working with an AI coding assistant throughout. That was a
-deliberate choice, and I'd argue it's one of the things the project
-demonstrates rather than a caveat on it.
-
-The division of labour stayed consistent throughout:
-
-| I owned | The AI assistant owned |
-|---|---|
-| **Problem definition** — <!-- mdr-start id="c-y55f95ma" kind="text": Define the scope, the feature, and the results -->what to build and why<!-- mdr-end id="c-y55f95ma" --> (see *Why I built it* above) | — |
-| **<!-- mdr-start id="c-6n75vwqg" kind="text": Decide the cloud archetecture, the service infrastructure (docker + phoenix), the CI/CD workflow, incident detected and how to receive the incident -->Architecture decisions<!-- mdr-end id="c-6n75vwqg" -->** — including the layered-prompt structure (§3) and the choice to merge the safety gate and intent router into one call, both of which I specified before implementation | Turning those designs into working code |
-| **Scope and priorities** — security before deployment; personalization before scale; decline the second channel (§11); accept SQLite's limits rather than migrate prematurely (§10) | Research passes I directed — LINE's pricing tiers, registrar comparison, library capabilities — which I then decided on |
-| **<!-- mdr-start id="c-qhc59e8f" kind="text": Mode like guide what test need to be done, and what need to be coverage. Review the test plan and point out the gaps. ALSO manual test (manual test is the not import part. the high light part is to guide the direction and review the plan)\n\nAlso settle down the process when to test: CI, post Deployed -->QA from real use<!-- mdr-end id="c-qhc59e8f" -->** — I ran the live service as its actual user. The Markdown-rendering bug, the duplicate-interest bug, the broken onboarding in §9, and the push-timing question all surfaced because I noticed them in production, not because a test failed | Diagnostic execution — querying traces, running the N-trial measurements in §6, isolating root causes once pointed at a symptom |
-| **Verification standards** — insisting a fix be measured before shipping, not assumed (§6), and that invariants be enforced in code rather than by prompt (§5) | Implementation, test authoring, documentation drafting |
-| **Final judgment** — every decision recorded in this document is one I made and can defend | — |
-
-The short version: **I was the engineer and the operator; the assistant
-was leverage.** It wrote most of the lines; it did not decide what the
-system should be, what was acceptable to ship, or when something was
-actually fixed.
-
-<!-- mdr id="c-4f5pkak2" kind="text": Removed -->
-
-**What it changed:** the surface area here — cloud provisioning, secrets
-management, an agent pipeline, guardrails, a scheduler, observability,
-160 tests, and deployment tooling — would traditionally be a multi-week
-solo effort, most of it spent on integration plumbing rather than design.
-Working this way, it took **[TIMEFRAME — fill in]**, and the time went
-into the parts that actually needed judgment: deciding where determinism
-was required, measuring whether a guardrail actually worked, choosing
-what not to build.
-
-<!-- mdr id="c-vts2pxny" kind="text": Removed -->
-
-The discipline matters more than the speed, though. Working effectively
-this way means *not* trusting generated output by default — which is
-exactly where §5 (enforce invariants in code, don't just ask nicely) and
-§6 (measure the classifier, don't assume the plausible fix worked) come
-from. Both of those sections are the direct product of verifying rather
-than accepting.
-
-<!-- mdr id="c-hbx47uys" kind="text": Remove and the table below -->
-
-| What it shows | Where to look | Why it matters on a team |
+| Component | Role | Why this over the obvious alternative |
 |---|---|---|
-| **LLM/agent architecture** | §3 — three-stage classify → act → verify pipeline; layered prompt composition | Can design a system, not just call an API |
-| **Knowing when *not* to use an LLM** | §4 — push dedup is guaranteed by construction, not by prompting | Won't reach for the fashionable tool where boring code is correct |
-| **Engineering around probabilistic components** | §5 — code-level enforcement of invariants prompts can only make *likely* | Ships LLM features that hold up in production, not just in a demo |
-| **Empirical rigor** | §6 — a plausible "improvement" measured 1/15 and was rejected before shipping | Verifies instead of assuming; catches own mistakes before users do |
-| **Designing under hard constraints** | §7 — two bots + scheduler in 1 GB, with the measurement behind the topology | Makes cost/resource tradeoffs deliberately and can defend them |
-| **Security thinking** | §8 — zero stored credentials, layered injection defense | Security is designed in, not bolted on after review |
-| **Production ownership** | §9 — CI, deploy workflow, tracing-based debugging, post-deploy checks | Can be handed a service and trusted to run it |
-| **Honest self-assessment** | §10 — known failure modes, each with a trigger for when it must be fixed | Will tell you the real status, not the comfortable one |
-| **Scope judgment** | §11 — features fully researched, then declined, reasoning recorded | Knows when to stop; won't gold-plate a pilot |
+| **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. |
+| **LangChain** | Agent framework | Framework-managed agent loop, and — critically — a swappable model interface. That's what lets the entire test suite run against a scripted fake with no network and no API cost. |
+| **Telegram** | Delivery channel | Supports *long polling*, so the bot needs no public endpoint, no TLS, no domain. Eliminates an entire class of attack surface and operational burden. |
+| **SQLite** | Persistence | Zero operational overhead and adequate at current scale. A known limitation, deliberately accepted — see §D2. |
+| **Oracle Cloud** | Hosting | A genuinely perpetual free tier, not time-limited trial credits, including a managed secrets vault. |
+| **Docker** | Packaging | One artifact that runs identically locally and on the VM; makes the deploy step a single image transfer. |
+| **Arize Phoenix** | LLM observability | Self-hostable and OpenTelemetry-native — full trace fidelity with no per-trace SaaS billing, which matters when tracing every call. |
 
----
-
-## 1. <!-- mdr-start id="c-7n628huy" kind="text": Re structure this chapter\nA. Architecture\n1. Overall architecture (include CI, CD)\n2. The Main server and the Manage server (Phoenix)\n3. MSI and KV security\n4. SSH tuanl for management \n\nB System Design\n1. component overview (agent, bot, admin, guardrail, source and telemetry)\n2. Agent design (flow chat, why mutiple LLM call, how the workflow looks like)\n3. How the 4 layer prompts was for\n4. How we prevent the dangerous message \n\n\nC. Quality insure\n1. Test case\n2. Test before commit (CI)\n3. Post deployment test (integrate test)\n4. Monitoring (no logs)\n5. incident reporting\n\n4. -->What it does<!-- mdr-end id="c-7n628huy" -->
-
-Aggregates across **10 news sources** (Hacker News, arXiv, company
-engineering blogs, tech press, plus optional paid APIs) and uses an LLM to
-*synthesize* — spotting themes across sources and merging coverage of the
-same story — rather than dumping headlines.
-
-| Capability | Detail |
-|---|---|
-| On-demand trend reports | Ask about a company, product, or trend; get a synthesized report citing real source URLs |
-| Personalized interests | Stored per user; prioritized on general questions |
-| Reply language | Set once, applies to *everything* after — including script variants (Traditional vs. Simplified Chinese) |
-| Scheduled push digests | Per-user interval, deduplicated against what that user has already been sent |
-| Access control | Admin-approval workflow; not an open service |
-
-Every capability is controllable **two ways** — a slash command or plain
-natural language ("add robotics to my interests", "start pushing me news
-every 6 hours"). Natural language isn't decoration: voice input is a
-planned direction, and voice has no slash commands.
-
-The source registry degrades gracefully by design — a source that errors
-or lacks an API key is skipped, and the request still succeeds on the
-rest. One broken upstream never fails a user request.
-
----
-
-## 2. The constraints that shaped everything
+### Design constraints
 
 Four constraints drove nearly every decision that follows.
 
-**C1 — Zero infrastructure budget.** Everything runs on Oracle Cloud's
-Always Free tier. The application VM is a `VM.Standard.E2.1.Micro`:
-**1 GB RAM, 1/8 OCPU**. That is not much headroom for a Python process
-loading LangChain.
+**C1 — Minimal infrastructure budget.** Everything runs on a free tier.
+The application VM is a `VM.Standard.E2.1.Micro`: **1 GB RAM, 1/8 OCPU** —
+not much headroom for a Python process loading LangChain.
 
 **C2 — The LLM is non-deterministic and cannot be unit tested.** There is
 no assertion for "the model follows this instruction." It mostly will.
@@ -209,153 +105,366 @@ That is both a prompt-injection surface and a cost-abuse surface.
 **C4 — One operator, no on-call rotation.** Every failure has to be
 diagnosable after the fact, from evidence the system recorded on its own.
 
-### Architecture
+---
 
-Two VMs on a private virtual cloud network. Observability is isolated from
-the application — from the public internet, and from application compute
-contention.
+# A. Architecture
+
+## A1. Overall architecture
+
+Two VMs on a private virtual cloud network, plus a managed secrets vault.
+Deployment is currently a local build transferred to the VM; the automated
+path is designed and covered below.
 
 ```mermaid
 flowchart TB
+    DEV["Local development<br/>build + test"]
     TG["Telegram servers"]
     V["OCI Vault<br/>secrets"]
     EXT["10 news sources"]
     LLM["DeepSeek API"]
 
     subgraph VCN["Oracle Cloud VCN - private network"]
-        subgraph BotVM["Bot VM - 1GB RAM, 1/8 OCPU"]
-            C["Single container, single process<br/>public bot + admin bot<br/>+ push scheduler"]
+        subgraph BotVM["Main server - 1GB RAM, 1/8 OCPU"]
+            C["Docker container<br/>public bot + admin bot<br/>+ push scheduler"]
         end
-        subgraph PhxVM["Observability VM"]
-            P["Phoenix<br/>LLM tracing backend<br/>30-day retention"]
+        subgraph PhxVM["Management server"]
+            P["Phoenix<br/>LLM tracing<br/>30-day retention"]
         end
         C -->|OTLP / gRPC| P
     end
 
+    DEV -->|"CI: 160 tests on every change"| DEV
+    DEV -->|"docker save over SSH"| C
     C -->|"long polling — no inbound port"| TG
-    C -->|Instance Principal auth at startup| V
+    C -->|Instance Principal auth| V
     C -->|fetch articles| EXT
     C -->|inference| LLM
 ```
 
 **Note the direction of the Telegram arrow.** The bot polls outbound;
-there is no inbound port, no TLS termination, no public endpoint. That was
-deliberate — it eliminates an entire class of attack surface and
-operational burden at no cost. It's also why adding a second messaging
-channel turned out to be expensive (§11).
+there is no inbound port, no TLS termination, no public endpoint on the
+application server. That was deliberate — it removes an entire class of
+attack surface at no cost.
+
+**CI/CD.** Every change runs the full test suite before commit (§C2).
+Deployment builds the image locally and transfers it with
+`docker save | ssh … docker load`, never building on the VM itself — a
+build's resource spike doesn't fit comfortably in 1 GB. The automated
+path is designed but not yet built: a GitHub Actions **self-hosted
+runner** on a machine I already control, so no deployment credential ever
+needs to live in a third-party secret store — the same principle as the
+vault design in §A3.
+
+## A2. Main server and management server
+
+| | Main server | Management server |
+|---|---|---|
+| **Runs** | The bot container — both Telegram bots and the push scheduler | Phoenix, the LLM tracing backend |
+| **Exposure** | No inbound ports; outbound only | No public exposure; private network + SSH only |
+| **Why separate** | Application compute stays predictable under a 1 GB ceiling | A tracing backend retaining 30 days of spans has a very different memory and disk profile than the bot; co-locating them would put the observability tool in competition with the thing it observes — and take both down together |
+
+Separating them also means that if the management server is down, the
+service itself keeps running. Observability is not on the critical path.
+
+## A3. Identity and secrets
+
+**Zero stored credentials.** Every secret — LLM API key, both bot tokens,
+telemetry key — lives in **OCI Vault** and is fetched at container startup
+using **Instance Principal** authentication: the VM proves its own
+identity to the cloud provider, so there is no bootstrap credential to
+leak in the first place.
+
+Nothing is baked into the image, committed to source control, or passed as
+a plaintext environment variable. What *is* passed to the container are
+secret **OCIDs** — resource identifiers, useless to anyone without the
+VM's own identity.
+
+```mermaid
+flowchart LR
+    A["Container starts"] --> B["Entrypoint reads<br/>*_SECRET_OCID env vars<br/><i>identifiers, not secrets</i>"]
+    B --> C["Authenticate as the VM<br/><i>Instance Principal —<br/>no stored credential</i>"]
+    C --> D["Fetch secret values<br/>from Vault"]
+    D --> E["Export into process env<br/>and start the application"]
+```
+
+The same design principle recurs in the planned CD (§A1): **no standing
+credential should have to leave a machine that already holds a trusted
+identity.**
+
+## A4. Management access
+
+The Phoenix dashboard is bound to the private network and is **not exposed
+to the public internet**. Reaching it means opening an SSH tunnel to the
+management server and browsing to the forwarded local port — so access
+requires possession of the SSH key, and a hypothetical flaw in the
+dashboard's own auth still isn't reachable from outside.
+
+Two independent firewall layers apply throughout: cloud-level security
+groups *and* host-level firewall rules must both permit a flow. Either one
+misconfigured fails closed, not open.
 
 ---
 
-## 3. A three-stage pipeline that serves every request type
+# B. System Design
 
-Every message goes through the same pipeline, regardless of what the user
-is asking for.
+## B1. Component overview
+
+```mermaid
+flowchart TB
+    U["User message"] --> BOT["Bot layer<br/>channel handling, formatting,<br/>message chunking"]
+    BOT --> GUARD["Guardrails<br/>scope + safety checks"]
+    GUARD --> AGENT["Agent core<br/>tool-calling loop"]
+    AGENT --> SRC["Source registry<br/>10 news sources"]
+    AGENT --> DB[("User store<br/>interests, language,<br/>push settings, approvals")]
+    ADMIN["Admin bot<br/>approve / deny access"] --> DB
+    SCHED["Push scheduler<br/>15-min tick"] --> SRC
+    SCHED --> DB
+    AGENT -.->|traces| TEL["Telemetry"]
+    GUARD -.->|traces| TEL
+    SCHED -.->|traces| TEL
+```
+
+| Component | Responsibility |
+|---|---|
+| **Bot layer** | Telegram-specific concerns only: receiving messages, output formatting, splitting replies over the 4096-character limit, retrying malformed markup as plain text |
+| **Admin bot** | A *separate bot identity* carrying the approve/deny controls, so a stranger who finds the public bot has no path to them |
+| **Guardrails** | Scope and safety checks on both input and output (§B4) |
+| **Agent core** | The tool-calling loop; model is injected rather than constructed internally, which is what makes it testable (§C1) |
+| **Source registry** | 10 pluggable fetchers. A source that errors or lacks an API key is skipped and the request still succeeds on the rest — one broken upstream never fails a user request |
+| **User store** | Per-user interests, reply language, push interval, approval status |
+| **Push scheduler** | Ticks every 15 minutes, sends to whoever is due (§B2) |
+| **Telemetry** | Every LLM call and tool invocation captured as a structured span |
+
+## B2. Agent design
+
+### The request pipeline
+
+Every message goes through the same three stages, regardless of what the
+user is asking for.
 
 ```mermaid
 flowchart TB
     M["incoming message"] --> R{"regex pre-filter<br/>zero LLM cost"}
-    R -->|obvious injection attempt| REJ["reject"]
-    R -->|pass| S1["<b>Stage 1 — Classify</b><br/>structured-output LLM call<br/>on_topic? + category?"]
+    R -->|obvious injection attempt| REJ["reject with guidance"]
+    R -->|pass| S1["Stage 1 — Classify<br/>structured-output LLM call<br/>on_topic? + category?"]
     S1 -->|off-topic| REJ
-    S1 -->|on-topic + category| S2["<b>Stage 2 — Act</b><br/>tool-calling agent<br/>prompt composed per-call"]
-    S2 --> S3["<b>Stage 3 — Verify</b><br/>independent check of<br/>generated output"]
+    S1 -->|on-topic + category| S2["Stage 2 — Act<br/>tool-calling agent<br/>prompt composed per-call"]
+    S2 --> S3["Stage 3 — Verify<br/>independent check<br/>of generated output"]
     S3 -->|fail| REJ
     S3 -->|pass| OUT["send to user"]
 ```
 
-**Stage 1 does two jobs in one call.** It answers both "is this in scope?"
-(a safety gate) and "what kind of request is this?" (a router). The
-obvious implementation is two separate LLM calls — one guardrail, one
-intent classifier. Merging them halves the latency and cost of the gate on
-*every* message, and both questions need the same understanding of the
-input anyway.
+### Why multiple LLM calls
 
-**Stage 2's system prompt is composed fresh on every call**, from four
-layers:
+A single call would be cheaper per message. Three exist because they do
+genuinely different jobs, and collapsing them costs either safety or
+quality:
 
-```mermaid
-flowchart LR
-    L1["<b>Layer 1</b><br/>identity + scope<br/><i>always present</i>"] --> L2["<b>Layer 2</b><br/>per-category instructions<br/><i>selected by Stage 1</i>"]
-    L2 --> L3["<b>Layer 3</b><br/>this user's stored<br/>interests + language<br/><i>read live from DB</i>"]
-    L3 --> L4["<b>Layer 4</b><br/>the user's message"]
-```
+| Call | Job | Why it can't be merged into the agent call |
+|---|---|---|
+| **Stage 1 — Classify** | Is this in scope, and what kind of request is it? | Runs *before* the expensive agent call, so off-topic input is rejected without paying for tool use and a long generation. It also selects which instructions and tools the agent gets. |
+| **Stage 2 — Act** | Do the work: search, synthesize, or update settings | This is the agent proper — the only stage that calls tools. |
+| **Stage 3 — Verify** | Is what the model actually wrote acceptable to send? | Some failures are only visible in the output. A model asked to check its own output in the same breath as producing it is grading its own work. |
 
-This is the mechanism behind every personalization feature. There is no
-per-user branching in application code and no per-user agent instance —
-one code path serves everyone, and the difference is entirely what gets
-composed into the prompt. Layer 2 also scopes which *tools* are relevant
-for that turn, so a "change my language" request doesn't carry
-news-formatting instructions.
+Stage 1 is deliberately doing **two jobs in one call** — safety gate *and*
+intent router. The obvious implementation is two separate calls; both
+questions need the same understanding of the message, so merging them
+halves the cost and latency of the gate on every message.
 
-Layers don't accumulate — they're rebuilt per call, so system prompt size
-is constant regardless of conversation length. Only conversation history
-grows, and that's separately capped (§7).
+### The push workflow
 
-**Stage 3 inspects what the model actually wrote**, not what the user
-asked. Some failure modes are only visible in the output. The check is
-deliberately **narrower for constrained request types**: for "add an
-interest", Stages 1–2 already pin down what a valid reply looks like, so
-Stage 3 only checks for self-disclosure. Open-ended news queries, where
-the model has real latitude, get the full check.
+The scheduled digest deliberately **does not** use the tool-calling agent
+to decide what to fetch. This is the design decision I'd most want a
+reviewer to look at.
 
----
-
-## 4. Knowing when *not* to use the LLM
-
-This is the design decision I'd most want a reviewer to look at.
-
-The scheduled push feature sends a periodic digest of *new* articles. The
-obvious implementation reuses the agent that already works: put it on a
-timer and let it call the search tool.
-
-**That design cannot satisfy the requirement.** The requirement is "never
-send the same article twice." An agent choosing its own search calls will
-re-fetch the same top-N-by-recency results and re-report them. You would
-be *hoping* the model notices repetition — and per C2, hope is not a
-mechanism.
-
-So the push path inverts the usual agent structure:
+The requirement is "never send the same article twice." An agent choosing
+its own search calls will re-fetch the same top-N-by-recency results and
+re-report them — you'd be *hoping* the model notices repetition, and per
+C2, hope is not a mechanism.
 
 ```mermaid
 flowchart TB
-    T["scheduler tick — every 15 min"] --> D{"subscriber due?<br/><i>deterministic</i>"}
-    D -->|no| SKIP["skip + log"]
-    D -->|yes| F["<b>deterministic</b><br/>fetch across sources<br/>for user's interests"]
-    F --> FILT["<b>deterministic</b><br/>filter to genuinely new:<br/>1. published timestamp<br/>2. previously-sent link set"]
+    T["scheduler tick — every 15 min"] --> D{"subscriber due?<br/>deterministic"}
+    D -->|no| SKIP["skip, log outcome"]
+    D -->|yes| F["deterministic<br/>fetch across sources<br/>for that user's interests"]
+    F --> FILT["deterministic filter to genuinely new<br/>1. published timestamp<br/>2. previously-sent link set"]
     FILT -->|nothing new| ADV["advance clock, send nothing"]
-    FILT -->|new articles| W["<b>single LLM call</b><br/>write prose from<br/>this fixed article list"]
+    FILT -->|new articles| W["single LLM call<br/>write prose from<br/>this fixed article list"]
     W --> V["Stage 3 verify"]
-    V --> SEND["send"]
+    V --> SEND["send digest"]
 ```
 
 **The LLM is used only for what it's uniquely good at — writing readable
-prose.** Selection, deduplication, and scheduling are ordinary
-deterministic code. Repeats become impossible by construction rather than
-unlikely by persuasion.
+prose from a list it was handed.** Selection, deduplication, and
+scheduling are ordinary deterministic code. Repeats become impossible by
+construction rather than unlikely by persuasion.
 
 Deduplication is belt-and-braces: primarily by publication timestamp (skip
-anything published at or before that user's last push), with a remembered
-set of recently-sent URLs as fallback for sources whose date strings don't
-parse. Both are necessary — real-world feeds are inconsistent about dates.
+anything published at or before that subscriber's last push), with a
+remembered set of recently-sent URLs as a fallback for sources whose date
+strings don't parse. Both are needed — real feeds are inconsistent about
+dates.
 
-*A related find:* the on-demand path had a subtler version of the same
-problem. Every source fetcher parsed a publication date, but the tool that
-formatted results for the model **dropped it** before the model saw it.
-The model had no way to judge recency or notice it was repeating itself.
-Fixing the data plumbing mattered far more than any prompt tuning would
-have.
+## B3. The four-layer prompt
+
+The agent's system prompt is **composed fresh on every call** rather than
+being a fixed string:
+
+```mermaid
+flowchart LR
+    L1["Layer 1<br/>identity + scope<br/><i>always present</i>"] --> L2["Layer 2<br/>per-category instructions<br/><i>selected by Stage 1</i>"]
+    L2 --> L3["Layer 3<br/>this user's stored<br/>interests + language<br/><i>read live from DB</i>"]
+    L3 --> L4["Layer 4<br/>the user's message"]
+```
+
+| Layer | Purpose |
+|---|---|
+| **1 — Identity and scope** | Who the agent is and what it will not do. Constant across every request; the anchor the guardrails back up. |
+| **2 — Task instructions** | Selected by Stage 1's classification. A "change my language" turn gets different instructions *and different tools* than a news query — so the agent isn't carrying report-formatting rules while updating a setting. |
+| **3 — User memory** | This subscriber's interests and reply language, read live from the database. **This layer is the entire personalization mechanism.** |
+| **4 — The message** | The actual request. |
+
+Two properties worth noting. First, **there is no per-user code path** —
+one implementation serves everyone, and the difference between two users
+is entirely what Layer 3 composes in. Second, **the layers don't
+accumulate**: they're rebuilt per call, so the system prompt's size is
+constant no matter how long a conversation runs. Only conversation history
+grows, and that's capped separately at 1 hour / 20 messages.
+
+## B4. Preventing dangerous messages
+
+Four layers, deliberately ordered cheapest-first so obvious attacks are
+rejected before they cost anything:
+
+| Layer | Mechanism | Cost | Catches |
+|---|---|---|---|
+| **1. Pre-filter** | Regex patterns | Free | Known injection phrasings, attempts to elicit the system prompt |
+| **2. Scope gate** | Stage 1 classifier | One cheap call | Off-topic or manipulative requests that don't match a known pattern |
+| **3. Prompt hardening** | Layer 1 instructions | Free | Steers the model away from unsafe framings in the first place |
+| **4. Output check** | Stage 3 classifier | One cheap call | Self-disclosure or drift that's only visible in what was actually written |
+
+Layer 4 is deliberately **narrower for constrained request types**: for
+"add an interest," layers 1–3 already pin down what a valid reply looks
+like, so it only checks for self-disclosure. Open-ended news queries,
+where the model has real latitude, get the full check.
+
+Rejections aren't silent — the user gets an explanation of what the
+service does handle, so a false positive is recoverable rather than a dead
+end.
+
+**Access control** backs all of this: the bot is not open. Every new user
+lands in a pending state and an admin approves or denies from the separate
+admin bot, which bounds cost-abuse exposure to a known set of people.
 
 ---
 
-## 5. Prompt instructions are optimizations; invariants need code
+# C. Quality Assurance
 
-Constraint C2 in practice.
+## C1. Test cases
 
-**Telegram renders HTML, not Markdown.** The prompt says so explicitly.
-The model complies — most of the time. When it doesn't, users see literal
-`**asterisks**`. Prompt tuning improved this and did not eliminate it.
+**160 tests, ~2.5 seconds, $0 API cost per run.**
 
-**The fix is a regex, not a better prompt:**
+That's possible because the model is dependency-injected: production
+passes a real client, tests pass a scripted fake. No conditional
+test-mode logic, no network, no flakiness from a live model — cheap enough
+to run on every change rather than before a release.
+
+| Area | What's covered |
+|---|---|
+| Agent core | Tool dispatch, prompt composition per category, user-memory injection |
+| Guardrails | Each layer independently: pre-filter patterns, classification handling, output checks, fail-open behavior |
+| User store | Interests, language, push settings, approval state transitions, schema migration |
+| Push scheduler | Due-checking, both deduplication paths, per-subscriber failure isolation |
+| Bot layer | Message chunking against the 4096-char limit, formatting normalization, malformed-markup fallback |
+| Sources | Each fetcher against captured real-world payloads; graceful degradation when one fails |
+
+**Deliberate gaps, and how they're covered instead.** Unit tests against a
+fake model structurally cannot verify anything about *real* model
+behavior — whether a prompt actually elicits the right format, whether a
+classifier is accurate. That's not a gap to be closed with more unit
+tests; it needs a different instrument, which is what C3 and the
+measurement discipline in §D1 exist for.
+
+## C2. Test before commit — CI
+
+The full suite runs on every change. Because it's fast and free, there's
+no incentive to skip it, which is the main thing that keeps a test suite
+alive in a solo project.
+
+Beyond the suite, CI is the right place for structural checks that catch
+whole classes of mistake — for example, asserting the *exact* set of
+registered bot commands rather than merely that some handler exists. That
+specific check exists because of the incident in §D1, where a test that
+verified a category of thing passed happily while the specific thing was
+broken.
+
+## C3. Post-deployment testing
+
+Unit tests can't cover the real model, so a **13-case checklist runs
+against the live service after every deployment**, with defined inputs and
+expected outputs:
+
+| # | Covers |
+|---|---|
+| 1–3 | Core news query; formatting renders correctly; non-English input handled |
+| 4–6 | Interest add/remove; already-covered topic recognized; command form works |
+| 7–8 | Push enable/disable; interval change takes effect |
+| 9–11 | Language set including script variants; applies to subsequent replies |
+| 12–13 | Guardrail rejection is informative; new-user onboarding from a genuinely fresh account |
+
+Each case was derived from a real regression class, so the checklist grows
+as the system teaches me what breaks. A deploy isn't done until it passes.
+
+## C4. Monitoring
+
+**Tracing is the primary instrument, not logs.** Every LLM call and tool
+invocation is captured as a structured span with its exact prompt and
+response, queryable after the fact. For a non-deterministic system this
+matters more than log lines: when a user reports "it answered oddly," the
+useful question is *what exactly did the model see and produce* — which a
+log statement generally doesn't capture but a trace does.
+
+Logs remain the fast path for operational questions — did the scheduler
+tick, was this subscriber due, did the send succeed. Each push cycle
+records its outcome per subscriber (sent / nothing new / blocked /
+errored), so timing questions are answerable directly rather than by
+inference.
+
+Trace retention is explicitly bounded at 30 days. The default was
+unbounded growth, which on a small disk is a slow-motion outage.
+
+## C5. Incident reporting
+
+The loop is: **user-visible symptom → gather evidence before theorizing →
+root cause → fix → close the hole that let it through.**
+
+That last step is the one that compounds. Every incident resolves into
+either a new test case or a new post-deploy check, so the same class of
+failure can't recur silently. The checklist in C3 is entirely built from
+past incidents.
+
+Operational failures that aren't user-visible get their own alerting: if
+the telemetry pipeline itself becomes unreachable, the admin is notified
+on Telegram rather than discovering it later through missing data.
+
+A worked example follows in §D1.
+
+---
+
+# D. Difficulties and How They Were Solved
+
+## D1. Problems hit in development and production
+
+### Model instruction compliance is not a guarantee
+
+**Problem.** Telegram renders HTML, not Markdown. The prompt says so
+explicitly. The model complied — most of the time. When it didn't, users
+saw literal `**asterisks**`. Prompt tuning improved it and did not
+eliminate it. The same pattern appeared again with the model occasionally
+narrating its process ("Let me compile these into a report…") before the
+actual report.
+
+**Solution.** Enforce it in code, not just in the prompt:
 
 ```python
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -365,186 +474,95 @@ def _normalize_markdown_bold(text: str) -> str:
     return _MARKDOWN_BOLD_RE.sub(r"<b>\1</b>", text)
 ```
 
-Same pattern elsewhere: the model was told to start replies directly with
-the report, and mostly did — occasionally it narrated its process first
-("Let me compile these into a report..."). A deterministic strip of
-everything before the report's marker handles it.
+**The generalized principle**, which recurs throughout the system: a
+prompt instruction is an *optimization* — it makes the good outcome
+likely. For any invariant that must hold on user-visible output, there
+must also be code-level enforcement. Keep both: the prompt makes the
+backstop rarely fire; the backstop makes the guarantee real.
 
-**The generalized principle:**
+### A plausible fix that made things measurably worse
 
-> A prompt instruction is an *optimization* — it makes the good outcome
-> likely. For any invariant that must hold on user-visible output, there
-> must also be code-level enforcement. Keep both: the prompt makes the
-> backstop rarely fire; the backstop makes the guarantee real.
+**Problem.** The Stage 3 output check was doing two jobs — detecting
+self-disclosure and judging topical appropriateness — and had a
+false-positive problem, occasionally rejecting perfectly good replies.
 
-Defense-in-depth applied to a probabilistic component. It's the most
-transferable idea in this project.
+**The obvious fix** was to split the harder check into its own smaller,
+focused prompt. A narrower question should be more reliable.
 
----
-
-## 6. Measuring model reliability instead of reasoning about it
-
-Because C2 rules out unit-testing model behavior, the alternative is
-**N-trial measurement against the real model before shipping a prompt
-change.** That discipline caught something genuinely counterintuitive.
-
-The Stage 3 output check was doing two things: detecting self-disclosure
-(the bot revealing its own configuration) and judging topical
-appropriateness. It had a false-positive problem. The obvious fix was to
-split the harder check into its own smaller, focused prompt — a narrower
-question should be more reliable.
-
-**Measured, it was dramatically worse.** The isolated prompt caught real
-self-disclosure **1 time out of 15**. The surrounding structure of the
-original prompt had been doing load-bearing work that was invisible from
-reading it.
-
-What actually worked was changing the *output format*, not the wording:
-replacing a staged yes/no text answer with **structured output containing
-two independent boolean fields**. Measured across the same cases plus
-regressions: **60/60**.
+**Measured, it was dramatically worse.** Because C2 rules out unit-testing
+model behavior, the substitute is N-trial measurement against the real
+model before shipping. That caught it:
 
 | Approach | Self-disclosure detection | False-positive case |
 |---|---|---|
 | Original combined text prompt | unreliable | 1/3 |
 | Reworded text prompt | — | 13/15 |
-| Isolated narrow text prompt | **1/15** ❌ | — |
-| **Structured output, two booleans** | **✅** | **15/15** |
+| Isolated narrow text prompt | **1/15** | — |
+| **Structured output, two booleans** | **15/15** | **15/15** |
 
-Two takeaways: structured output is meaningfully more reliable than asking
-a model for a parseable text answer — and **the "obvious" prompt
-improvement must be measured, because intuition about prompt behavior is
-unreliable.** Shipping that plausible-sounding simplification unmeasured
-would have quietly broken a safety control.
+The isolated prompt caught real self-disclosure **1 time in 15**. The
+surrounding structure of the original had been doing load-bearing work
+that was invisible from reading it.
 
----
+**Solution.** Change the output *format*, not the wording — replace a
+staged yes/no text answer with structured output containing two
+independent boolean fields. Two takeaways: structured output is markedly
+more reliable than asking a model for a parseable text answer, and **the
+"obvious" prompt improvement has to be measured**, because intuition about
+prompt behavior is unreliable. Shipping that plausible-sounding
+simplification unmeasured would have quietly broken a safety control.
 
-## 7. <!-- mdr-start id="c-2qnaz3di" kind="text": Diffuclity we hit (not specific 1 GB, and put all the issue, and how we solve it iin this chapter) -->Working within 1 GB<!-- mdr-end id="c-2qnaz3di" -->
+### Fitting the service into 1 GB
 
-C1, concretely.
+**Problem.** The design calls for two separate Telegram bot identities —
+a public one and an admin one — which is a security property worth
+keeping (§B1). But running them as two OS processes means loading
+LangChain and the Telegram library into memory **twice**, and the VM has
+1 GB total.
 
-**Two bots, one process.** The system runs two distinct Telegram bot
-identities — a public one anyone can message, and an admin one that
-receives approval requests with inline Approve/Deny buttons. Keeping them
-as separate identities is a security property: a stranger who finds the
-public bot has no path to the approval controls.
-
-But running them as two OS processes means loading LangChain and
-`python-telegram-bot` into memory **twice**. Measured: **~135 MB as a
-single combined process, versus close to double that split.** On a 1 GB
-box, that's the difference between comfortable and fragile.
-
-So they share one process and one asyncio event loop while remaining two
-separate bot identities. **The security boundary is preserved; the memory
-cost isn't paid twice.** Steady-state usage runs 137–172 MB.
+**Solution.** Run both bots and the scheduler in **one process and one
+asyncio event loop**, while keeping them as two distinct bot identities.
+Measured: **~135 MB combined, versus close to double that split.** The
+security boundary is preserved; the memory cost isn't paid twice.
+Steady-state usage runs 137–172 MB.
 
 The tradeoff is honest: separate processes would give better fault
-isolation. On a larger instance that would be the better call, and the
+isolation, and on a larger instance that would be the better call. The
 code is structured so either topology works — each bot retains a
 standalone entry point.
 
-**Context-window management.** Conversation history is capped at **1 hour
-and 20 messages**, whichever binds first — aggressive on purpose. This
-bot's answers are essentially stateless per topic (a news summary from an
-hour ago has little bearing on a new question), so carrying context has
-little value, while unbounded history means unbounded cost and eventual
-context-window failure on a long-running process.
+### A silent failure that broke onboarding for everyone
 
----
-
-## 8. Security
-
-**Zero stored credentials.** Every secret — LLM API key, both bot tokens,
-telemetry key — lives in OCI Vault and is fetched at container startup via
-**Instance Principal authentication**. The VM proves its own identity to
-OCI; there is no bootstrap credential to leak. Nothing is baked into the
-image, committed to source control, or passed as a plaintext environment
-variable. What *is* passed to the container are secret **OCIDs** —
-resource identifiers, useless without the VM's own identity.
-
-**Approval-gated access (C3).** Every new user lands in a pending state;
-the admin approves or denies from the second bot. This bounds cost-abuse
-exposure to a known set of users.
-
-**Layered prompt-injection defense.** Four layers, cheapest first: a regex
-pre-filter that costs nothing, the Stage 1 scope gate, hardened system
-prompt instructions, and the Stage 3 output check. The ordering is
-deliberate — obvious attacks are rejected before they cost an LLM call.
-
-**Two independent network layers.** Cloud security groups *and* host-level
-firewall rules must both permit traffic. Either one misconfigured fails
-closed, not open.
-
----
-
-## 9. Production ownership
-
-**Testing.** 160 tests, **~2.5 seconds, $0 in API cost.** That's possible
-because the model is dependency-injected: production passes a real
-`ChatDeepSeek`, tests pass a scripted fake. No conditional logic, no
-network, no flakiness from a live model — cheap enough to run on every
-change rather than before a release.
-
-What unit tests structurally *cannot* cover is anything requiring a real
-model. That's covered separately:
-
-**Post-deploy verification.** A checklist of **13 real input/expected-output
-cases**, run against the live system after every deployment — HTML
-rendering, non-English input, script-variant handling, guardrail behavior,
-new-user onboarding. Each case was derived from a real regression class,
-so the checklist grows as the system teaches me what breaks.
-
-**Deployment.** Images are always built locally and transferred to the VM,
-never built on it — C1 again; a build's resource spike doesn't fit
-comfortably on the instance. Automated CD is designed but not yet built: a
-GitHub Actions **self-hosted runner** on a machine I already control, so
-no deployment credential ever needs to live in GitHub's secret store —
-the same principle as the Vault design.
-
-**Observability as a debugging instrument (C4).** Every LLM call and tool
-invocation is captured as a structured trace with its exact prompt and
-response, queryable after the fact via GraphQL. This isn't a dashboard
-that gets glanced at — it's the primary tool for root-causing production
-behavior that can't be reproduced locally, precisely *because* the model
-is non-deterministic. Retention is explicitly bounded at 30 days; the
-default was unbounded growth.
-
-Incidents are root-caused from recorded evidence rather than speculation,
-and each one feeds back into either the test suite or the post-deploy
-checklist so the same class of failure is caught automatically next time.
-
-### A worked example: silent onboarding failure
-
-Worth showing rather than claiming, because the failure was completely
-silent — no error, no exception, nothing in any log.
+Worth walking through in full, because the failure produced **no error
+signal anywhere** — the hardest kind to find.
 
 **Symptom.** I invited someone to the bot. They messaged it. They never
-appeared in the approval queue, and never got a reply.
+appeared in the approval queue and never got a reply.
 
 **Evidence gathered, before forming a theory:**
 
 | Check | Result | What it ruled out |
 |---|---|---|
-| Query the live subscribers table | No pending row for them at all | The approval flow didn't partially run — `request_access()` was never called |
-| Full container logs | Completely clean; zero errors | Not a crash, not an exception being swallowed |
-| Both bot identities via Telegram's API | Both alive, correct usernames | Not a token/config problem, not a wrong-bot mixup |
+| Query the live user store | No pending row at all | The approval flow never started — registration was never called |
+| Full container logs | Completely clean, zero errors | Not a crash, not a swallowed exception |
+| Both bot identities via the platform API | Both alive, correct | Not a token or configuration problem |
 
 Three checks eliminated the likely causes and left something
 uncomfortable: the message appeared not to have been *processed at all*.
 
-**The clue** came from asking them for a screenshot: their first message
-was `/start` — which is what Telegram's own client sends when a user taps
-the START button on a bot they've never used.
+**The clue** came from asking them for a screenshot. Their first message
+was `/start` — which is what the Telegram client sends automatically when
+someone taps START on a bot they've never used.
 
 **Root cause.** The bot registered command handlers for `/interests` and
-`/language`, and a plain-text handler filtered with `~filters.COMMAND` —
-which excludes *every* command. There was no `/start` handler. So `/start`
-matched no handler at all: no reply, no database write, no exception. It
-failed into a gap in the routing table.
+`/language`, and a plain-text handler that explicitly excluded *all*
+commands. There was no `/start` handler. So `/start` matched nothing at
+all: no reply, no database write, no exception. It fell into a gap in the
+routing table.
 
-**Impact was worse than one user.** `/start` is the literal first thing
-Telegram prompts a new user to send. Onboarding was broken for *every*
-new user — invisibly, because a message matching nothing produces no error.
+**Impact was wider than one user.** `/start` is the literal first thing
+Telegram prompts a new user to send — onboarding was broken for *every*
+new user, invisibly, because a message matching nothing produces no error.
 
 **Fix, and the part that matters.** Adding the handler was trivial. The
 useful question was why nothing caught it. The existing test asserted:
@@ -553,92 +571,101 @@ useful question was why nothing caught it. The existing test asserted:
 assert any(isinstance(h, MessageHandler) for h in handlers)
 ```
 
-That passed the entire time the bug existed — a `MessageHandler` *was*
-registered, just not one that could ever match `/start`. The test was
-checking that routing existed, not that it was *correct*. So the fix
-included tightening it to assert the exact command set:
+That passed the entire time the bug existed — a handler *was* registered,
+just not one that could ever match `/start`. The test verified that
+routing existed, not that it was *correct*. So the fix included tightening
+it to assert the exact command set, plus a new post-deploy case exercising
+a genuinely new account.
 
-```python
-commands = {next(iter(h.commands)) for h in handlers
-            if isinstance(h, CommandHandler)}
-assert commands == {"start", "interests", "language"}
-```
+**Transferable lesson:** a test that asserts a *category* of thing exists
+will pass happily while the specific thing is broken. And silent failures
+deserve over-investigation — a bug that produces no error signal will not
+surface on its own, however long it runs.
 
-Now a missing command fails loudly in CI. A new post-deploy case — "send
-`/start` from an account with no history" — was added too, since this
-class of bug only manifests against a genuinely new user.
+### The observability tool was itself broken
 
-**The transferable lesson:** a test that asserts a *category* of thing
-exists will happily pass while the specific thing is broken. And silent
-failures are worth over-investigating — a bug that produces no error
-signal will not surface on its own, no matter how long it runs.
+**Problem.** Investigating a question about push timing, I checked the
+container logs and found them **completely empty** — not just missing the
+scheduler lines, but missing the startup banner too, for the container's
+entire uptime. Logging that had been added specifically for diagnosis had
+never actually worked.
 
----
+**Root cause.** Python block-buffers stdout when it isn't attached to a
+terminal, which is the normal case for a detached container. Log lines
+accumulated in a buffer that never filled and so never flushed.
 
-## 10.<!-- mdr-start id="c-rj6tjnfg" kind="text": Can merge with above about the diffuclty and issue and how we solve it --> Known limitations and failure modes<!-- mdr-end id="c-rj6tjnfg" -->
+**Solution.** Force unbuffered output at the image level, and add
+"confirm logs are actually producing output" as an explicit post-deploy
+step. **A logging fix isn't verified until you've confirmed the log lines
+arrive** — a lesson that generalizes to any instrument you rely on but
+haven't checked recently.
 
-What this system *cannot* currently do, stated plainly. Most of these are
-accepted tradeoffs rather than oversights, but they are real.
+## D2. Known limitations
+
+What the system *cannot* currently do. Most are accepted tradeoffs rather
+than oversights, and each has an explicit trigger for when it stops being
+acceptable.
 
 | Limitation | Impact | Current mitigation | Fix when |
 |---|---|---|---|
-| **Single point of failure** — one VM, one SQLite file, no replication or backup | VM loss = service down *and* all subscriber data lost | Container auto-restarts on crash; data is reconstructible (users can re-subscribe) | Before real users. Backup is cheap; it's scheduled, not done |
-| **Guardrail classifiers are probabilistic** | A legitimate message can occasionally be rejected; a bad one can occasionally pass | Four independent layers, so a single-layer miss isn't a full bypass; classifiers fail *open* on error so an outage never blocks legitimate use | Inherent to the approach. Reduced by measurement (§6), not eliminated |
-| **Conversation history is in-memory** | Restart loses in-flight context | Deliberate — context is capped at 1 h / 20 messages anyway, so the loss is small by construction | Only if conversations become genuinely multi-turn |
-| **No rate limiting** | An approved user could burn API quota, accidentally or deliberately | Access is approval-gated, bounding exposure to known users | Before opening access more widely |
-| **SQLite can't be shared or scaled** | Hard ceiling on horizontal scaling; both bots must run on one host | Fine at current scale; the single-process topology (§7) means there's no second host needing access today | When a second host or real concurrency is needed |
-| **Cost scales linearly with users** | Each push subscriber costs LLM calls on every interval; no budget cap enforced | Cheap model choice; conservative interval floor (1 h minimum) | Before any open signup |
-| **Deployment has a manual step** | Human error surface on every release | Documented deploy workflow + a 13-case post-deploy checklist that catches a bad deploy quickly | CD is designed (§9), not yet built |
-| **Silent degradation of news sources** | If an upstream changes format, that source quietly returns nothing | Per-source error isolation means the request still succeeds on remaining sources — but nothing currently *alerts* on a source going quiet | Needs a source-health check; not built |
+| **Single point of failure** | VM loss = service down and subscriber data lost | Container auto-restarts; data is reconstructible | Before real users — backup is cheap, scheduled not done |
+| **Probabilistic guardrails** | A legitimate message can occasionally be rejected; a bad one can occasionally pass | Four independent layers; classifiers fail *open*, so an outage never blocks legitimate use | Inherent — reduced by measurement (§D1), not eliminated |
+| **In-memory conversation history** | Restart loses in-flight context | Deliberate — history is capped at 1 h / 20 messages anyway | Only if conversations become genuinely multi-turn |
+| **No rate limiting** | An approved user could burn API quota | Access is approval-gated, bounding exposure | Before opening access more widely |
+| **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access | When a second host or real concurrency is needed |
+| **Linear cost scaling** | Each push subscriber costs LLM calls per interval | Cheap model; conservative 1-hour interval floor | Before any open signup |
+| **Manual deploy step** | Human error surface each release | Documented workflow plus the 13-case checklist | CD is designed (§A1), not built |
+| **Silent source degradation** | An upstream format change makes that source quietly return nothing | Per-source isolation keeps the request succeeding on the rest | Needs a source-health check; not built |
 
-The pattern worth noting: most of these are consequences of C1 (zero
-budget) and the pilot stage, and each has an explicit trigger condition
-for when it stops being acceptable. None of them are unknown.
-
----
-
-## 11. <!-- mdr-start id="c-hnb34gxx" kind="text": Same as above -->Deliberately not built<!-- mdr-end id="c-hnb34gxx" -->
+## D3. Work deliberately declined
 
 Judgment shows as much in what's declined as in what ships.
 
 **A second messaging channel (LINE).** Fully designed, then shelved after
-research. LINE's Messaging API is webhook-only, which would have forced a
-public HTTPS endpoint, TLS certificate management, a domain, and webhook
-signature verification — dismantling the "no inbound port" property in §2.
-That cost might have been justified, except the free tier caps **push
-messages at 200/month account-wide** (replies are unlimited). The push
-digest is the feature that makes the product worth having, and 200/month
-across all users doesn't support it. Decision: hold until there's a
-business model that justifies the paid tier. The research is written up
-rather than discarded.
+research. LINE's API is webhook-only, which would have forced a public
+HTTPS endpoint, TLS certificate management, a domain, and signature
+verification — dismantling the "no inbound port" property in §A1. That
+cost might have been justified, except the free tier caps **push messages
+at 200/month account-wide** (replies are unlimited). The push digest is
+the feature that makes the product worth having, and 200/month across all
+users doesn't support it. Decision: hold until there's a business model
+that justifies the paid tier. The research is written up rather than
+discarded.
 
 **A managed database.** SQLite on one VM doesn't scale and can't be
-shared — a real limitation, and an understood one. But this is a pilot
-with no paying users, and migrating now would mean paying migration cost
-twice: once today, once again when the actual requirements are known.
-Deliberately accepting a bounded risk instead of prematurely committing.
+shared — a real limitation, and an understood one. But migrating now,
+with no paying users, means paying migration cost twice: once today, once
+again when the actual requirements are known.
 
 **Rate limiting, database backups, dependency scanning.** All identified
 in a written security review, all documented, none built. They're scoped
-as "before real users", not "before a pilot works."
+as "before real users," not "before a pilot works."
 
 ---
 
-## Summary
+# Appendix: How AI Was Used to Build This
 
-The system is a personalized news agent. The engineering content is mostly
-about **working with a probabilistic component under hard resource
-limits**:
+I built this working with an AI coding assistant throughout. That was a
+deliberate choice, and I'd argue it's one of the things the project
+demonstrates rather than a caveat on it.
 
-- Use the LLM where it's uniquely strong (synthesis, prose) and ordinary
-  deterministic code everywhere correctness matters — §4
-- Treat prompt instructions as optimizations; enforce invariants in
-  code — §5
-- Measure model reliability empirically, because intuition about prompts
-  is unreliable — §6
-- Let constraints drive architecture, and state the tradeoffs honestly
-  rather than pretending they don't exist — §7
+| I owned | The AI assistant owned |
+|---|---|
+| **Problem definition** — the scope, the feature set, and what the output should look like | — |
+| **Architecture decisions** — the cloud topology, the service infrastructure (Docker, tracing backend), the CI/CD workflow, and how incidents get detected and reach me | Turning those designs into working code |
+| **System design** — the layered-prompt structure (§B3) and merging the safety gate with the intent router into one call (§B2), both specified before implementation | Implementation of the specified designs |
+| **Scope and priorities** — security before deployment; decline the second channel (§D3); accept SQLite's limits rather than migrate prematurely | Research passes I directed — pricing tiers, registrar comparison, library capabilities — which I then decided on |
+| **Test strategy** — directing what needed coverage, reviewing the test plan for gaps, and settling when each kind of test runs (CI vs. post-deployment). Manual verification was the smaller part; steering the plan was the larger one | Writing the test cases to that plan; diagnostic execution — querying traces, running the N-trial measurements in §D1 |
+| **Verification standards** — insisting a fix be measured before shipping (§D1) and that invariants be enforced in code rather than by prompt | Implementation, documentation drafting |
+| **Final judgment** — every decision recorded here is one I made and can defend | — |
 
-Scope is small on purpose. Completeness is not: design, security,
-deployment, observability, testing, and incident response are all real and
-all in use.
+**The short version: I was the engineer and the operator; the assistant
+was leverage.** It wrote most of the lines. It did not decide what the
+system should be, what was acceptable to ship, or when something was
+actually fixed.
+
+Working this way well means *not* trusting generated output by default —
+which is exactly where the two hardest-won lessons in §D1 come from:
+enforce invariants in code rather than asking nicely, and measure whether
+a fix actually worked instead of assuming the plausible one did. Both are
+the direct product of verifying rather than accepting.
