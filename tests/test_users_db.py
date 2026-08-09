@@ -103,6 +103,23 @@ def test_add_interest_is_idempotent_case_insensitive(isolated_subscribers_db):
     assert result == ["AI"]  # not duplicated
 
 
+def test_add_interest_catches_near_duplicate_llm_phrasing(isolated_subscribers_db):
+    # Real incident, 2026-08-08: the agent phrased the same conceptual
+    # interest two different ways on two calls; exact-match dedup missed
+    # it, leaving both in the list.
+    users_db.request_access(23, "ruth", "Ruth")
+    users_db.set_interests(23, ["Edge AI development boards (Raspberry Pi, NVIDIA Jetson, etc.)"])
+    result = users_db.add_interest(23, "Edge AI development boards (Raspberry Pi, NVIDIA Jetson)")
+    assert result == ["Edge AI development boards (Raspberry Pi, NVIDIA Jetson, etc.)"]
+
+
+def test_add_interest_does_not_dedupe_unrelated_topics_sharing_one_word(isolated_subscribers_db):
+    users_db.request_access(24, "sam", "Sam")
+    users_db.set_interests(24, ["AI"])
+    result = users_db.add_interest(24, "AI regulation")
+    assert result == ["AI", "AI regulation"]
+
+
 def test_add_interest_creates_row_when_none_exists(isolated_subscribers_db):
     result = users_db.add_interest(999, "semiconductors")
     assert result == ["semiconductors"]

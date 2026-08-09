@@ -11,6 +11,7 @@ docs/deployment-plan.md) — same reasoning as agent.py's PHOENIX_ENDPOINT.
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -139,11 +140,39 @@ def set_interests(chat_id: int, interests: list[str]) -> None:
         )
 
 
+# Real incident, 2026-08-08: a user asked to add the same conceptual
+# interest twice (once blocked by an unrelated guardrail flake, then
+# resent), and the agent -- which composes free-text topic labels rather
+# than picking from a fixed enum -- generated two near-identical but not
+# byte-identical strings ("...NVIDIA Jetson, etc.)" vs "...NVIDIA
+# Jetson)"). An exact case-insensitive match missed it. Word-set Jaccard
+# similarity catches near-duplicate phrasing like that while still
+# treating genuinely different topics that happen to share one common
+# word (e.g. "AI" and "AI regulation") as distinct -- a naive substring
+# check would have false-positived on that case.
+_DUPLICATE_TOPIC_SIMILARITY_THRESHOLD = 0.7
+
+
+def _topic_words(topic: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", topic.lower()))
+
+
+def _is_duplicate_topic(a: str, b: str) -> bool:
+    words_a, words_b = _topic_words(a), _topic_words(b)
+    if not words_a or not words_b:
+        return False
+    union = words_a | words_b
+    return len(words_a & words_b) / len(union) >= _DUPLICATE_TOPIC_SIMILARITY_THRESHOLD
+
+
 def add_interest(chat_id: int, topic: str) -> list[str]:
-    """Adds `topic` if not already present (case-insensitive check, stores
-    the topic as given). Returns the resulting full list."""
+    """Adds `topic` if not already present -- a fuzzy (word-overlap) check,
+    not just exact/case-insensitive, since the topic string is LLM-
+    generated free text that varies phrasing between calls even for the
+    same underlying interest. Stores the topic as given. Returns the
+    resulting full list."""
     interests = get_interests(chat_id)
-    if not any(t.lower() == topic.lower() for t in interests):
+    if not any(_is_duplicate_topic(t, topic) for t in interests):
         interests.append(topic)
         set_interests(chat_id, interests)
     return interests

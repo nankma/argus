@@ -116,7 +116,14 @@ _PLAIN_REPLY_FORMATTING_NOTE = (
 
 _SET_INTEREST_INSTRUCTIONS = (
     "This turn: the user wants to add a topic to their stated interests. "
-    "Use the update_interests tool with action=\"add\", then confirm "
+    "Keep the topic label short (2-4 words) rather than a full descriptive "
+    "phrase -- this user's current interests are listed below in this "
+    "prompt; if one of them already covers what they're asking for, don't "
+    "call update_interests again, just tell them it's already covered. "
+    "(There's also a code-level fuzzy-duplicate check as a backstop, but "
+    "a short, consistent label makes future matches -- and removal -- "
+    "more reliable than relying on that alone.) Otherwise use the "
+    "update_interests tool with action=\"add\", then confirm "
     "conversationally what was added in one or two sentences — no need for "
     "the full Telegram report structure.\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
 )
