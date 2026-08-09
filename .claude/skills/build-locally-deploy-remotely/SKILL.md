@@ -69,6 +69,7 @@ instead of immediately after deploy.
 | 9 | `Always reply to me in Spanish from now on`, then a follow-up `What's new with OpenAI?` | A confirmation in Spanish, then the trend report also in Spanish | `set_language` tool/router category not wired, or `_compose_prompt` not injecting the stored language preference for every category |
 | 10 | `/language`, then `/language clear` | Current language (or "no reply language set"), then a "cleared" confirmation, and subsequent replies go back to matching your message's language | `/language` command handler broken independent of the natural-language path |
 | 11 | `/language <specific script/variant>` (e.g. `/language Traditional Chinese`), then a news query | Reply uses exactly that script/variant (e.g. 繁體 not 簡體 characters), not a more common default variant | The 2026-08-09 incident below — a variant preference silently downgrading to the language's more common default |
+| 12 | Any off-topic/blocked message (e.g. #5) | Redirect message now also mentions the ~1h/20-message memory limit | `guardrails.REDIRECT_MESSAGE` reverted to an older version, or the memory-limit line got dropped |
 
 Case 7 only proves the *setting* is recognized and saved — it doesn't
 prove a push actually arrives, since the shortest real interval
