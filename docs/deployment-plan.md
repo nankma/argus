@@ -66,24 +66,38 @@ split back into two containers at that point if isolation becomes more
 valuable than the memory savings `combined_bot.py` was built for. Not
 urgent — the current setup is stable and verified working.
 
-### Connection details (safe to document — no secrets)
+### Connection details (redacted — this repo is public)
 
-An IP address is a routing detail, not a credential, and the private key
-itself never leaves the local machine or gets committed — so this is safe
-to keep here for whoever next needs to deploy or debug, instead of
-re-discovering it from the OCI console each time.
+These were previously recorded here in full, on the reasoning that an IP
+is a routing detail rather than a credential. **That reasoning only held
+while the repository was private.** Once it went public the calculus
+changed: publishing the exact public IPs of two live VMs hands an
+attacker the targets for free, and — more importantly — anything
+committed to a public repo stays in its git history permanently, so it
+cannot be quietly removed later.
+
+Redacted to placeholders. The real values live in the OCI console and in
+the operator's own SSH config; look them up there rather than
+reintroducing them here.
 
 - **Bot VM** (`instance-mnk-20260807-2035`, runs `myfirstagent-bot` via
   `combined_bot.py`): public IP `<bot-vm-ip>`, private IP `10.0.0.7`.
 - **Phoenix VM** (`instance-mnk-phoenix-20260808-1012`, runs the Phoenix
   telemetry collector/UI): public IP `<phoenix-vm-ip>`, private IP
   `10.0.0.234`.
-- **SSH private key**: `<ssh-key-file>`, kept locally under
-  `<local-key-directory>` — not in this repo, not committed, referenced
-  by path only. `ssh -i "<path-to-ssh-key>" ubuntu@<bot-vm-ip>`.
-- Both VMs are `us-sanjose-1`/Phoenix-region Always Free shapes under the
-  same tenancy; user is `ubuntu` on both (default for the Ubuntu 24.04
-  Minimal image).
+- **SSH private key**: kept locally only — never in this repo, never
+  committed. `ssh -i "<path-to-ssh-key>" ubuntu@<bot-vm-ip>`.
+- Both VMs are `us-sanjose-1` Always Free shapes under the same tenancy;
+  user is `ubuntu` on both (default for the Ubuntu 24.04 Minimal image).
+
+Private `10.0.0.x` addresses are kept: they're RFC 1918, meaningless
+outside the VCN, and needed to make the topology comprehensible.
+
+> **Lesson worth keeping:** "safe to document" is a judgement that depends
+> on who can read the document. Re-check anything written under a
+> private-repo assumption before making a repository public — and check it
+> *before* the push, since git history is not editable after the fact
+> without a rewrite.
 
 ## The blocking architectural gap
 
