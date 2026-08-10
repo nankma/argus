@@ -30,7 +30,7 @@ limiting** (finding 3) — worth fixing, not an active exploit today.
 | 11 | No inbound ports (polling-only architecture) | Good — already correct | No action needed |
 | 12 | Admin identity check relies on Telegram-verified `chat_id`/`from_user.id` | Good — already correct | No action needed |
 | 13 | `subscribers.db` has no backup — single Docker volume, no copy anywhere | Medium | Not started — availability risk, now live on the real VM, not just local |
-| 14 | Cloud VM OS-level hardening (SSH, patching) | Medium | Partially done — see below. Now live: Oracle `us-sanjose-1`, `VM.Standard.E2.1.Micro` |
+| 14 | Cloud VM OS-level hardening | Medium | **Partly done** — root login disabled, `MaxAuthTries` lowered, unattended-upgrades confirmed enabled on both VMs. SSH source-IP restriction still outstanding |
 | 15 | IAM policy scoping for whichever secret manager is used | Low | Design-time reminder, not a current gap (nothing built yet) |
 | 16 | No audit logging on secret access | Low | Comes largely free once a real vault is adopted (finding 2) |
 | 17 | Phoenix telemetry access control | Resolved | **Done and verified live** — native auth, network isolation, Vault-stored API key, see below |
@@ -385,6 +385,40 @@ native auth with the default `admin`/`admin` password overridden).
   None are urgent for a single-user personal VM, but worth doing before
   approving more subscribers or if this box starts holding anything more
   sensitive than it does today.
+
+
+**Update 2026-08-09 — partly resolved.** Applied to both VMs via a
+dedicated `/etc/ssh/sshd_config.d/99-hardening.conf` drop-in (rather than
+editing the cloud image's own config, so the change is visible and
+revertible):
+
+- `PermitRootLogin no` — was `prohibit-password`, i.e. root could log in
+  by key. Administration is done as `ubuntu` with sudo, so root login has
+  no operational purpose; disabling it removes the most-targeted username
+  on the internet as an option.
+- `MaxAuthTries 3` — down from the default 6. Key auth succeeds on the
+  first attempt, so this costs legitimate access nothing.
+- `unattended-upgrades` confirmed **already enabled** on both hosts, which
+  covers the patch-cadence item.
+
+Config was validated with `sshd -t` before reloading, and a fresh
+connection verified afterwards on each host.
+
+**Still outstanding: SSH source-IP restriction.** Deliberately not applied
+automatically. The operator's address is residential and therefore
+dynamic; pinning host-level `iptables` to it risks a lockout requiring
+serial-console recovery when the ISP rotates it. The correct place for
+this control is the **OCI Security List**, which is cloud-level and can be
+changed or reverted from the console without SSH access — making a
+mistake recoverable rather than fatal. Left for the operator to apply
+there.
+
+**Deliberately not installed: fail2ban.** With password authentication
+disabled, brute force cannot succeed, so fail2ban would defend against an
+attack that already fails. It costs roughly 40 MB resident on a 1 GB host
+that already runs the service at ~160 MB. Rejected as cargo-cult
+hardening at this scale; revisit if password auth is ever enabled or the
+host grows.
 
 ### 15. IAM policy scoping (design-time reminder)
 
