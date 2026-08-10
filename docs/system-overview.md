@@ -277,23 +277,15 @@ flowchart TB
     V -->|pass| OUT["send to user"]
 ```
 
-| Route | Work | Why it's separate |
+| Route | Tools it uses | Why it's a separate route |
 |---|---|---|
-| **A — Research** | Search across sources, synthesize themes, cite links | Open-ended. Needs tool use, multiple steps, and real generation — the only route that genuinely requires an agent loop |
-| **B — Settings** | Change interests, reply language, or push schedule | A bounded state change. There is nothing to research and nothing to reason about multi-step; the router has already determined the intent |
+| **A — Research** | News search across the source registry | Its tools return **content** — articles the model has to read, filter, and merge into a trend report. That interpretation step is what requires several model turns |
+| **B — Settings** | Update interests, reply language, push schedule | Its tools perform a **bounded state change**. The router has already established the intent, and the tool's result needs no interpretation — it either succeeded or it didn't |
 
-**Current implementation vs. intended design.** Today both routes are
-served by the same agent object, differentiated by the instructions and
-tool set the router selects for that turn (§B3). It works, but Route B is
-paying for an agent loop it doesn't need — a settings change is one
-deterministic write, not a reasoning problem.
-
-**Planned refactor:** dispatch Route B out of the agent entirely, so
-settings changes execute as a direct call and only Route A enters the
-tool-calling loop. That would cut latency and cost on the highest-volume
-non-news operations and make the routing boundary explicit in the code
-rather than implicit in prompt selection. Not yet implemented — tracked in
-`docs/context-management-plan.md`.
+Both routes call tools; the difference is what comes back. Route A's
+tools hand the model raw material it must reason over. Route B's tools
+simply commit a change, so there is nothing left to reason about once the
+router has decided what the user wanted.
 
 ### Why multiple LLM calls
 
@@ -304,7 +296,7 @@ quality:
 | Call | Job | Why it can't be folded into the agent |
 |---|---|---|
 | **Router** | Is this in scope, and which route does it take? | Runs *before* any expensive work, so off-topic input is rejected without paying for tool use and a long generation. Its decision also determines what the chosen route is allowed to do. |
-| **Route A agent** | Search, synthesize, cite | The only call that needs tools and multiple steps. Route B doesn't invoke this at all. |
+| **Route A agent** | Search, synthesize, cite | The only route whose tools return content needing interpretation, so it's the only one that needs multiple model turns. Route B's single state-changing call doesn't. |
 | **Verify** | Is what was actually written acceptable to send? | Some failures are only visible in the output. A model asked to check its own output in the same breath as producing it is grading its own work. |
 
 The router deliberately does **two jobs in one call** — safety gate *and*
@@ -546,27 +538,50 @@ false-positive problem, occasionally rejecting perfectly good replies.
 focused prompt. A narrower question should be more reliable.
 
 **Measured, it was dramatically worse.** Because P2 rules out unit-testing
-model behavior, the substitute is N-trial measurement against the real
-model before shipping. That caught it:
+model behavior, the substitute is N-trial measurement: send the *same*
+input to the real model 15 times and count how often the answer is
+correct.
 
-| Approach | Self-disclosure detection | False-positive case |
+The check is measured on two **opposite** tests, and both have to pass:
+
+| Test | Input | Correct behavior |
 |---|---|---|
-| Original combined text prompt | unreliable | 1/3 |
-| Reworded text prompt | — | 13/15 |
-| Isolated narrow text prompt | **1/15** | — |
-| **Structured output, two booleans** | **15/15** | **15/15** |
+| **A — False positive** | A *valid* reply, e.g. "that topic is already covered" | **Let it through** |
+| **B — Self-disclosure** | A reply that leaks the bot's own configuration | **Block it** |
 
-The isolated prompt caught real self-disclosure **1 time in 15**. The
-surrounding structure of the original had been doing load-bearing work
-that was invisible from reading it.
+| Version | Test A — lets valid replies through | Test B — catches leaks | Outcome |
+|---|---|---|---|
+| Original combined prompt | 1/3 | unreliable | Broke in production |
+| Reworded prompt | 13/15 | held | **Shipped** — better, still lossy |
+| Isolated narrow prompt | not measured | **1/15** | **Rejected before shipping** |
+| **Structured output, two booleans** | **15/15** | **15/15** | **Shipped** — current |
 
-**Solution.** Change the output *format*, not the wording — replace a
-staged yes/no text answer with structured output containing two
-independent boolean fields. Two takeaways: structured output is markedly
-more reliable than asking a model for a parseable text answer, and **the
-"obvious" prompt improvement has to be measured**, because intuition about
-prompt behavior is unreliable. Shipping that plausible-sounding
-simplification unmeasured would have quietly broken a safety control.
+The third row is not a step in the progression — it's a **discarded
+experiment**, kept in the record because discarding it is the point. It
+was the plausible idea: a narrower, more focused prompt *should* be more
+reliable. Measured, it caught real self-disclosure **1 time in 15**. The
+staged "check this first, it overrides everything below" structure of the
+original had been doing load-bearing work that was invisible from reading
+it.
+
+**What actually worked was changing the output *format*, not the
+wording.** In the text-prompt versions the model had to answer two
+questions, decide which took precedence, and compress the result into a
+single yes/no token. Structured output splits that into two independent
+boolean fields — `discusses_own_configuration` and
+`appropriate_bot_content` — so the model answers two simple factual
+questions and **the code decides what to do with the answers.** The model
+is asked to do strictly less, and does it more reliably.
+
+That is the same principle as the previous section, applied to the
+guardrail itself: move the logic that must be correct out of the prompt
+and into code.
+
+Two takeaways. Structured output is markedly more reliable than asking a
+model for a parseable text answer. And **the "obvious" prompt improvement
+has to be measured** — shipping that plausible-sounding simplification on
+reasoning alone would have left a safety control roughly 93% broken, and
+nothing would have errored to reveal it.
 
 ### Fitting the service into 1 GB
 
