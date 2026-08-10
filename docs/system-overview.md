@@ -549,41 +549,53 @@ The check is measured on two **opposite** tests, and both have to pass:
 | **A — False positive** | A *valid* reply, e.g. "that topic is already covered" | **Let it through** |
 | **B — Self-disclosure** | A reply that leaks the bot's own configuration | **Block it** |
 
-| Version | Test A — lets valid replies through | Test B — catches leaks | Outcome |
-|---|---|---|---|
-| Original combined prompt | 1/3 | 2/3 *(3-trial spot-check)* | Broke in production |
-| Reworded prompt | 13/15 | 15/15 | **Shipped** — better, still lossy |
-| Isolated narrow prompt | not measured | **1/15** | **Rejected before shipping** |
-| **Structured output, two booleans** | **15/15** | **15/15** | **Shipped** — current |
+Four versions were tried, each differing in **how the check was
+structured** rather than in what it was asked to detect:
+
+| # | Prompt structure | Test A — lets valid replies through | Test B — catches leaks | Outcome |
+|---|---|---|---|---|
+| 1 | **Stepped prompt** — ordered checks, single yes/no answer | 1/3 | 2/3 *(3-trial spot-check)* | Broke in production |
+| 2 | **Stepped prompt, reworded** — same steps, ambiguity fixed | 13/15 | 15/15 | **Shipped** — better, still lossy |
+| 3 | **Compact prompt, no steps** — one free-form question | not measured | **1/15** | **Rejected before shipping** |
+| 4 | **Structured output, one field per condition** — no steps; code decides precedence | **15/15** | **15/15** | **Shipped** — current |
 
 Sample sizes differ: the 3-trial figure was a spot-check run while
 diagnosing a different bug, not a deliberate benchmark, so it carries much
 less weight than the 15-trial numbers. It was enough to establish that the
 original was not solid either.
 
-The third row is not a step in the progression — it's a **discarded
+Version 3 is not a step in the progression — it's a **discarded
 experiment**, kept in the record because discarding it is the point. Note
-what it means against row 1: at **1/15 versus 2/3**, the "simplification"
-was *worse at catching leaks than the version it was meant to improve* —
-a regression below the starting point, on the axis that matters most. It
-was the plausible idea: a narrower, more focused prompt *should* be more
-reliable. Measured, it caught real self-disclosure **1 time in 15**. The
-staged "check this first, it overrides everything below" structure of the
-original had been doing load-bearing work that was invisible from reading
-it.
+what it means against version 1: at **1/15 versus 2/3**, the
+"simplification" was *worse at catching leaks than the version it was
+meant to improve* — a regression below the starting point, on the axis
+that matters most. It was the plausible idea: a narrower, more focused
+prompt *should* be more reliable.
 
-**What actually worked was changing the output *format*, not the
-wording.** In the text-prompt versions the model had to answer two
-questions, decide which took precedence, and compress the result into a
-single yes/no token. Structured output splits that into two independent
-boolean fields — `discusses_own_configuration` and
-`appropriate_bot_content` — so the model answers two simple factual
-questions and **the code decides what to do with the answers.** The model
-is asked to do strictly less, and does it more reliably.
+**What worked was changing the output *format*, not the wording.** In
+versions 1–3 the model had to answer the question, decide how competing
+conditions ranked, and compress the result into a single yes/no token.
+Version 4 splits that into two independent boolean fields —
+`discusses_own_configuration` and `appropriate_bot_content` — so the model
+answers two simple factual questions and **the code decides what to do
+with the answers.** The model is asked to do strictly less, and does it
+more reliably. That is the same principle as the previous section, applied
+to the guardrail itself: move the logic that must be correct out of the
+prompt and into code.
 
-That is the same principle as the previous section, applied to the
-guardrail itself: move the logic that must be correct out of the prompt
-and into code.
+> **Caveat on causation.** These labels describe *what changed*, not a
+> proven mechanism. Version 4 altered three things at once — it removed
+> the steps, changed the output format, and moved precedence into code —
+> so the measurements can't attribute the improvement to any one of them.
+> Version 3's failure is likewise ambiguous: it dropped the steps, but its
+> prompt was also mostly negative space (a short "flag this" followed by a
+> long "this does NOT include…" carve-out, with no contrasting example of
+> an acceptable reply), and the exclusion may simply have dominated.
+> Isolating the cause would need a further experiment — a stepped prompt
+> with text output against the same content as structured fields. That
+> hasn't been run. What the numbers *do* support is the operational
+> conclusion: the change was measured before shipping, and the plausible
+> option was rejected on evidence.
 
 Two takeaways. Structured output is markedly more reliable than asking a
 model for a parseable text answer. And **the "obvious" prompt improvement
