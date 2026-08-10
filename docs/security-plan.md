@@ -34,6 +34,7 @@ limiting** (finding 3) — worth fixing, not an active exploit today.
 | 15 | IAM policy scoping for whichever secret manager is used | Low | Design-time reminder, not a current gap (nothing built yet) |
 | 16 | No audit logging on secret access | Low | Comes largely free once a real vault is adopted (finding 2) |
 | 17 | Phoenix telemetry access control | Resolved | **Done and verified live** — native auth, network isolation, Vault-stored API key, see below |
+| 18 | Docs written under a private-repo assumption, published unreviewed | Resolved | **Caught before the public push** — VM IPs and key paths redacted, see below |
 
 ## Findings
 
@@ -465,6 +466,46 @@ session or any later one) never needs the human admin's password: fetch
 access (the same mechanism `docker-entrypoint.sh` already uses), then
 query Phoenix's API directly. One fewer shared human credential in the
 loop, and one fewer thing that needs rotating/protecting outside Vault.
+
+### 18. Content written under a private-repo assumption
+
+**Caught 2026-08-09, immediately before the repository was made public.**
+
+`docs/deployment-plan.md` recorded both VMs' **public IP addresses**, the
+SSH private-key filename, and the local directory holding it — which also
+disclosed the operator's Windows username. It carried an explicit
+justification: *"safe to document — no secrets."*
+
+That justification was correct **when it was written**, and wrong the
+moment the repository went public. An IP genuinely isn't a credential, but
+publishing the exact addresses of two live VMs removes an attacker's
+reconnaissance step for free, and pairs badly with a repo that also
+documents what runs on them.
+
+**Why it had to be caught before the push, not after.** Anything committed
+to a public repository stays in its git history permanently. Deleting it
+in a later commit removes it from the working tree only — it remains
+retrievable, and cleaning it properly requires a history rewrite plus a
+force-push. There is no quiet fix after the fact.
+
+**Resolution.** Public IPs, the key filename, and the local key directory
+replaced with placeholders across `deployment-plan.md` and
+`observability-and-debugging.md`. Private `10.0.0.x` addresses kept — RFC
+1918, meaningless outside the VCN, and needed for the topology to be
+comprehensible. Verified no secrets had ever been committed: the
+`PHOENIX_SECRET` and `PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD` mentions are
+variable *names*, not values, and no OCIDs or tokens appear in tracked
+files.
+
+**The generalizable finding**, and the reason this is recorded as a
+security item rather than a tidy-up: **"safe to document" is a judgement
+about the audience, not about the content.** Any assessment of that kind
+made while a repo is private is invalidated by publication, and needs
+re-running before the visibility change — not after.
+
+Codified as the `audit-before-going-public` skill so the check happens by
+default rather than by luck. It was luck this time: the scan happened only
+because a push to a newly-public repo prompted a second look.
 
 ## Remaining work
 
