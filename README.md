@@ -207,3 +207,7 @@ scale. Known limitations are documented honestly rather than omitted: see
 [Appendix B.2](docs/system-overview.md#b2-known-limitations) for what it
 can't currently do, each with an explicit trigger for when it must be
 fixed.
+
+## License
+
+[MIT](LICENSE)
