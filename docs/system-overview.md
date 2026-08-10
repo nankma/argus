@@ -551,13 +551,21 @@ The check is measured on two **opposite** tests, and both have to pass:
 
 | Version | Test A — lets valid replies through | Test B — catches leaks | Outcome |
 |---|---|---|---|
-| Original combined prompt | 1/3 | unreliable | Broke in production |
-| Reworded prompt | 13/15 | held | **Shipped** — better, still lossy |
+| Original combined prompt | 1/3 | 2/3 *(3-trial spot-check)* | Broke in production |
+| Reworded prompt | 13/15 | 15/15 | **Shipped** — better, still lossy |
 | Isolated narrow prompt | not measured | **1/15** | **Rejected before shipping** |
 | **Structured output, two booleans** | **15/15** | **15/15** | **Shipped** — current |
 
+Sample sizes differ: the 3-trial figure was a spot-check run while
+diagnosing a different bug, not a deliberate benchmark, so it carries much
+less weight than the 15-trial numbers. It was enough to establish that the
+original was not solid either.
+
 The third row is not a step in the progression — it's a **discarded
-experiment**, kept in the record because discarding it is the point. It
+experiment**, kept in the record because discarding it is the point. Note
+what it means against row 1: at **1/15 versus 2/3**, the "simplification"
+was *worse at catching leaks than the version it was meant to improve* —
+a regression below the starting point, on the axis that matters most. It
 was the plausible idea: a narrower, more focused prompt *should* be more
 reliable. Measured, it caught real self-disclosure **1 time in 15**. The
 staged "check this first, it overrides everything below" structure of the
