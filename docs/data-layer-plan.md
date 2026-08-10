@@ -39,7 +39,7 @@ Three reasons, in order of weight:
    accepted trade at the time.
 
 3. **Nothing today needs sharing.** Both bots and the scheduler run in a
-   single process on a single host (`docs/system-overview.md` §D1), so
+   single process on a single host (`docs/system-overview.md` Appendix B.1), so
    there is no second consumer that SQLite is currently blocking. The
    limitation is real but not yet *binding*.
 

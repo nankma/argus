@@ -4,6 +4,10 @@ Nothing here is built yet — this doc captures the goal, what's already
 possible, and the decisions to make before implementing, same pattern as
 `docs/deployment-plan.md` and `docs/multi-channel-plan.md`.
 
+Cross-references to "Appendix B.1" below mean
+`docs/system-overview.md` Appendix B.1 (Problems hit in development and
+production).
+
 **The question that prompted it:** the architecture has no AI gateway.
 Can we switch the LLM model dynamically, and do we need one?
 
@@ -108,8 +112,8 @@ rejected ones. They're the highest-volume calls in the system and the
 least demanding. This is where cost optimization actually lands.
 
 **Prerequisite:** any model used for Stages 1 or 3 must support
-structured output, since both depend on it (and per `§D1`, structured
-output is what made the Stage 3 check reliable in the first place).
+structured output, since both depend on it (and per Appendix B.1 of the overview, structured output is what made
+the Stage 3 check reliable in the first place).
 
 ## Level 3 — Provider failover
 
@@ -135,7 +139,7 @@ Evaluated and **not recommended at current scale.**
 
 | Option | What it adds beyond Levels 1–3 | Cost here |
 |---|---|---|
-| **LiteLLM (self-hosted)** | Budget caps, caching, unified multi-provider routing, per-key quotas | Another process competing for the same **1 GB** — directly against constraint C1. The single-process topology exists precisely to avoid loading a second runtime (`docs/system-overview.md` §D1) |
+| **LiteLLM (self-hosted)** | Budget caps, caching, unified multi-provider routing, per-key quotas | Another process competing for the same **1 GB** — directly against principle P5. The single-process topology exists precisely to avoid loading a second runtime (overview, Appendix B.1) |
 | **OpenRouter / Portkey (hosted)** | Same, without local memory cost; one key for many providers | Adds a network hop to every call, a third-party dependency in the critical path, and (for some) per-token markup |
 | **Cloudflare AI Gateway** | Caching, analytics, rate limiting; generous free tier | Still an extra hop; overlaps with Phoenix, which already provides full trace fidelity |
 
@@ -153,7 +157,7 @@ than two providers are in play simultaneously.
 Switching models is mechanically easy. It is **not behaviorally free.**
 
 The guardrail reliability figures recorded in `docs/system-overview.md`
-§D1 — the structured-output check scoring 15/15, and the narrow-prompt
+Appendix B.1 of the overview — the structured-output check scoring 15/15, and the narrow-prompt
 variant scoring 1/15 — were measured **against DeepSeek specifically**.
 They are properties of a prompt/model pair, not of the prompt alone.
 
@@ -163,10 +167,10 @@ Therefore, before any model change reaches production:
    and Stage 3 (self-disclosure detection, false-positive rate) against
    the new model.
 2. Re-run the 13-case post-deploy checklist, which covers output
-   formatting — the Markdown-vs-HTML compliance behavior in §D1 is also
+   formatting — the Markdown-vs-HTML compliance behavior in Appendix B.1 is also
    model-specific.
 
-This is the same discipline §D1 argues for, applied to a config change
+This is the same discipline Appendix B.1 argues for, applied to a config change
 rather than a prompt change. **A model swap is a behavioral change and
 must be measured like one.** Cheap models in particular are likelier to
 be weaker at instruction-following, which is exactly what the guardrails
@@ -176,13 +180,44 @@ depend on — so Level 2's cost saving must be validated, not assumed.
 
 1. **Level 1** — config-driven selection. Small, reversible, unblocks
    everything else.
-2. **Level 5 harness** — a repeatable script for the §D1 measurements, so
-   validating a candidate model is a command rather than a manual
-   exercise. This should exist *before* Level 2, not after.
+2. **Measurement harness** — a repeatable script for the guardrail
+   reliability measurements, so validating a candidate model is a command
+   rather than a manual exercise. This should exist *before* Level 2, not
+   after. See "The harness" below.
 3. **Level 2** — per-stage routing, with the cheap model validated by
    that harness.
 4. **Level 3** — failover, when availability warrants it.
 5. **Level 4** — only on the triggers above.
+
+## The harness
+
+Both Level 2 and any future model change depend on the same missing
+tool: a repeatable way to score a prompt/model pair.
+
+**What it needs to do:** take a set of labelled test cases (input →
+expected verdict), run each N times against a named model, and report
+per-case and aggregate scores. That's the same procedure already used
+manually to produce the figures in Appendix B.1 of the overview — the
+harness just makes it a command instead
+of an afternoon.
+
+**Why it's the real prerequisite.** The guardrail figures (15/15, and the
+1/15 that got a change rejected) are properties of a prompt *and* a model
+together, not of the prompt alone. Any model swap therefore invalidates
+them until re-measured. Without a harness, that re-measurement is
+expensive enough that it will get skipped — which converts Level 1's
+"switching is easy" into a way to silently break a safety control.
+
+**Second use.** `docs/guardrails-plan.md` records an unrun experiment to
+determine *why* structured output outperformed the text prompts — the
+current result is confounded across three simultaneous changes. That
+experiment is four prompt variants scored the same way, so it needs
+exactly this harness and nothing else. Worth noting because it makes the
+harness pay for itself twice.
+
+**Cost note:** the harness makes real API calls by definition, so it
+shouldn't run on every commit. A manually-triggered job, run when the
+model or a guardrail prompt changes, is the right cadence.
 
 ## Open questions
 

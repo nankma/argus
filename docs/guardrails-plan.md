@@ -243,6 +243,72 @@ it from the input.
   layer-2/4 DeepSeek calls, no real API calls in tests) — no architecture
   change needed to fit this in.
 
+## Unrun experiment: what actually made the output check reliable
+
+**Status: not run.** Identified 2026-08-09 while writing up the layer-4
+measurements for `docs/system-overview.md` Appendix B.1.
+
+**Background.** Four versions of the layer-4 output check were measured
+against the real model. Scores on "does it catch a self-disclosure leak":
+
+| # | Prompt structure | Caught leaks |
+|---|---|---|
+| 1 | Stepped prompt (ordered checks, one yes/no answer) | 2/3 *(3-trial spot-check)* |
+| 2 | Stepped prompt, reworded | 15/15 |
+| 3 | Compact prompt, no steps | **1/15** |
+| 4 | Structured output, one boolean field per condition | 15/15 |
+
+**The problem with concluding anything.** Version 4 changed **three
+things at once** relative to version 3:
+
+1. the output format (free text → structured fields),
+2. where precedence between the two conditions is decided (model → code),
+3. whether the two conditions are explicitly separated at all.
+
+So the improvement can't be attributed to any single one. Version 3's
+collapse is equally ambiguous: it dropped the stepped structure, but its
+prompt was also mostly *negative space* — a short "flag this" followed by
+a long "this does NOT include…" carve-out, with no contrasting example of
+an acceptable reply. The exclusion may simply have dominated, independent
+of the missing steps.
+
+The doc currently states only the operational conclusion (the change was
+measured, the plausible option was rejected on evidence) and explicitly
+flags the causal claim as untested. That's honest but unsatisfying — if
+"use structured output for classifier-style checks" is going to be a
+reusable rule, it should rest on something better than one confounded
+comparison.
+
+**Proposed experiment.** Hold everything constant except one variable at
+a time, same test cases and same trial count throughout:
+
+| Variant | Structure | Output format | Isolates |
+|---|---|---|---|
+| A | Stepped | Free text yes/no | baseline (= version 2) |
+| B | Stepped | Structured fields | effect of *output format* alone |
+| C | Compact, no steps | Free text yes/no | baseline (= version 3) |
+| D | Compact, no steps | Structured fields | effect of *structure* alone (= version 4) |
+
+Comparing A↔B and C↔D isolates output format; comparing A↔C and B↔D
+isolates prompt structure. A fifth variant adding a positive contrast
+case ("here is what an acceptable reply looks like") to version 3's
+wording would test the negative-space hypothesis separately.
+
+**Why it's worth doing at some point:** the "move the logic that must be
+correct out of the prompt and into code" principle is the most reusable
+idea to come out of this project, and it's currently supported by a
+confounded result. Either the experiment confirms it, or it reveals the
+real mechanism was something else — both outcomes are more useful than
+the current state.
+
+**Prerequisite:** the measurement harness described in
+`docs/model-portability-plan.md`. That plan needs a repeatable N-trial
+scorer anyway, because guardrail reliability figures are properties of a
+prompt/model *pair* and must be re-measured on any model swap. Once that
+harness exists, this experiment is a matter of running it over four
+prompt variants rather than building anything new — which is why this is
+sequenced after it rather than before.
+
 ## Open questions
 
 - ~~Exact wording/pattern list for layer 1~~ — built in `guardrails.py`'s

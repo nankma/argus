@@ -19,8 +19,8 @@ response — with the reasoning and measurements behind each decision.
 | **A. Architecture** | Cloud topology, servers, secrets and identity, management access |
 | **B. System design** | Components, agent workflow, prompt structure, message safety |
 | **C. Quality assurance** | Test strategy, CI, post-deployment testing, monitoring, incident reporting |
-| **D. Difficulties** | Problems encountered and how each was solved; known limits; work deliberately declined |
-| **Appendix** | How AI was used to build this |
+| **Appendix A** | How AI was used to build this |
+| **Appendix B** | Problems encountered and how each was solved; known limits; work deliberately declined |
 
 ---
 
@@ -62,7 +62,7 @@ throughout this document:
 - **Push, not pull** — the assistant comes to me. This is why the
   scheduled digest is the core feature rather than a nice-to-have, and why
   a messaging channel that couldn't support it was ultimately declined
-  (§D3)
+  (Appendix B.3)
 - **Synthesis, not aggregation** — merging coverage of the same story
   across sources is the point. A list of headlines is the problem I had,
   not the solution (§B2)
@@ -80,7 +80,7 @@ genuinely needed — not defaults carried over from another stack.
 | **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. Model choice is injected rather than hardcoded into consumers, so it stays swappable — see `docs/model-portability-plan.md` |
 | **LangChain** | Agent framework | Framework-managed agent loop, and — critically — a swappable model interface. That's what lets the entire test suite run against a scripted fake with no network and no API cost. |
 | **Telegram** | Delivery channel | Supports *long polling*, so the bot needs no public endpoint, no TLS, no domain. Eliminates an entire class of attack surface and operational burden. |
-| **SQLite** | Persistence | Zero operational overhead and adequate at current scale. A known limitation, deliberately accepted — see §D2. |
+| **SQLite** | Persistence | Zero operational overhead and adequate at current scale. A known limitation, deliberately accepted — see Appendix B.2. |
 | **Oracle Cloud** | Hosting | A genuinely perpetual free tier, not time-limited trial credits, including a managed secrets vault. |
 | **Docker** | Packaging | One artifact that runs identically locally and on the VM; makes the deploy step a single image transfer. |
 | **Arize Phoenix** | LLM observability | Self-hostable and OpenTelemetry-native — full trace fidelity with no per-trace SaaS billing, which matters when tracing every call. |
@@ -99,7 +99,7 @@ non-deterministic: there is no assertion for "the model follows this
 instruction." It mostly will; occasionally it won't. When it doesn't, it
 has to be possible to see exactly what the model was given and what it
 produced — which is why every call is traced (§C4), and why any behavior
-that *must* hold is enforced in code rather than by prompt (§D1).
+that *must* hold is enforced in code rather than by prompt (Appendix B.1).
 
 **P3 — Abnormal situations must surface by themselves.** With one operator
 and no on-call rotation, a failure nobody notices is indistinguishable
@@ -114,7 +114,7 @@ what catches a problem before a user hits it (§C3).
 **P5 — Minimal infrastructure budget.** Everything runs on a free tier;
 the application VM is a `VM.Standard.E2.1.Micro` — **1 GB RAM, 1/8 OCPU**.
 The least important of the five, but it shaped topology decisions
-throughout (§D1).
+throughout (Appendix B.1).
 
 ---
 
@@ -416,7 +416,7 @@ fake model structurally cannot verify anything about *real* model
 behavior — whether a prompt actually elicits the right format, whether a
 classifier is accurate. That's not a gap to be closed with more unit
 tests; it needs a different instrument, which is what C3 and the
-measurement discipline in §D1 exist for.
+measurement discipline in Appendix B.1 exist for.
 
 ## C2. Test before commit — CI
 
@@ -427,7 +427,7 @@ alive in a solo project.
 Beyond the suite, CI is the right place for structural checks that catch
 whole classes of mistake — for example, asserting the *exact* set of
 registered bot commands rather than merely that some handler exists. That
-specific check exists because of the incident in §D1, where a test that
+specific check exists because of the incident in Appendix B.1, where a test that
 verified a category of thing passed happily while the specific thing was
 broken.
 
@@ -495,13 +495,43 @@ now on budget and cost grounds; alerting a human who can decide is
 sufficient at this scale, and automated remediation adds a class of risk
 (acting on a false positive) that isn't worth taking on for a pilot.
 
-A worked example of the loop follows in §D1.
+A worked example of the loop follows in Appendix B.1.
 
 ---
 
-# D. Difficulties and How They Were Solved
+# Appendix A — How AI Was Used to Build This
 
-## D1. Problems hit in development and production
+I built this working with an AI coding assistant throughout. That was a
+deliberate choice, and I'd argue it's one of the things the project
+demonstrates rather than a caveat on it.
+
+| I owned | The AI assistant owned |
+|---|---|
+| **Problem definition** — the scope, the feature set, and what the output should look like | — |
+| **Architecture decisions** — the cloud topology, the service infrastructure (Docker, tracing backend), the CI/CD workflow, and how incidents get detected and reach me | Turning those designs into working code |
+| **System design** — the layered-prompt structure (§B3) and merging the safety gate with the intent router into one call (§B2), both specified before implementation | Implementation of the specified designs |
+| **Scope and priorities** — security before deployment; decline the second channel (Appendix B.3); accept SQLite's limits rather than migrate prematurely | Research passes I directed — pricing tiers, registrar comparison, library capabilities — which I then decided on |
+| **Test strategy** — directing what needed coverage, reviewing the test plan for gaps, and settling when each kind of test runs (CI vs. post-deployment). Manual verification was the smaller part; steering the plan was the larger one | Writing the test cases to that plan; diagnostic execution — querying traces, running the N-trial measurements in Appendix B.1 |
+| **Verification standards** — insisting a fix be measured before shipping (Appendix B.1) and that invariants be enforced in code rather than by prompt | Implementation, documentation drafting |
+| **Final judgment** — every decision recorded here is one I made and can defend | — |
+
+**The short version: I was the engineer and the operator; the assistant
+was leverage.** It wrote most of the lines. It did not decide what the
+system should be, what was acceptable to ship, or when something was
+actually fixed.
+
+Working this way well means *not* trusting generated output by default —
+which is exactly where the two hardest-won lessons in Appendix B.1 come from:
+enforce invariants in code rather than asking nicely, and measure whether
+a fix actually worked instead of assuming the plausible one did. Both are
+the direct product of verifying rather than accepting.
+
+
+---
+
+# Appendix B — Difficulties and How They Were Solved
+
+## B.1 Problems hit in development and production
 
 ### Model instruction compliance is not a guarantee
 
@@ -691,7 +721,7 @@ step. **A logging fix isn't verified until you've confirmed the log lines
 arrive** — a lesson that generalizes to any instrument you rely on but
 haven't checked recently.
 
-## D2. Known limitations
+## B.2 Known limitations
 
 What the system *cannot* currently do. Most are accepted tradeoffs rather
 than oversights, and each has an explicit trigger for when it stops being
@@ -700,7 +730,7 @@ acceptable.
 | Limitation | Impact | Current mitigation | Fix when |
 |---|---|---|---|
 | **Single point of failure** | VM loss = service down and subscriber data lost | Container auto-restarts; data is reconstructible | Before real users — backup is cheap, scheduled not done |
-| **Probabilistic guardrails** | A legitimate message can occasionally be rejected; a bad one can occasionally pass | Four independent layers; classifiers fail *open*, so an outage never blocks legitimate use | Inherent — reduced by measurement (§D1), not eliminated |
+| **Probabilistic guardrails** | A legitimate message can occasionally be rejected; a bad one can occasionally pass | Four independent layers; classifiers fail *open*, so an outage never blocks legitimate use | Inherent — reduced by measurement (Appendix B.1), not eliminated |
 | **In-memory conversation history** | Restart loses in-flight context | Deliberate — history is capped at 1 h / 20 messages anyway | Only if conversations become genuinely multi-turn |
 | **No rate limiting** | An approved user could burn API quota | Access is approval-gated, bounding exposure | Before opening access more widely |
 | **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access. All access sits behind one module, keeping migration cheap — see `docs/data-layer-plan.md` | When a second host or real concurrency is needed |
@@ -708,7 +738,7 @@ acceptable.
 | **Manual deploy step** | Human error surface each release | Documented workflow plus the 13-case checklist | CD is designed (§A1), not built |
 | **Silent source degradation** | An upstream format change makes that source quietly return nothing | Per-source isolation keeps the request succeeding on the rest | Needs a source-health check; not built |
 
-## D3. Work deliberately declined
+## B.3 Work deliberately declined
 
 Judgment shows as much in what's declined as in what ships.
 
@@ -732,32 +762,3 @@ again when the actual requirements are known.
 **Rate limiting, database backups, dependency scanning.** All identified
 in a written security review, all documented, none built. They're scoped
 as "before real users," not "before a pilot works."
-
----
-
-# Appendix: How AI Was Used to Build This
-
-I built this working with an AI coding assistant throughout. That was a
-deliberate choice, and I'd argue it's one of the things the project
-demonstrates rather than a caveat on it.
-
-| I owned | The AI assistant owned |
-|---|---|
-| **Problem definition** — the scope, the feature set, and what the output should look like | — |
-| **Architecture decisions** — the cloud topology, the service infrastructure (Docker, tracing backend), the CI/CD workflow, and how incidents get detected and reach me | Turning those designs into working code |
-| **System design** — the layered-prompt structure (§B3) and merging the safety gate with the intent router into one call (§B2), both specified before implementation | Implementation of the specified designs |
-| **Scope and priorities** — security before deployment; decline the second channel (§D3); accept SQLite's limits rather than migrate prematurely | Research passes I directed — pricing tiers, registrar comparison, library capabilities — which I then decided on |
-| **Test strategy** — directing what needed coverage, reviewing the test plan for gaps, and settling when each kind of test runs (CI vs. post-deployment). Manual verification was the smaller part; steering the plan was the larger one | Writing the test cases to that plan; diagnostic execution — querying traces, running the N-trial measurements in §D1 |
-| **Verification standards** — insisting a fix be measured before shipping (§D1) and that invariants be enforced in code rather than by prompt | Implementation, documentation drafting |
-| **Final judgment** — every decision recorded here is one I made and can defend | — |
-
-**The short version: I was the engineer and the operator; the assistant
-was leverage.** It wrote most of the lines. It did not decide what the
-system should be, what was acceptable to ship, or when something was
-actually fixed.
-
-Working this way well means *not* trusting generated output by default —
-which is exactly where the two hardest-won lessons in §D1 come from:
-enforce invariants in code rather than asking nicely, and measure whether
-a fix actually worked instead of assuming the plausible one did. Both are
-the direct product of verifying rather than accepting.

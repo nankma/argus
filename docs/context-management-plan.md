@@ -288,7 +288,7 @@ That last point is the real design question: it makes the router do more,
 and the router is a single point of failure for every message. Worth
 measuring whether a richer structured output degrades its classification
 accuracy before committing — the same discipline applied in
-`docs/system-overview.md` §D1, where a plausible prompt change measured
+`docs/system-overview.md` Appendix B.1, where a plausible prompt change measured
 dramatically worse.
 
 ## Open questions
