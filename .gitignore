@@ -7,3 +7,6 @@ subscribers.db
 *.out.log
 *.err.log
 *.pid.txt
+
+# generated showcase output (build with tools/build_showcase.py)
+showcase.html
