@@ -18,6 +18,12 @@ Each item is **synthesized across sources** rather than listed — the first
 entry above merges New Scientist, Wired, and TechCrunch coverage into one
 paragraph, with every claim carrying its links.
 
+> **Why "Argus"** — Argus Panoptes, the *all-seeing* watchman of Greek
+> myth, was covered in eyes and so could rest some while others stayed
+> open. He never fully slept, which made him the one you posted on watch.
+> Fitting for a service that keeps an eye on more sources than a person
+> reasonably can, and reports back without being asked.
+
 ---
 
 ## Why it exists
