@@ -8,15 +8,28 @@ formatting pipeline real Telegram traffic runs, not a separate
 reimplementation. handle_message and this module both call it; neither
 duplicates the pipeline itself.
 
-Security: binds to 127.0.0.1 only, never 0.0.0.0 -- this process has no
-public-facing HTTP surface at all. Reachable only via SSH port-forward
-from a machine already holding the VM's SSH key (`ssh -L
-8765:127.0.0.1:8765 ubuntu@<vm-ip>`), the same trust boundary as SSH
-access to the VM itself -- this endpoint doesn't grant anything beyond
-what SSH access already does (docker exec into the container would let
-you do the same and more). Gated behind ENABLE_TEST_API, off by default
--- a production deploy that never sets it never starts this server at
-all, zero attack surface added to the normal case.
+Security: the boundary is the `docker run -p 127.0.0.1:8765:8765` flag,
+NOT the bind address in this file. Binds to 0.0.0.0 *inside* the
+container deliberately -- that's the container's own isolated network
+namespace, unreachable from outside except through whatever port Docker
+is told to publish. Real incident during this feature's first deploy:
+binding to 127.0.0.1 here made the service completely unreachable even
+from the VM's own localhost, because Docker's port-publishing NAT
+delivers external traffic to the container's bridge interface, not its
+loopback -- a service bound to a container's own 127.0.0.1 is invisible
+to `docker run -p`, full stop. The actual security control lives
+entirely in the host-side half of that flag (127.0.0.1, restricting
+which host interface Docker publishes to) -- get that half right and the
+in-process bind address genuinely doesn't matter for reachability from
+outside the VM. See docs/local-testing-api-plan.md for the corrected
+docker run flag and why. Reachable only via SSH port-forward from a
+machine already holding the VM's SSH key (`ssh -L 8765:127.0.0.1:8765
+ubuntu@<vm-ip>`), the same trust boundary as SSH access to the VM itself
+-- this endpoint doesn't grant anything beyond what SSH access already
+does (docker exec into the container would let you do the same and
+more). Gated behind ENABLE_TEST_API, off by default -- a production
+deploy that never sets it never starts this server at all, zero attack
+surface added to the normal case.
 
 Stdlib-only (http.server + threading), deliberately -- this is a debug
 tool, not a production API; aiohttp/FastAPI would be real weight for
@@ -34,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import bot as info_bot
 
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = int(os.environ.get("TEST_API_PORT", "8765"))
 CALL_TIMEOUT_SECONDS = 60
 

@@ -47,10 +47,35 @@ code from a sync thread.
 
 ## Security model
 
-**Binds to `127.0.0.1` only — never `0.0.0.0`.** This process has no
-public HTTP surface at all, by construction, not by firewall rule.
-Reachable only via SSH port-forward from a machine that already holds the
-VM's SSH private key:
+**The boundary is the `docker run` flag, not the in-process bind
+address.** `test_api.py` binds to `0.0.0.0` *inside* the container —
+deliberately, not a mistake. That's the container's own isolated network
+namespace; nothing outside the VM can reach it except through whatever
+Docker is explicitly told to publish.
+
+**Real incident, first deploy of this feature:** it originally bound to
+`127.0.0.1` inside the container, on the reasoning that this alone
+provided the security boundary. It didn't — it broke the feature
+outright. Docker's port-publishing NAT delivers external traffic to the
+container's *bridge* interface, not its loopback, so a process bound to
+a container's own `127.0.0.1` is invisible to `docker run -p` entirely —
+not even reachable from the VM's own `localhost`, confirmed by testing
+directly on the VM and getting a connection reset. Fixed by binding
+`0.0.0.0` inside the container (safe — the namespace isolation is what
+matters, not the bind address within it) and moving the actual
+restriction to where it belongs:
+
+```bash
+-p 127.0.0.1:8765:8765
+```
+
+This is the host-side half of the flag — it tells Docker to publish the
+port only to the VM's own loopback interface. That's the real boundary.
+Get this half right and the in-process bind address genuinely doesn't
+matter for reachability from outside the VM; get it wrong (`-p
+8765:8765`, binding the host side to `0.0.0.0` by Docker's default) and
+the endpoint is reachable from the public internet regardless of what
+`test_api.py` itself binds to.
 
 ```bash
 ssh -i <key> -L 8765:127.0.0.1:8765 ubuntu@<vm-ip>

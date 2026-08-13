@@ -87,10 +87,16 @@ def test_missing_fields_returns_400(running_server):
     assert status == 400
 
 
-def test_server_binds_to_loopback_only(running_server):
-    """The one security-critical property of this module: it must never be
-    reachable from anything but localhost."""
-    assert running_server.server_address[0] == "127.0.0.1"
+def test_server_binds_to_all_interfaces_inside_the_container(running_server):
+    """Deliberately 0.0.0.0, not 127.0.0.1 -- see test_api.py's module
+    docstring. Real incident: binding to 127.0.0.1 here made the service
+    unreachable even from the VM's own localhost, because Docker's
+    port-publishing NAT delivers external traffic to the container's
+    bridge interface, not its loopback. The actual security boundary is
+    the host-side half of `docker run -p 127.0.0.1:8765:8765` -- this
+    process binding broadly inside its own isolated container namespace
+    is safe and, in fact, required for that flag to work at all."""
+    assert running_server.server_address[0] == test_api.HOST == "0.0.0.0"
 
 
 def test_start_does_nothing_when_env_var_unset(monkeypatch):
@@ -106,7 +112,7 @@ def test_start_returns_server_when_env_var_set(monkeypatch):
         server = test_api.start(agent="fake", guard_model="fake")
         try:
             assert server is not None
-            assert server.server_address[0] == "127.0.0.1"
+            assert server.server_address[0] == "0.0.0.0"
         finally:
             test_api.stop(server)
 
