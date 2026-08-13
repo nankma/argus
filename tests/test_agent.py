@@ -101,7 +101,7 @@ def test_save_note_writes_isolated_file(isolated_notes_file):
     assert "ts" in entry
 
 
-def test_search_news_aggregates_and_isolates_errors(monkeypatch):
+def test_search_news_aggregates_and_isolates_errors(monkeypatch, isolated_subscribers_db):
     def working_source(query, max_results):
         return [{"title": "Test Article", "link": "https://example.com", "source": "TestSource"}]
 
@@ -109,7 +109,9 @@ def test_search_news_aggregates_and_isolates_errors(monkeypatch):
         raise RuntimeError("simulated network failure")
 
     monkeypatch.setattr(
-        news_sources, "enabled_sources", lambda: [("working", working_source), ("failing", failing_source)]
+        news_sources,
+        "enabled_sources",
+        lambda include_restricted=True: [("working", working_source), ("failing", failing_source)],
     )
 
     fake_model = FakeToolCallingModel(
@@ -123,7 +125,9 @@ def test_search_news_aggregates_and_isolates_errors(monkeypatch):
     )
     built = agent.build_agent(fake_model)
 
-    result = agent.run_agent(built, [{"role": "user", "content": "what's trending?"}])
+    result = agent.run_agent(
+        built, [{"role": "user", "content": "what's trending?"}], context={"chat_id": 1}
+    )
 
     tool_messages = [m for m in result if isinstance(m, ToolMessage)]
     assert len(tool_messages) == 1

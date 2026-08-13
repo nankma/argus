@@ -78,6 +78,7 @@ def init_db() -> None:
         _ensure_column(conn, "last_push_at", "TEXT")
         _ensure_column(conn, "pushed_links", "TEXT")
         _ensure_column(conn, "language", "TEXT")
+        _ensure_column(conn, "restricted_sources_enabled", "INTEGER")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS api_budget (
@@ -408,4 +409,31 @@ def set_language(chat_id: int, language: str | None) -> None:
             ON CONFLICT(chat_id) DO UPDATE SET language = excluded.language
             """,
             (chat_id, APPROVED, datetime.now().isoformat(), language or None),
+        )
+
+
+def get_restricted_sources_enabled(chat_id: int) -> bool:
+    """Per-user gate on search_news's use of news_sources.RESTRICTED_SOURCES
+    (NewsAPI, Perigon) -- deliberately not tied to admin status in code, so
+    it can be granted to someone else later with a plain DB update, not a
+    new code path. Defaults False for everyone; set True explicitly (see
+    set_restricted_sources_enabled) -- bot.py grants it to the admin's own
+    chat_id at startup, nobody else by default."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT restricted_sources_enabled FROM subscribers WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return bool(row and row[0])
+
+
+def set_restricted_sources_enabled(chat_id: int, enabled: bool) -> None:
+    """Upserts -- same reasoning as set_language()."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, status, requested_at, restricted_sources_enabled)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET restricted_sources_enabled = excluded.restricted_sources_enabled
+            """,
+            (chat_id, APPROVED, datetime.now().isoformat(), int(enabled)),
         )

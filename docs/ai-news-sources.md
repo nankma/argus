@@ -188,6 +188,42 @@ fit, not features:
 
 **After GNews is working and verified live** (confirm the response shape actually matches what `fetch_gnews` expects — per this doc's standing rule, verify before trusting), Perigon is the natural second pick if broader coverage is still wanted. NewsAPI stays parked unless a paid plan is actually being considered.
 
+## Restricted sources: NewsAPI and Perigon require per-user access
+
+Added 2026-08-14, after realizing `search_news` (the on-demand chat tool)
+calls every enabled source directly and live, on every matching query,
+completely independent of `news_ingest.py`'s own budget-cap mechanism
+(see `docs/local-news-cache-plan.md`). That mechanism only protects the
+periodic ingestion job's own calls — nothing previously stopped
+`search_news` from also calling NewsAPI/Perigon on every relevant chat
+message, which would exhaust both budgets almost immediately on real
+traffic.
+
+**`news_sources.RESTRICTED_SOURCES = {"newsapi", "perigon"}`** — excluded
+from `search_news`'s source list by default. `agent.py`'s `search_news`
+checks `users_db.get_restricted_sources_enabled(chat_id)` (a per-user DB
+flag, defaulting to `False`) before deciding whether to include them.
+`bot.py`/`combined_bot.py` grant this to the admin's own chat_id at
+startup — nobody else, for now. Granting it to someone else later is a
+plain DB update (`users_db.set_restricted_sources_enabled(chat_id,
+True)`), not a new code path.
+
+**GNews is deliberately not restricted** — its 100/day budget has real
+headroom beyond what `news_ingest.py` alone uses (3–6 calls/day), so
+`search_news` calling it too doesn't meaningfully threaten the budget the
+way it would for Perigon (150/month total) or NewsAPI (kept to 1/day by
+choice, not by a hard provider limit).
+
+**What this does and doesn't solve.** It protects Perigon/NewsAPI's
+budgets from *unauthorized* on-demand usage — the default is now
+"nobody but the admin can trigger these live." It does **not** protect
+against the admin's own usage exhausting the budget through `search_news`
+independent of what `news_ingest.py` already spends — the admin's calls
+still aren't rate-limited against `news_ingest.py`'s own consumption of
+the same monthly/daily cap (`try_consume_api_budget` is only called from
+`news_ingest.py` today). Worth revisiting if this becomes a real problem
+in practice, not before.
+
 ## Considered, tested live, and rejected
 
 All verified live on 2026-08-13 before being ruled out — per this doc's

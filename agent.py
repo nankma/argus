@@ -247,12 +247,20 @@ def save_note(note: str) -> str:
 
 
 @tool
-def search_news(query: str = "AI", max_results_per_source: int = 5) -> str:
+def search_news(query: str, runtime: ToolRuntime, max_results_per_source: int = 5) -> str:
     """Search multiple AI-industry news sources for a query (e.g. a company,
     model name, or topic like "AI regulation") and return recent items
     grouped by source. Sources are pluggable — see news_sources.py.
     """
-    sources = news_sources.enabled_sources()
+    chat_id = runtime.context["chat_id"]
+    # RESTRICTED_SOURCES (NewsAPI, Perigon) are excluded by default -- their
+    # budgets are already spoken for by news_ingest.py's own scheduled
+    # pulls (docs/local-news-cache-plan.md); calling them again here, live,
+    # on every matching query from every user would exhaust both almost
+    # immediately. Gate is per-user, not admin-only in code -- see
+    # users_db.get_restricted_sources_enabled.
+    include_restricted = users_db.get_restricted_sources_enabled(chat_id)
+    sources = news_sources.enabled_sources(include_restricted=include_restricted)
     lines = []
     total = 0
     for name, fetch in sources:

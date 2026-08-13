@@ -465,6 +465,11 @@ def main():
     app.bot_data["guard_model"] = model
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
+    # Idempotent -- safe to run every startup. Only the admin gets
+    # search_news access to news_sources.RESTRICTED_SOURCES (NewsAPI,
+    # Perigon) by default; granting it to anyone else is a plain DB update
+    # (users_db.set_restricted_sources_enabled), not a new code path.
+    users_db.set_restricted_sources_enabled(app.bot_data["admin_chat_id"], True)
     app.add_handler(CommandHandler("start", handle_start_command))
     app.add_handler(CommandHandler("interests", handle_interests_command))
     app.add_handler(CommandHandler("language", handle_language_command))

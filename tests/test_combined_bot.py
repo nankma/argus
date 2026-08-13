@@ -3,11 +3,12 @@ import asyncio
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler
 import agent as agent_module
 import combined_bot
+import users_db
 
 FAKE_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 
 
-def test_build_info_app_wires_bot_data(monkeypatch):
+def test_build_info_app_wires_bot_data(monkeypatch, isolated_subscribers_db):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", FAKE_TOKEN)
     app = combined_bot.build_info_app(
         agent="fake-agent", admin_chat_id=999, admin_bot_token="admin-token", guard_model="fake-guard-model"
@@ -17,6 +18,10 @@ def test_build_info_app_wires_bot_data(monkeypatch):
     assert app.bot_data["admin_chat_id"] == 999
     assert app.bot_data["admin_bot_token"] == "admin-token"
     assert app.bot_data["guard_model"] == "fake-guard-model"
+    # build_info_app grants the admin restricted-source access at startup
+    # (news_sources.RESTRICTED_SOURCES: NewsAPI, Perigon) -- confirm it
+    # actually happened, not just that it didn't crash.
+    assert users_db.get_restricted_sources_enabled(999) is True
     handlers = [h for group in app.handlers.values() for h in group]
     assert any(isinstance(h, MessageHandler) for h in handlers)
     # the periodic-push scheduler (docs/bot-features-plan.md item 5) and

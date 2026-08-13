@@ -156,3 +156,26 @@ def test_enabled_sources_gates_on_env_var(monkeypatch):
     monkeypatch.setenv("NEWSAPI_API_KEY", "fake-key")
     names = [name for name, _ in news_sources.enabled_sources()]
     assert "newsapi" in names
+
+
+def test_enabled_sources_include_restricted_true_by_default(monkeypatch):
+    monkeypatch.setenv("NEWSAPI_API_KEY", "fake-key")
+    monkeypatch.setenv("PERIGON_API_KEY", "fake-key")
+    names = [name for name, _ in news_sources.enabled_sources()]
+    assert "newsapi" in names
+    assert "perigon" in names
+
+
+def test_enabled_sources_excludes_restricted_when_false(monkeypatch):
+    monkeypatch.setenv("NEWSAPI_API_KEY", "fake-key")
+    monkeypatch.setenv("PERIGON_API_KEY", "fake-key")
+    monkeypatch.setenv("GNEWS_API_KEY", "fake-key")
+    names = [name for name, _ in news_sources.enabled_sources(include_restricted=False)]
+    assert "newsapi" not in names
+    assert "perigon" not in names
+    # gnews is a real api-class source but not in RESTRICTED_SOURCES -- its
+    # budget has real headroom beyond what news_ingest.py alone uses
+    assert "gnews" in names
+    # unrestricted, always-on sources are unaffected
+    assert "hackernews" in names
+    assert "bbc_business" in names

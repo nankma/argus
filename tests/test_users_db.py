@@ -305,3 +305,28 @@ def test_list_all_interests_deduplicates_across_subscribers(isolated_subscribers
     users_db.set_interests(1, ["bitcoin", "AI"])
     users_db.set_interests(2, ["AI", "robotics"])
     assert users_db.list_all_interests() == ["bitcoin", "AI", "robotics"]
+
+
+def test_get_restricted_sources_enabled_defaults_false(isolated_subscribers_db):
+    assert users_db.get_restricted_sources_enabled(1) is False
+
+
+def test_set_restricted_sources_enabled_true(isolated_subscribers_db):
+    users_db.set_restricted_sources_enabled(1, True)
+    assert users_db.get_restricted_sources_enabled(1) is True
+    # unrelated chat_id is unaffected
+    assert users_db.get_restricted_sources_enabled(2) is False
+
+
+def test_set_restricted_sources_enabled_can_be_revoked(isolated_subscribers_db):
+    users_db.set_restricted_sources_enabled(1, True)
+    users_db.set_restricted_sources_enabled(1, False)
+    assert users_db.get_restricted_sources_enabled(1) is False
+
+
+def test_set_restricted_sources_enabled_upserts_for_unknown_chat(isolated_subscribers_db):
+    """No prior row for this chat_id (e.g. the admin, who bypasses
+    request_access() entirely -- see check_access())."""
+    assert users_db.get_status(42) is None
+    users_db.set_restricted_sources_enabled(42, True)
+    assert users_db.get_restricted_sources_enabled(42) is True

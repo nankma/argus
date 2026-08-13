@@ -300,20 +300,23 @@ looking like the "production" NewsAPI's own terms describe, upgrade to a
 paid plan or drop NewsAPI — don't keep running on the Developer plan past
 that point.
 
-**Sequencing risk, worth stating plainly:** the Perigon and NewsAPI keys
-already exist in Vault and `docker-entrypoint.sh` already fetches both,
-but the budget-cap-plus-shared-write mechanism described above doesn't
-exist yet — it ships with the cache system, not before. If a deploy sets
-either `*_SECRET_OCID` before that mechanism is built,
-`enabled_sources()` picks the source up immediately and calls it
-unthrottled on every `search_news` invocation and every push cycle,
-exhausting the monthly/daily budget in days — the exact failure mode
-this design exists to prevent. **Until this plan is implemented, deploys
-should omit both secret OCIDs from the running container**, even though
-the secrets themselves stay in Vault, ready. GNews doesn't have this
-problem at this project's current scale — its 100/day free-tier limit is
-generous enough that it's safe to enable now, before the cache/budget
-system exists.
+**Sequencing risk — partially mitigated 2026-08-14, not eliminated.**
+The original concern: the Perigon and NewsAPI keys exist in Vault and
+`docker-entrypoint.sh` fetches both, but before this plan was built,
+nothing stopped `search_news` from calling them unthrottled on every
+matching on-demand query from every user. Since resolved for
+*unauthorized* usage: `news_sources.RESTRICTED_SOURCES` gates both behind
+a per-user DB flag (`docs/ai-news-sources.md`'s "Restricted sources"
+section), defaulting to off for everyone except the admin. **What's still
+true:** `try_consume_api_budget` is only ever called from
+`news_ingest.py` — the admin's own `search_news` usage of Perigon/NewsAPI
+is not rate-limited against what the ingestion job already spent that
+day/month. For a single admin user this is a much smaller exposure than
+"anyone can trigger it," but it's not the same as "protected," and is
+worth closing once `search_news` is rewired to read the cache (item 5)
+rather than calling these sources live at all. GNews remains unrestricted
+by design — its 100/day budget has real headroom beyond what
+`news_ingest.py` alone uses.
 
 ## Interaction with `news_push.py`
 

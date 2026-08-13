@@ -361,14 +361,31 @@ SOURCE_REGISTRY = [
 ]
 
 
-def enabled_sources() -> list[tuple[str, callable]]:
+# Sources gated behind per-user access, on top of the env-var gate above --
+# not because they're technically different (they're plain "api"-class
+# sources like GNews), but because their real-world usage is constrained
+# in ways that don't scale to every caller of search_news: NewsAPI's free
+# tier is documented as development/testing only, not production
+# (docs/ai-news-sources.md), and Perigon's 150/month budget is already
+# fully spoken for by news_ingest.py's own scheduled pulls (3/day, see
+# docs/local-news-cache-plan.md) -- search_news calling them too, on every
+# matching on-demand query from every user, would exhaust both almost
+# immediately. GNews is deliberately not here: its 100/day budget has
+# real headroom beyond what news_ingest.py alone uses.
+RESTRICTED_SOURCES = {"newsapi", "perigon"}
+
+
+def enabled_sources(include_restricted: bool = True) -> list[tuple[str, callable]]:
     """(name, fetch_fn) pairs usable right now: always-on free sources, plus
-    key-gated ones whose required env var is set. Same 2-tuple shape as
-    before source_class was added -- callers (agent.py, news_push.py) and
-    tests all unpack exactly (name, fn), so this stays unchanged even
-    though SOURCE_REGISTRY itself grew a 4th field."""
+    key-gated ones whose required env var is set. `include_restricted`
+    additionally excludes RESTRICTED_SOURCES when False -- see
+    agent.py's search_news, the only caller that ever passes False; every
+    other caller (news_ingest.py, news_push.py) keeps the default so
+    they're unaffected. Same 2-tuple shape as before source_class was
+    added -- callers and tests all unpack exactly (name, fn)."""
     return [
         (name, fn)
         for name, fn, required_env, _source_class in SOURCE_REGISTRY
-        if required_env is None or os.environ.get(required_env)
+        if (required_env is None or os.environ.get(required_env))
+        and (include_restricted or name not in RESTRICTED_SOURCES)
     ]
