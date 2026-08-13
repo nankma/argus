@@ -215,24 +215,27 @@ experiment is four prompt variants scored the same way, so it needs
 exactly this harness and nothing else. Worth noting because it makes the
 harness pay for itself twice.
 
-**Third use, and now the most urgent one.** A real incident
-(`docs/guardrails-plan.md`'s "Chinese-language input largely
-misclassified" finding, 2026-08-14) found the router (layer 2) rejecting
-Chinese-language requests as off-topic in 5 of 6 trials, against a
-100%-passing English control on the identical topic — discovered only
-because the new local curl API (`docs/local-testing-api-plan.md`) made
-it cheap to run the same prompt repeatedly. That's exactly the gap this
-harness needs to close permanently, not paper over with one-off manual
-curl runs: **layers 1 (`fails_local_prefilter`) and 2
-(`classify_message`) need to be scoreable standalone**, feeding hundreds
-of prompts directly at just that function — no agent run, no output
-check, no Telegram round-trip anywhere in the loop. This changes the
-harness's scope from "primarily about layer 4" (the original framing)
-to "every guardrail layer, including the ones that gate before the
-agent ever runs" — and it reprioritizes what gets measured first: the
-router's Chinese-language reliability, ahead of the already-known layer-4
-causal question, since it's a live production gap affecting real
-subscribers today, not a design question about a change not yet made.
+**Third use — built, 2026-08-14, `tools/measure_guardrails.py`.** An
+ad-hoc 6-trial manual test (via the new local curl API,
+`docs/local-testing-api-plan.md`) seemed to show the router rejecting
+Chinese-language requests as off-topic in 5 of 6 trials against a
+100%-passing English control. Building the harness to properly measure
+it found the opposite: `classify_message` scored **140/140 (100%)**
+across 14 cases run directly, no HTTP, no tunnel. The original 6-trial
+result turned out to be an SSH tunnel corrupting requests in transit,
+not a router problem at all — see
+`docs/guardrails-plan.md`'s incident write-up for the full comparison
+across four different call paths that isolated this. **The harness is
+what caught its own trigger case as a false positive** — the concrete
+proof that ad-hoc manual trials (what every guardrail measurement in
+this project was, before this) aren't good enough to trust on their own,
+independent of whatever the specific finding turns out to be. Layers 1
+(`fails_local_prefilter`) and 2 (`classify_message`) are now scoreable
+standalone — hundreds of prompts fed directly at just that function, no
+agent run, no output check, no Telegram round-trip anywhere in the loop.
+Layer 4 isn't covered yet; that's the concrete next extension, motivated
+by the one finding from this incident that *did* survive
+re-verification (see below).
 
 **Fourth implication.** Discussing this incident surfaced a related
 design point, recorded in `docs/context-management-plan.md`'s "Planned
@@ -240,7 +243,10 @@ refactor: dispatch settings routes out of the agent" section: settings
 actions (interests/language/push) dispatched by a separate agent from
 news research would make it possible to test and fix one without risking
 a regression in the other — a second, independent justification for that
-refactor beyond the original efficiency argument.
+refactor beyond the original efficiency argument. Grounded in the one
+finding from this incident that held up: a `set_language` confirmation
+being wrongly blocked by layer 4 while the underlying state change
+silently succeeded, reproduced 1/5 with zero tunnel involvement.
 
 **Cost note:** the harness makes real API calls by definition, so it
 shouldn't run on every commit. A manually-triggered job, run when the

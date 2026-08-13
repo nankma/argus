@@ -269,9 +269,11 @@ agent.
   model call means no non-determinism to measure (see the reliability
   discussion in `docs/guardrails-plan.md`)
 - **Testability in isolation — a second, independent justification added
-  2026-08-14.** `docs/guardrails-plan.md`'s Chinese-language misclassification
-  incident includes a `set_language` failure specifically (layer 4 blocked
-  a correct confirmation while the state change silently succeeded). With
+  2026-08-14.** `docs/guardrails-plan.md`'s guardrail-harness incident
+  found a `set_language` failure specifically (layer 4 blocked a correct
+  confirmation while the state change silently succeeded, reproduced 1/5
+  with no tunnel or HTTP layer involved — the one finding from that
+  incident that survived re-verification). With
   settings and research sharing one agent, a fix aimed at settings
   reliability risks regressing research behavior, and there's no clean way
   to test one without the other in the loop. A dedicated settings path

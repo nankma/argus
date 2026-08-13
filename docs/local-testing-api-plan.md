@@ -132,3 +132,30 @@ curled it directly:
 - `"What is new with OpenAI this week?"` → `blocked_at: null`, `category:
   "news_query"`, a real trend report (starts with 📰, real `<b>` tags,
   real links) — the full pipeline, not a stub.
+
+## Known issue: the SSH tunnel itself can be unreliable for repeated calls
+
+**Found 2026-08-14**, during the guardrail-harness incident
+(`docs/guardrails-plan.md`). Running the same Chinese-language request
+repeatedly through `ssh -L 8765:127.0.0.1:8765 ...` produced wrong
+results roughly 25% of the time; the identical request against the same
+running server, hit via the container's Docker bridge IP instead of the
+tunnel, was 100% reliable across every path tested (direct
+`process_message` calls, and `test_api.py`'s real server hit directly).
+**`test_api.py` itself is not implicated** — this was isolated to the
+tunnel hop specifically, most likely something particular to that SSH
+session rather than a property of SSH tunneling generally, but not
+confirmed further.
+
+**Practical implication:** for a one-off manual check, the tunnel is
+fine. For anything where the result actually matters — measuring
+reliability, debugging a suspected bug, anything feeding into a written
+finding — prefer hitting the server via the container's bridge IP
+directly (`docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' myfirstagent-bot`,
+then `curl` that IP from an SSH session on the VM itself, not through the
+`-L` forward) or call `process_message`/the target function directly
+in-container, the way `tools/measure_guardrails.py` calls
+`classify_message` directly rather than through any HTTP layer at all.
+The tunnel's exact failure mode was never root-caused beyond "not this
+project's code" — treat it as untrusted for measurement purposes until
+it is.

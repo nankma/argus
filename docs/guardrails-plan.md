@@ -243,45 +243,51 @@ it from the input.
   layer-2/4 DeepSeek calls, no real API calls in tests) — no architecture
   change needed to fit this in.
 
-## Incident: Chinese-language input largely misclassified as off-topic, and a successful action's confirmation silently blocked
+## Incident: a testing artifact briefly looked like a Chinese-language classification bug, plus one real finding underneath it
 
 **Found 2026-08-14**, running the smoke-test checklist against the new
-local curl API (`docs/local-testing-api-plan.md`) — the first time this
-project could feed the same prompt through layers 1/2/4 repeatedly
-without the friction of real Telegram round-trips, which is exactly what
-surfaced this. Two distinct, real findings, not one.
+local curl API (`docs/local-testing-api-plan.md`) via an SSH tunnel. The
+original write-up here reported two findings. **One of them was wrong —
+corrected the same day, once the harness (`tools/measure_guardrails.py`)
+existed to actually check it.** Left both the original claim and the
+correction in this doc rather than quietly editing it away, since the
+retraction is as much the lesson as the real finding is.
 
-### Finding 1 — layer 2 (the router) misclassifies Chinese-language requests as off-topic
+### Correction — Finding 1 ("the router misclassifies Chinese") was a flaky SSH tunnel, not a router bug
 
-Six trials, four different Chinese phrasings, five different chat_ids,
-all through the real deployed router:
+The original 6-trial test (5 of 6 Chinese phrasings landing on
+`off_topic`, against a 100%-passing English control) was run entirely
+through an SSH port-forward tunnel (`ssh -L 8765:127.0.0.1:8765 ...`).
+Once the harness could call `guardrails.classify_message` directly,
+bypassing the tunnel and the HTTP layer entirely, the picture changed
+completely:
 
-| # | Text | Intent | Result |
-|---|---|---|---|
-| 1 | 我對機器人科技很感興趣，請加入我的追蹤主題 | add interest | `off_topic` |
-| 2 | (same, re-run) | add interest | `off_topic` |
-| 3 | (same, re-run again) | add interest | `news_query` — still wrong category, at least on-topic |
-| 4 | 請把機器人科技加入我的興趣 (shorter) | add interest | `off_topic` |
-| 5 | 我想追蹤機器人科技的新聞 (matches a real subscriber's previously-successful phrasing — see the SHioufen trace investigation earlier this project) | add interest | `off_topic` |
-| 6 | 機器人科技最近有什麼新聞 (plain news query, no interest-setting at all) | news query | `off_topic` |
-| **control** | "What is happening with robotics lately?" (same topic, English) | news query | `news_query` — correct, full report, every time |
+| Path tested | Result |
+|---|---|
+| `classify_message` called directly (the harness, 140 trials across 14 cases) | **140/140 (100%)** |
+| `process_message` called directly inside the container, no HTTP | **5/5** |
+| `test_api.py`'s real server, hit via the container's Docker bridge IP (no tunnel) | **5/5** |
+| `test_api.py`'s real server, hit through the SSH tunnel | ~25% pass |
 
-**5 of 6 Chinese trials failed. The English control on the identical
-topic passed every time.** Not phrasing-specific (four different
-phrasings all failed), not topic-specific (the working English control
-was the same topic), not `set_interest`-specific (a plain news query in
-Chinese failed too). This isolates to Chinese-language input generally,
-against `_ROUTER_PROMPT`'s current classification.
+Same server code, same request, only the network path differs between
+the last two rows. That isolates the fault to the tunnel itself, not to
+anything this project wrote — `guardrails.py`'s router is, as far as
+this has been able to measure, completely reliable for Chinese-language
+input. A diagnostic echo server confirmed the request body wasn't even
+being corrupted at the bytes level (`我對機器人科技很感興趣，請加入我的追蹤主題`
+arrived character-for-character correct via the bridge IP) — the tunnel
+itself was where trouble started, likely some intermittent behavior in
+that specific SSH session rather than anything reproducible about SSH
+tunneling in general.
 
-**Why this matters more than a typical reliability gap:** this bot has
-real Chinese-speaking subscribers today — stored interests like
-`機器人科技`/`科技財經` and a `language` preference of Traditional Chinese
-are already in the live database (see the SHioufen investigation
-earlier this project). This finding means those subscribers are likely
-being silently rejected most of the time they write in Chinese, not a
-theoretical edge case.
+**Why this is worth recording rather than deleting:** this is exactly
+what a real measurement harness is *for* — catching that an ad-hoc
+6-trial manual test drew the wrong conclusion, before that conclusion
+got treated as ground truth and something got "fixed" that was never
+broken. The harness paid for itself on its very first real use, just not
+in the direction expected.
 
-### Finding 2 — a successful action's confirmation gets blocked, but the action itself silently succeeds anyway
+### Finding 2 (confirmed, independent of the tunnel) — a successful action's confirmation gets blocked, but the action itself silently succeeds anyway
 
 `set_language` → "Traditional Chinese": layer 2 correctly classified it
 as `set_language`, the agent correctly ran and called the `set_language`
@@ -302,40 +308,56 @@ take effect silently: the very next message on the same chat_id (a plain
 English Tesla query) came back in Traditional Chinese unprompted, which
 only happens if the stored preference took hold.
 
-This is a different failure shape from Finding 1 — not a rejection of a
-legitimate request, but a **successful state change paired with a
-misleading denial message**, which is arguably worse from a user's
-perspective: nothing tells them what actually happened.
+**Re-verified independently of the tunnel, unlike Finding 1** — 5 fresh
+trials, calling `bot.process_message` directly inside the container, no
+HTTP layer, no SSH tunnel anywhere in the path:
+
+```
+attempt 1 -> blocked_at: None                 | saved_language: 'Traditional Chinese'
+attempt 2 -> blocked_at: layer4_output_check  | saved_language: 'Traditional Chinese'
+attempt 3 -> blocked_at: None                 | saved_language: 'Traditional Chinese'
+attempt 4 -> blocked_at: None                 | saved_language: 'Traditional Chinese'
+attempt 5 -> blocked_at: None                 | saved_language: 'Traditional Chinese'
+```
+
+1 of 5 blocked the confirmation; **all 5 saved the language change
+regardless.** This is a real, reproducible layer-4 reliability gap
+specific to `set_language`, unrelated to the tunnel artifact above — the
+request text here is plain ASCII English, which the tunnel investigation
+never implicated in the first place.
+
+This is a different failure shape from a rejected request: a
+**successful state change paired with an occasional misleading denial
+message**, arguably worse from a user's perspective, since nothing tells
+them what actually happened on the trials where it fires.
 
 ### Not fixed yet, deliberately
 
-Both findings touch the guardrail/router prompts — the same live,
-carefully-tuned logic this doc's own "Unrun experiment" section below
-already flags as needing a proper measurement harness before changing,
-not a guessed fix. This project has hit "the obvious fix made it worse"
-twice already (the layer-4 narrowing attempt, and the Markdown-leak
-follow-up) — a third guess without measurement isn't the move here.
-**Deliberately left open pending the harness described below**, not
-forgotten.
+Finding 2 touches the same live, carefully-tuned guardrail prompt this
+doc's own "Unrun experiment" section below already flags as needing a
+proper measurement harness before changing, not a guessed fix. This
+project has hit "the obvious fix made it worse" twice already (the
+layer-4 narrowing attempt, and the Markdown-leak follow-up) — a third
+guess without measurement isn't the move here. **Deliberately left open
+pending a proper N-trial run through the harness**, not forgotten.
 
 ### What this changes about the harness's priority and scope
 
 Two concrete decisions that came out of discussing this incident,
-recorded here so they aren't lost before the harness is actually built:
+recorded here so they aren't lost. Both still hold even though Finding 1
+didn't survive re-measurement — if anything, the retraction makes the
+case harder to argue against, not weaker:
 
 1. **The harness needs to test layers 1 and 2 standalone, not only
    bundled into an end-to-end run.** `docs/model-portability-plan.md`'s
    "The harness" section already proposed a repeatable N-trial scorer,
-   but scoped primarily around the output check (layer 4). This incident
-   makes the case concretely: `fails_local_prefilter` (layer 1) and
-   `classify_message` (layer 2) both need to be testable by feeding
-   hundreds of prompts directly at just that function, with no agent
-   run, no output check, no Telegram round-trip in the loop at all. That
-   changes both what gets measured first (the router's Chinese-language
-   reliability is now the most urgent open question, ahead of the
-   already-known layer-4 causal question) and how cheap each trial is
-   (a single classifier call is far cheaper to run at volume than a full
-   agent turn).
+   but scoped primarily around the output check (layer 4).
+   `tools/measure_guardrails.py` now exists and does exactly this for
+   layers 1 and 2 — built and run as part of investigating this very
+   incident, and it's what caught Finding 1 as a false positive rather
+   than letting it stand. Layer 4 (relevant to Finding 2, still
+   unresolved) isn't covered by the harness yet — that's the concrete
+   next extension, not a new tool.
 2. **Settings actions (interests/language/push) should be dispatched by
    a separate agent from the research/news agent**, specifically *so*
    they can be tested in isolation without the research agent's behavior
@@ -343,12 +365,12 @@ recorded here so they aren't lost before the harness is actually built:
    `docs/context-management-plan.md`'s already-documented "Planned
    refactor: dispatch settings routes out of the agent" section — that
    refactor was previously justified only by efficiency (Route B pays
-   for an agent loop it doesn't need); this incident adds a second,
-   independent justification: **testability**. Finding 2 above is a
-   `set_language` failure specifically, and having settings handling
-   live in the same agent as news research makes it harder to isolate
-   whether a fix for one risks regressing the other. Recorded in that
-   doc's open questions, not duplicated here.
+   for an agent loop it doesn't need); Finding 2, which survived
+   re-verification, adds a second, independent justification:
+   **testability**. It's a `set_language` failure specifically, and
+   having settings handling live in the same agent as news research
+   makes it harder to isolate whether a fix for one risks regressing the
+   other. Recorded in that doc's open questions, not duplicated here.
 
 ## Unrun experiment: what actually made the output check reliable
 
