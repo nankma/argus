@@ -32,6 +32,36 @@ items whether or not any of them are actually relevant — this is why
 matched; the model reading the titles is currently the only thing that
 catches this. See `docs/local-news-cache-plan.md` for where this is headed.
 
+## Summary extraction (fixed 2026-08-13)
+
+`_fetch_rss` previously hardcoded `summary=None` for every RSS source,
+discarding whatever the feed's own `<description>` provided — meaning the
+model only ever saw a bare title, never the lede paragraph a publisher
+already wrote. Confirmed live this was throwing away real content: BBC
+gives a one-line description, Guardian a full ~1200-char editorial lede,
+MarketWatch a sentence explicitly explaining *why* a stock moved (the
+exact kind of detail a title alone won't carry). Fixed via `_clean_summary`
+(strips embedded HTML, normalizes whitespace, caps at 300 chars — same
+cap arXiv's summary already used).
+
+**Verified live across all 21 enabled sources: 18 now return a real
+summary. Three are structurally summary-less** — confirmed via
+`feedparser`, not assumed:
+
+| Source | Why no summary |
+|---|---|
+| `hackernews` | Algolia's search API returns metadata about a submission, not body text — most HN posts just link externally, there's nothing to summarize |
+| `huggingface_blog` | Feed genuinely has no `summary`/`description`/`content` field at all |
+| `nikkei_asia` | Same — the RDF feed provides title/link/date only, no excerpt |
+
+For those three, and for anything a summary's lede doesn't happen to
+mention (e.g., a consequence reported later in the article body, not the
+opening paragraph), get closer to the truth than a summary offers,
+retrieving full article content would be needed — see
+`docs/local-news-cache-plan.md`'s open question on this, since it's a
+materially bigger decision than this fix (scraping, paywalls, bot
+defenses, and per-provider free-tier content truncation all apply).
+
 ## Enabled now (free, no key required)
 
 ### AI-industry press (original scope)

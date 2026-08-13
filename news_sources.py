@@ -20,6 +20,7 @@ for what each source is and how to add a new one.
 
 import calendar
 import os
+import re
 from datetime import datetime, timezone
 
 import feedparser
@@ -55,6 +56,25 @@ def _parse_rss_published(entry) -> datetime | None:
     if not parsed:
         return None
     return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_summary(raw: str | None, max_len: int = 300) -> str | None:
+    """feedparser's entry.summary carries the feed's own <description>,
+    which several sources give as a real lede paragraph (confirmed live:
+    Guardian gives ~1200 chars of actual editorial context, MarketWatch a
+    full sentence explaining *why* a stock moved) -- previously discarded
+    outright by _fetch_rss hardcoding summary=None, so the model only ever
+    saw a bare title. Some feeds embed raw HTML (<p>, <a href>) in the
+    description; stripped here since it's read by the model, not rendered.
+    Returns None (not "") when the feed genuinely has nothing, so downstream
+    code can still tell "no summary" from "empty after cleaning" apart."""
+    if not raw:
+        return None
+    text = _HTML_TAG_RE.sub("", raw).replace("\n", " ").strip()
+    return text[:max_len] if text else None
 
 
 # --- Free, no-key sources ------------------------------------------------
@@ -117,7 +137,7 @@ def _fetch_rss(url: str, source_name: str, max_results: int = 5) -> list[dict]:
             "title": entry.get("title"),
             "link": entry.get("link"),
             "source": source_name,
-            "summary": None,
+            "summary": _clean_summary(entry.get("summary")),
             "published": entry.get("published"),
             "published_dt": _parse_rss_published(entry),
         }
