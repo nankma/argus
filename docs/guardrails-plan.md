@@ -243,6 +243,113 @@ it from the input.
   layer-2/4 DeepSeek calls, no real API calls in tests) — no architecture
   change needed to fit this in.
 
+## Incident: Chinese-language input largely misclassified as off-topic, and a successful action's confirmation silently blocked
+
+**Found 2026-08-14**, running the smoke-test checklist against the new
+local curl API (`docs/local-testing-api-plan.md`) — the first time this
+project could feed the same prompt through layers 1/2/4 repeatedly
+without the friction of real Telegram round-trips, which is exactly what
+surfaced this. Two distinct, real findings, not one.
+
+### Finding 1 — layer 2 (the router) misclassifies Chinese-language requests as off-topic
+
+Six trials, four different Chinese phrasings, five different chat_ids,
+all through the real deployed router:
+
+| # | Text | Intent | Result |
+|---|---|---|---|
+| 1 | 我對機器人科技很感興趣，請加入我的追蹤主題 | add interest | `off_topic` |
+| 2 | (same, re-run) | add interest | `off_topic` |
+| 3 | (same, re-run again) | add interest | `news_query` — still wrong category, at least on-topic |
+| 4 | 請把機器人科技加入我的興趣 (shorter) | add interest | `off_topic` |
+| 5 | 我想追蹤機器人科技的新聞 (matches a real subscriber's previously-successful phrasing — see the SHioufen trace investigation earlier this project) | add interest | `off_topic` |
+| 6 | 機器人科技最近有什麼新聞 (plain news query, no interest-setting at all) | news query | `off_topic` |
+| **control** | "What is happening with robotics lately?" (same topic, English) | news query | `news_query` — correct, full report, every time |
+
+**5 of 6 Chinese trials failed. The English control on the identical
+topic passed every time.** Not phrasing-specific (four different
+phrasings all failed), not topic-specific (the working English control
+was the same topic), not `set_interest`-specific (a plain news query in
+Chinese failed too). This isolates to Chinese-language input generally,
+against `_ROUTER_PROMPT`'s current classification.
+
+**Why this matters more than a typical reliability gap:** this bot has
+real Chinese-speaking subscribers today — stored interests like
+`機器人科技`/`科技財經` and a `language` preference of Traditional Chinese
+are already in the live database (see the SHioufen investigation
+earlier this project). This finding means those subscribers are likely
+being silently rejected most of the time they write in Chinese, not a
+theoretical edge case.
+
+### Finding 2 — a successful action's confirmation gets blocked, but the action itself silently succeeds anyway
+
+`set_language` → "Traditional Chinese": layer 2 correctly classified it
+as `set_language`, the agent correctly ran and called the `set_language`
+tool, and the database was actually updated — confirmed directly against
+the live container:
+
+```
+sqlite3 /data/subscribers.db "SELECT chat_id, language FROM subscribers WHERE chat_id = 990"
+→ (990, 'Traditional Chinese')
+```
+
+But layer 4 (`is_output_on_topic`) blocked the *confirmation reply* and
+swapped it for the generic redirect message ("I only help with tech
+industry news..."). The user sees a message that reads like the bot
+didn't understand the request at all, with no indication that their
+request actually succeeded. Circumstantial confirmation this really did
+take effect silently: the very next message on the same chat_id (a plain
+English Tesla query) came back in Traditional Chinese unprompted, which
+only happens if the stored preference took hold.
+
+This is a different failure shape from Finding 1 — not a rejection of a
+legitimate request, but a **successful state change paired with a
+misleading denial message**, which is arguably worse from a user's
+perspective: nothing tells them what actually happened.
+
+### Not fixed yet, deliberately
+
+Both findings touch the guardrail/router prompts — the same live,
+carefully-tuned logic this doc's own "Unrun experiment" section below
+already flags as needing a proper measurement harness before changing,
+not a guessed fix. This project has hit "the obvious fix made it worse"
+twice already (the layer-4 narrowing attempt, and the Markdown-leak
+follow-up) — a third guess without measurement isn't the move here.
+**Deliberately left open pending the harness described below**, not
+forgotten.
+
+### What this changes about the harness's priority and scope
+
+Two concrete decisions that came out of discussing this incident,
+recorded here so they aren't lost before the harness is actually built:
+
+1. **The harness needs to test layers 1 and 2 standalone, not only
+   bundled into an end-to-end run.** `docs/model-portability-plan.md`'s
+   "The harness" section already proposed a repeatable N-trial scorer,
+   but scoped primarily around the output check (layer 4). This incident
+   makes the case concretely: `fails_local_prefilter` (layer 1) and
+   `classify_message` (layer 2) both need to be testable by feeding
+   hundreds of prompts directly at just that function, with no agent
+   run, no output check, no Telegram round-trip in the loop at all. That
+   changes both what gets measured first (the router's Chinese-language
+   reliability is now the most urgent open question, ahead of the
+   already-known layer-4 causal question) and how cheap each trial is
+   (a single classifier call is far cheaper to run at volume than a full
+   agent turn).
+2. **Settings actions (interests/language/push) should be dispatched by
+   a separate agent from the research/news agent**, specifically *so*
+   they can be tested in isolation without the research agent's behavior
+   being a confound. This directly reinforces
+   `docs/context-management-plan.md`'s already-documented "Planned
+   refactor: dispatch settings routes out of the agent" section — that
+   refactor was previously justified only by efficiency (Route B pays
+   for an agent loop it doesn't need); this incident adds a second,
+   independent justification: **testability**. Finding 2 above is a
+   `set_language` failure specifically, and having settings handling
+   live in the same agent as news research makes it harder to isolate
+   whether a fix for one risks regressing the other. Recorded in that
+   doc's open questions, not duplicated here.
+
 ## Unrun experiment: what actually made the output check reliable
 
 **Status: not run.** Identified 2026-08-09 while writing up the layer-4

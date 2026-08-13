@@ -215,9 +215,40 @@ experiment is four prompt variants scored the same way, so it needs
 exactly this harness and nothing else. Worth noting because it makes the
 harness pay for itself twice.
 
+**Third use, and now the most urgent one.** A real incident
+(`docs/guardrails-plan.md`'s "Chinese-language input largely
+misclassified" finding, 2026-08-14) found the router (layer 2) rejecting
+Chinese-language requests as off-topic in 5 of 6 trials, against a
+100%-passing English control on the identical topic — discovered only
+because the new local curl API (`docs/local-testing-api-plan.md`) made
+it cheap to run the same prompt repeatedly. That's exactly the gap this
+harness needs to close permanently, not paper over with one-off manual
+curl runs: **layers 1 (`fails_local_prefilter`) and 2
+(`classify_message`) need to be scoreable standalone**, feeding hundreds
+of prompts directly at just that function — no agent run, no output
+check, no Telegram round-trip anywhere in the loop. This changes the
+harness's scope from "primarily about layer 4" (the original framing)
+to "every guardrail layer, including the ones that gate before the
+agent ever runs" — and it reprioritizes what gets measured first: the
+router's Chinese-language reliability, ahead of the already-known layer-4
+causal question, since it's a live production gap affecting real
+subscribers today, not a design question about a change not yet made.
+
+**Fourth implication.** Discussing this incident surfaced a related
+design point, recorded in `docs/context-management-plan.md`'s "Planned
+refactor: dispatch settings routes out of the agent" section: settings
+actions (interests/language/push) dispatched by a separate agent from
+news research would make it possible to test and fix one without risking
+a regression in the other — a second, independent justification for that
+refactor beyond the original efficiency argument.
+
 **Cost note:** the harness makes real API calls by definition, so it
 shouldn't run on every commit. A manually-triggered job, run when the
-model or a guardrail prompt changes, is the right cadence.
+model or a guardrail prompt changes, is the right cadence. Layers 1/2
+standalone runs are far cheaper per trial than a full agent turn (one
+classifier call vs. a whole pipeline), so "hundreds of prompts" is
+realistic for those two specifically in a way it wouldn't be for
+layer 4 or a full end-to-end run.
 
 ## Open questions
 

@@ -268,6 +268,19 @@ agent.
 - Route B becomes deterministic and therefore fully unit-testable — no
   model call means no non-determinism to measure (see the reliability
   discussion in `docs/guardrails-plan.md`)
+- **Testability in isolation — a second, independent justification added
+  2026-08-14.** `docs/guardrails-plan.md`'s Chinese-language misclassification
+  incident includes a `set_language` failure specifically (layer 4 blocked
+  a correct confirmation while the state change silently succeeded). With
+  settings and research sharing one agent, a fix aimed at settings
+  reliability risks regressing research behavior, and there's no clean way
+  to test one without the other in the loop. A dedicated settings path
+  would let `set_interest`/`remove_interest`/`start_push`/`stop_push`/
+  `set_language` be measured and fixed independently of `news_query`'s own
+  (separately-imperfect) reliability — this was the original efficiency
+  argument's blind spot: it justified the refactor on cost, not on the
+  fact that two very different reliability problems currently share one
+  blast radius.
 
 **Open design points:**
 
