@@ -1,9 +1,8 @@
 # Local News Cache Plan
 
-Nothing here is built yet — this doc captures the design and the decisions
-to make before implementing, same pattern as the other `docs/*-plan.md`
-files. **Do not implement from this doc until it's been reviewed and the
-open questions below are resolved.**
+This doc captures the design, same pattern as the other `docs/*-plan.md`
+files. **All open questions are resolved (see below) — implementation is
+in progress.**
 
 **The ask:** stop calling news sources live on every query. Instead, pull
 from all enabled sources on a schedule, cache what's fetched locally with
@@ -163,8 +162,14 @@ CoreWeave, stock reacts" → `IT` (cloud infrastructure), `Hardware` (chips),
 `Finance` (the deal itself), `Stock` (the price reaction). All four
 present, matching the request's own example.
 
-**This table is a starting proposal, not a final answer — it's the first
-thing to sign off on or revise before anything gets implemented.**
+**Resolved as a v1, not a final answer.** Confirmed this table is coarser
+than it will eventually need to be — but the fix is refining it later
+against real classified data, not blocking implementation on getting it
+right up front. A category taxonomy is cheap to revise (relabel/resplit
+existing cache entries, no schema migration, no code path depends on the
+exact category names beyond string matching) — better to ship this
+version, see what real articles actually get tagged, and refine from
+observed gaps than to keep guessing categories against no data at all.
 
 ## Classification mechanism
 
@@ -232,58 +237,78 @@ won't have it either — no different from today. The cache makes relevance
 *filtering* correct and cheap; it doesn't manufacture coverage that
 doesn't exist.
 
-**Recommendation: keep a live fallback for on-demand chat queries.** If
-stage 1 + stage 2 over the cache come back empty, fall back to a live
-call against the query-capable sources specifically (`hackernews`,
-`arxiv`, and `gnews`/`perigon`, now both keyed — see
-`docs/ai-news-sources.md`) — the same sources this doc's own source-class
-tagging already identifies as the only ones that do real search. This is
-a hybrid, not a full replacement, and it's the honest scope: **the cache
-is the fast/cheap path for broad interest-driven coverage; live search is
-what's still needed for a specific one-off ask.** Scheduled push digests
-don't need this fallback — there's no single query under pressure there,
-only whatever's freshly cached.
+**Resolved design: per-source pull frequency, one mechanism, not two.**
+Earlier drafts of this doc proposed reserving budget-limited sources
+(Perigon) for reactive on-demand fallback only, excluded from the
+periodic pull entirely. Revised: **every source participates in the same
+periodic ingestion job, each at its own safe frequency** — simpler than
+maintaining two separate mechanisms (scheduled pull for free sources,
+reactive-only fallback for capped ones), and it means a capped source's
+scarce calls proactively broaden the cache instead of only reacting to a
+miss.
 
-**Refinement: a fallback call writes into the same shared cache, it
-doesn't just answer the one query that triggered it.** The point of a
-budget-limited source (Perigon: 150 requests/month) isn't well served by
-treating each on-demand fallback as a private, throwaway call for
-whoever happened to ask — that wastes a scarce resource on exactly one
-person's question when three other subscribers might ask something the
-same result would have answered too. Instead: a fallback fetch gets
-classified and written into the cache using the *same* file format,
-category tags, and 2-day TTL as the periodic pull. **One Perigon call can
-then satisfy every user whose interests match it for the next two days,**
-not just the query that spent the call. This is the actual reason the
-cache and the fallback can't be designed as two separate mechanisms —
-they need to share one write path from the start.
+| Source | Frequency | Why |
+|---|---|---|
+| Unrestricted (RSS, `hackernews`, `arxiv`) | Every 4h | No real budget constraint |
+| GNews | Every 4h | 100/day budget comfortably covers 6 pulls/day |
+| Perigon | 3x/day | 150/month budget — see below |
+| NewsAPI | 1x/day | Individual-use judgment — see below |
+
+A live, reactive fallback for a specific on-demand query that still comes
+up empty after all of the above (an AAOI-style edge case) remains a
+possible later addition, but isn't required for v1 — proactively pulling
+from Perigon and NewsAPI several times a day already broadens the
+cache's real-search coverage well beyond what the free-tier RSS sources
+alone provide, which should make a total miss meaningfully rarer than it
+is today.
+
+**Every pull — scheduled, any source — writes into the same shared
+cache**, not a private result for whoever triggered it. This is the
+actual reason a budget-limited source is worth having in the cache
+architecture at all: **one Perigon call can satisfy every subscriber
+whose interests match it for the next two days**, not just one query.
+Without a shared cache, a source with a 150/month budget could really
+only ever answer 150 individual questions/month across every user
+combined — with it, those same 150 calls seed content that any number of
+matching queries can draw from within each call's 2-day cache window.
 
 **Worked example: Perigon's budget, concretely.** 150 requests/month,
 free/non-commercial tier (see `docs/ai-news-sources.md`'s key-acquisition
-section for why it was picked over NewsAPI). Reserved for on-demand
-fallback only — never called by the periodic pull or by push digests,
-both of which run automatically and frequently enough to exhaust a
-150/month budget within days on their own. Capped at **3 calls/day**
-(≈93/month), leaving ≈57/month headroom for testing. When the daily cap
-is hit, the call is skipped (not attempted) and logged, same shape as
-`news_push.py`'s existing per-cycle outcome logging — falls through to
-whatever other live sources are available, same as any single source
-failing today. Tracking the daily count is a small, global piece of
-state (source name, date, count — reset when the date rolls over),
-natural to add to `users_db.py` alongside everything else it already
-tracks, rather than a new separate mechanism.
+section). 3 pulls/day ≈ 93/month, leaving ≈57/month headroom for testing.
+When the daily cap is hit, that cycle's pull is skipped (not attempted)
+and logged, same shape as `news_push.py`'s existing per-cycle outcome
+logging. Tracking the daily count is a small, global piece of state
+(source name, date, count — reset when the date rolls over), natural to
+add to `users_db.py` alongside everything else it already tracks.
 
-**Sequencing risk, worth stating plainly:** the Perigon key already
-exists in Vault and `docker-entrypoint.sh` already fetches it, but the
-budget-cap-plus-shared-write mechanism described above doesn't exist yet
-— it ships with the cache system, not before. If a deploy sets
-`PERIGON_API_KEY_SECRET_OCID` before that mechanism is built,
-`enabled_sources()` picks Perigon up immediately and calls it
+**NewsAPI — added, with its own real constraint documented so it isn't
+forgotten.** NewsAPI's free "Developer" plan terms, quoted directly from
+their own criteria: *"You should only use the Developer plan if your
+project is in development. If your project is being used in production,
+please upgrade to a paid plan."* This project's own judgment (recorded
+here, not re-litigated further): a personal, unpaid, invite-gated pilot
+run by an individual is a reasonable read of "in development," not
+"production" in the sense that clause is aimed at — but that judgment
+is worth being able to revisit, not silently forgotten. **1 pull/day**,
+chosen deliberately conservative relative to whatever NewsAPI's actual
+technical rate limit turns out to be (not confirmed live — see
+`docs/ai-news-sources.md`). **Trigger to revisit:** if this project is
+ever monetized, opened beyond an invite-only pilot, or otherwise starts
+looking like the "production" NewsAPI's own terms describe, upgrade to a
+paid plan or drop NewsAPI — don't keep running on the Developer plan past
+that point.
+
+**Sequencing risk, worth stating plainly:** the Perigon and NewsAPI keys
+already exist in Vault and `docker-entrypoint.sh` already fetches both,
+but the budget-cap-plus-shared-write mechanism described above doesn't
+exist yet — it ships with the cache system, not before. If a deploy sets
+either `*_SECRET_OCID` before that mechanism is built,
+`enabled_sources()` picks the source up immediately and calls it
 unthrottled on every `search_news` invocation and every push cycle,
-exhausting the 150/month budget in days — the exact failure mode this
-whole design exists to prevent. **Until this plan is implemented, deploys
-should omit the Perigon secret OCID from the running container**, even
-though the secret itself stays in Vault, ready. GNews doesn't have this
+exhausting the monthly/daily budget in days — the exact failure mode
+this design exists to prevent. **Until this plan is implemented, deploys
+should omit both secret OCIDs from the running container**, even though
+the secrets themselves stay in Vault, ready. GNews doesn't have this
 problem at this project's current scale — its 100/day free-tier limit is
 generous enough that it's safe to enable now, before the cache/budget
 system exists.
@@ -299,41 +324,32 @@ the first version** — the push path's own dedup (`pushed_links`) already
 solves its correctness requirement independent of this change, so
 converging it can happen once the cache path is proven for `search_news`.
 
-## Open questions (need a decision before implementation starts)
+## Open questions — all resolved, implementation cleared to start
 
-1. **Pull interval.** Not yet chosen. Tradeoffs: shorter = fresher cache,
-   more network calls against other people's infrastructure and more
-   classification-call cost; longer = cheaper, staler. `news_push.py`'s
-   existing tick is every 15 minutes for *checking* who's due, but actual
-   per-subscriber pushes are hours apart — a similar shape (frequent
-   scheduler tick, coarser actual-pull interval) probably fits here too.
-   Suggested starting point: every 4 hours, matching the most common
-   `push_interval_hours` seen in real subscriber data — but this is a
-   real choice, not a default to accept blindly.
-2. **Category taxonomy** — is the 13-category table above right, too
-   coarse, too fine, missing something the current source mix needs?
-3. ~~**Live fallback** — confirm the recommendation above is actually
-   wanted, not assumed.~~ **Resolved**: keep it for on-demand queries
-   only, skip it for push digests, and — the refinement added once
-   Perigon's real budget forced the question — a fallback call writes
-   into the shared cache rather than answering just the query that
-   triggered it. See the worked example above.
-4. **Classification model** — which model handles the batched
-   classification call? Same DeepSeek instance already in use, or does
-   this wait on `docs/model-portability-plan.md`'s Level 2 routing being
-   built first? They're independent — this can ship against the current
-   single model and adopt cheaper routing later without a redesign — but
-   worth deciding explicitly rather than defaulting silently.
-5. **Cleanup mechanism** — a dedicated scheduled sweep (its own
-   APScheduler job), or opportunistic cleanup folded into the ingestion
-   tick (delete-expired-then-fetch-new, same cycle)? Leans toward the
-   latter — one job, one responsibility, no separate schedule to reason
-   about — but stated as a lean, not a decision.
-6. **Storage engine, later.** Files are the explicit, deliberate choice
-   for now (per the request). Same reasoning pattern as
-   `docs/data-layer-plan.md`'s SQLite deferral: revisit only if a real
-   trigger shows up (e.g., needing to query across cached articles in ways
-   flat files make awkward), not preemptively.
+1. ~~**Pull interval.**~~ **Resolved**: per-source, not one global
+   number. See the frequency table above — unrestricted sources and
+   GNews every 4h, Perigon 3x/day, NewsAPI 1x/day.
+2. ~~**Category taxonomy**~~ **Resolved as a v1**: ship the 13-category
+   table as-is, refine later against real classified data rather than
+   block on getting it perfect up front.
+3. ~~**Live fallback**~~ **Resolved, then superseded**: the original
+   "reserve capped sources for reactive fallback" idea was replaced by
+   giving every source its own periodic-pull frequency instead (see
+   above) — simpler, one mechanism instead of two. A true on-demand
+   fallback for a still-empty query remains a possible later addition,
+   not required for v1.
+4. ~~**Classification model**~~ **Resolved**: the current DeepSeek
+   instance, now. `docs/model-portability-plan.md`'s Level 2 routing can
+   swap in a cheaper model later without a redesign — independent
+   decision, not a blocker.
+5. ~~**Cleanup mechanism**~~ **Resolved**: folded into the ingestion
+   tick — delete expired, then fetch new, same cycle, one job.
+6. **Storage engine, later.** Still the one open item, and deliberately
+   left open rather than resolved: files for now, per the original
+   request. Same reasoning pattern as `docs/data-layer-plan.md`'s SQLite
+   deferral — revisit only if a real trigger shows up (e.g., needing to
+   query across cached articles in ways flat files make awkward), not
+   preemptively.
 
 ## Non-goals for this version
 
