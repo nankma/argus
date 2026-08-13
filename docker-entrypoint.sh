@@ -43,5 +43,11 @@ fi
 if [ -n "$PHOENIX_API_KEY_SECRET_OCID" ]; then
     export PHOENIX_API_KEY="$(fetch_secret "$PHOENIX_API_KEY_SECRET_OCID")"
 fi
+if [ -n "$GNEWS_API_KEY_SECRET_OCID" ]; then
+    export GNEWS_API_KEY="$(fetch_secret "$GNEWS_API_KEY_SECRET_OCID")"
+fi
+if [ -n "$PERIGON_API_KEY_SECRET_OCID" ]; then
+    export PERIGON_API_KEY="$(fetch_secret "$PERIGON_API_KEY_SECRET_OCID")"
+fi
 
 exec "$@"
