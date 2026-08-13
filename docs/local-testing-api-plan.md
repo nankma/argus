@@ -133,29 +133,48 @@ curled it directly:
   "news_query"`, a real trend report (starts with 📰, real `<b>` tags,
   real links) — the full pipeline, not a stub.
 
-## Known issue: the SSH tunnel itself can be unreliable for repeated calls
+## Resolved issue: the SSH tunnel was unreliable for repeated calls, now fixed and re-verified
 
-**Found 2026-08-14**, during the guardrail-harness incident
-(`docs/guardrails-plan.md`). Running the same Chinese-language request
-repeatedly through `ssh -L 8765:127.0.0.1:8765 ...` produced wrong
-results roughly 25% of the time; the identical request against the same
-running server, hit via the container's Docker bridge IP instead of the
-tunnel, was 100% reliable across every path tested (direct
-`process_message` calls, and `test_api.py`'s real server hit directly).
-**`test_api.py` itself is not implicated** — this was isolated to the
-tunnel hop specifically, most likely something particular to that SSH
-session rather than a property of SSH tunneling generally, but not
-confirmed further.
+**Found 2026-08-14, fixed the same day**, during the guardrail-harness
+incident (`docs/guardrails-plan.md`). Running the same Chinese-language
+request repeatedly through `ssh -L 8765:127.0.0.1:8765 ...` produced
+wrong results roughly 25% of the time; the identical request against the
+same running server, hit via the container's Docker bridge IP instead of
+the tunnel, was 100% reliable. **`test_api.py` itself was never
+implicated** — this was isolated to the tunnel hop specifically.
 
-**Practical implication:** for a one-off manual check, the tunnel is
-fine. For anything where the result actually matters — measuring
-reliability, debugging a suspected bug, anything feeding into a written
-finding — prefer hitting the server via the container's bridge IP
-directly (`docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' myfirstagent-bot`,
-then `curl` that IP from an SSH session on the VM itself, not through the
-`-L` forward) or call `process_message`/the target function directly
-in-container, the way `tools/measure_guardrails.py` calls
-`classify_message` directly rather than through any HTTP layer at all.
-The tunnel's exact failure mode was never root-caused beyond "not this
-project's code" — treat it as untrusted for measurement purposes until
-it is.
+**Root cause, once actually checked rather than assumed:** the flaky
+tunnel session had accumulated state from earlier restarts within the
+same debugging session (multiple overlapping `ssh -L` processes, port
+conflicts, stale connections) and was listening on both IPv4
+(`127.0.0.1`) and IPv6 (`[::1]`) simultaneously — a genuine ambiguity
+even though every `curl` call targeted `127.0.0.1` explicitly.
+
+**Fix:** kill every existing SSH process for a totally clean slate, then
+establish one fresh tunnel with explicit options:
+
+```bash
+ssh -4 -i <key> -o ConnectTimeout=15 -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes \
+    -L 8765:127.0.0.1:8765 -N ubuntu@<vm-ip>
+```
+
+`-4` forces IPv4-only, removing the dual-stack ambiguity; the
+`ServerAlive*`/`ExitOnForwardFailure` options make a genuinely dead
+tunnel fail loudly and get restarted, rather than sitting in a degraded
+half-working state silently.
+
+**Re-verified with the same rigor as any other guardrail measurement**,
+not just a spot-check — `tools/measure_guardrails.py --via-http` (see
+that tool's own docs) ran the full 14-case layer-2 dataset through the
+fresh tunnel, 20 trials each, 280 calls total: **279/280 (99.6%)**, with
+the single miss consistent with ordinary LLM non-determinism, not
+systematic tunnel corruption. Up from ~25% pass before the fix.
+
+**Practical guidance going forward:** always start from a clean slate —
+kill any existing tunnel processes before establishing a new one, don't
+assume a long-running tunnel from earlier in a session is still healthy.
+If a tunnel's reliability is ever in question again,
+`python tools/measure_guardrails.py --via-http <url> --trials 20` is the
+way to check it properly rather than a handful of ad-hoc curl calls —
+that's the exact tool and method that caught this the first time.

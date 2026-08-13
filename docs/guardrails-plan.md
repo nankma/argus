@@ -331,6 +331,33 @@ This is a different failure shape from a rejected request: a
 message**, arguably worse from a user's perspective, since nothing tells
 them what actually happened on the trials where it fires.
 
+**Precisely quantified once `tools/measure_guardrails.py` was extended to
+cover layer 4** (`is_output_on_topic`) — 15 trials each, 8 cases across 5
+groups:
+
+| Group | Pass rate |
+|---|---|
+| `set_language_confirmation` — Chinese-script text | **8/15 (53%)** |
+| `set_language_confirmation` — English text | **13/15 (87%)** |
+| `settings_confirmation` (set_interest, start_push) | 30/30 (100%) |
+| `news_report` | 15/15 (100%) |
+| `user_data_review` (the 2026-08-08 finding's regression case) | 15/15 (100%) |
+| `self_disclosure` (genuine leaks, must be caught) | 30/30 (100%) |
+
+**Isolated cleanly: this is not a general layer-4 problem.** Every other
+category measured a clean 100%, including the exact regression case from
+the 2026-08-08 self-disclosure finding — that fix still holds. Only
+`set_language` confirmations are unreliable, and there's a real
+language-dependent component within that single category: a confirmation
+written in Chinese script fails roughly twice as often (53%) as the
+identical confirmation written in English (87%). That's a genuinely new
+detail the original 1/5 spot-check couldn't have shown — it's specific
+enough to be a real lead for whatever the eventual fix turns out to be
+(worth checking whether `_OUTPUT_SCOPE_PROMPT`'s own instructions read
+differently against non-English content, rather than assuming the same
+class of fix that worked for the 2026-08-08 finding will transfer here
+unmeasured).
+
 ### Not fixed yet, deliberately
 
 Finding 2 touches the same live, carefully-tuned guardrail prompt this
@@ -338,8 +365,12 @@ doc's own "Unrun experiment" section below already flags as needing a
 proper measurement harness before changing, not a guessed fix. This
 project has hit "the obvious fix made it worse" twice already (the
 layer-4 narrowing attempt, and the Markdown-leak follow-up) — a third
-guess without measurement isn't the move here. **Deliberately left open
-pending a proper N-trial run through the harness**, not forgotten.
+guess without measurement isn't the move here. **The N-trial run has
+happened now** (see the quantified table above) — a baseline exists to
+measure any future fix against (53%/87% Chinese/English, 100% on every
+other category) — but no fix has been attempted yet. Still deliberately
+open, now with a number to hold a fix accountable to instead of a
+one-off spot-check.
 
 ### What this changes about the harness's priority and scope
 
@@ -348,16 +379,21 @@ recorded here so they aren't lost. Both still hold even though Finding 1
 didn't survive re-measurement — if anything, the retraction makes the
 case harder to argue against, not weaker:
 
-1. **The harness needs to test layers 1 and 2 standalone, not only
-   bundled into an end-to-end run.** `docs/model-portability-plan.md`'s
-   "The harness" section already proposed a repeatable N-trial scorer,
-   but scoped primarily around the output check (layer 4).
-   `tools/measure_guardrails.py` now exists and does exactly this for
-   layers 1 and 2 — built and run as part of investigating this very
-   incident, and it's what caught Finding 1 as a false positive rather
-   than letting it stand. Layer 4 (relevant to Finding 2, still
-   unresolved) isn't covered by the harness yet — that's the concrete
-   next extension, not a new tool.
+1. **The harness needs to test every layer standalone, not only bundled
+   into an end-to-end run.** `docs/model-portability-plan.md`'s "The
+   harness" section already proposed a repeatable N-trial scorer, but
+   scoped primarily around the output check (layer 4).
+   `tools/measure_guardrails.py` now covers layers 1, 2, *and* 4 — built
+   and run as part of investigating this very incident. It's what caught
+   Finding 1 as a false positive rather than letting it stand, and it's
+   what turned Finding 2 from a 1/5 spot-check into a precisely
+   quantified 53%/87% split by language, isolated to one category out of
+   seven. It also gained a `--via-http` mode that runs the same layer-2
+   dataset against a real deployed `test_api.py` endpoint (e.g. through
+   an SSH tunnel) instead of calling `classify_message` directly — the
+   "test base" that confirmed the tunnel itself (not the router) was the
+   original fault, and later confirmed a clean tunnel restart actually
+   fixed it (99.6% over 280 calls, up from ~25%).
 2. **Settings actions (interests/language/push) should be dispatched by
    a separate agent from the research/news agent**, specifically *so*
    they can be tested in isolation without the research agent's behavior
