@@ -128,6 +128,20 @@ def test_enabled_sources_always_includes_free_sources(monkeypatch):
         "techcrunch_ai",
         "venturebeat_ai",
         "mit_tech_review",
+        "bbc_business",
+        "bbc_technology",
+        "guardian_business",
+        "guardian_technology",
+        "marketwatch",
+        "economist_business",
+        "economist_tech",
+        "nikkei_asia",
+        "wired_business",
+        "the_register",
+        "computerworld",
+        "zdnet",
+        "engadget",
+        "techradar",
     ):
         assert free_source in names
     for gated_source in ("newsapi", "gnews", "perigon"):
