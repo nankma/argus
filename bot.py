@@ -34,6 +34,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from langchain_deepseek import ChatDeepSeek
 from agent import MODEL, build_agent, run_agent, setup_telemetry
 import guardrails
+import news_ingest
 import news_push
 import users_db
 
@@ -45,6 +46,12 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 # just fine-grained enough that a due subscriber isn't kept waiting long
 # past their actual interval.
 PUSH_TICK_SECONDS = 900
+
+# Same tick shape as PUSH_TICK_SECONDS -- check frequently, let each
+# source's own interval (news_ingest._SOURCE_INTERVAL_HOURS, 4h default,
+# longer for budget-capped sources) decide whether this tick actually does
+# anything. See docs/local-news-cache-plan.md.
+INGEST_TICK_SECONDS = 900
 
 # Per-chat conversation history. In-memory only — lost on restart, same as
 # the CLI's messages list. Not persisted; fine for now, revisit if needed.
@@ -429,6 +436,21 @@ def register_push_job(app: Application) -> None:
     app.job_queue.run_repeating(_push_job, interval=PUSH_TICK_SECONDS, first=10)
 
 
+async def _ingest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    model = context.bot_data["guard_model"]
+    # run_ingestion_cycle does synchronous network calls across every
+    # enabled source -- offloaded the same way handle_message offloads
+    # run_agent, so a slow cycle can't block the bot's event loop.
+    await asyncio.to_thread(news_ingest.run_ingestion_cycle, model)
+
+
+def register_ingest_job(app: Application) -> None:
+    """Wires up the periodic news-cache ingestion job -- see
+    docs/local-news-cache-plan.md. Same registration shape as
+    register_push_job, called from the same places."""
+    app.job_queue.run_repeating(_ingest_job, interval=INGEST_TICK_SECONDS, first=10)
+
+
 def main():
     setup_telemetry()
     users_db.init_db()
@@ -448,6 +470,7 @@ def main():
     app.add_handler(CommandHandler("language", handle_language_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     register_push_job(app)
+    register_ingest_job(app)
 
     print("Telegram bot ready (polling). Ctrl+C to stop.")
     app.run_polling()

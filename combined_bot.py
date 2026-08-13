@@ -60,6 +60,7 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.add_handler(CommandHandler("language", info_bot.handle_language_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, info_bot.handle_message))
     info_bot.register_push_job(app)
+    info_bot.register_ingest_job(app)
     return app
 
 

@@ -78,6 +78,90 @@ def init_db() -> None:
         _ensure_column(conn, "last_push_at", "TEXT")
         _ensure_column(conn, "pushed_links", "TEXT")
         _ensure_column(conn, "language", "TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_budget (
+                source TEXT PRIMARY KEY,
+                date TEXT NOT NULL,
+                count INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_pull_state (
+                source TEXT PRIMARY KEY,
+                last_pulled_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def try_consume_api_budget(source: str, daily_cap: int, today: str) -> bool:
+    """Global (not per-user) daily call budget for a rate-limited news
+    source -- see docs/local-news-cache-plan.md's Perigon/NewsAPI worked
+    examples. Returns True and records the call if `source` is still under
+    `daily_cap` for `today`; returns False (without incrementing) if the
+    cap is already reached. `today` is passed in rather than computed here so
+    callers/tests control the date deterministically, same reasoning as
+    news_push.py's `now` parameter."""
+    with _connect() as conn:
+        row = conn.execute("SELECT date, count FROM api_budget WHERE source = ?", (source,)).fetchone()
+        if row is None or row[0] != today:
+            conn.execute(
+                """
+                INSERT INTO api_budget (source, date, count) VALUES (?, ?, 1)
+                ON CONFLICT(source) DO UPDATE SET date = excluded.date, count = 1
+                """,
+                (source, today),
+            )
+            return True
+        if row[1] >= daily_cap:
+            return False
+        conn.execute("UPDATE api_budget SET count = count + 1 WHERE source = ?", (source,))
+        return True
+
+
+def get_source_last_pulled_at(source: str) -> datetime | None:
+    """Drives news_ingest.py's per-source due-check, same shape as
+    get_last_push_at/record_push for subscribers -- a source's own pull
+    frequency (docs/local-news-cache-plan.md) is independent of any one
+    subscriber's push schedule."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT last_pulled_at FROM source_pull_state WHERE source = ?", (source,)
+        ).fetchone()
+    return datetime.fromisoformat(row[0]) if row else None
+
+
+def set_source_last_pulled_at(source: str, when: datetime) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_pull_state (source, last_pulled_at) VALUES (?, ?)
+            ON CONFLICT(source) DO UPDATE SET last_pulled_at = excluded.last_pulled_at
+            """,
+            (source, when.isoformat()),
+        )
+
+
+def list_all_interests() -> list[str]:
+    """Distinct interests across every subscriber with any stored --
+    used by news_ingest.py to query the budget-capped, query-capable
+    sources (Perigon, NewsAPI) against real topics people actually care
+    about, rather than a generic default that would never surface
+    something specific like the AAOI case that originally motivated
+    adding these sources. Order is stable (first-seen) but not otherwise
+    meaningful -- callers needing a priority order (e.g. truncating to fit
+    a tight daily budget) should impose their own."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT interests FROM subscribers WHERE interests IS NOT NULL").fetchall()
+    seen = []
+    for (interests_json,) in rows:
+        for topic in json.loads(interests_json):
+            if topic not in seen:
+                seen.append(topic)
+    return seen
 
 
 def get_status(chat_id: int) -> str | None:

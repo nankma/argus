@@ -1,6 +1,16 @@
 import pytest
 import agent
+import news_cache
 import users_db
+
+
+@pytest.fixture
+def isolated_news_cache(monkeypatch, tmp_path):
+    """Point news_cache.CACHE_DIR at a temp directory for the duration of a
+    test, so cache tests never touch the real news_cache/ directory."""
+    path = tmp_path / "news_cache"
+    monkeypatch.setattr(news_cache, "CACHE_DIR", str(path))
+    return path
 
 
 @pytest.fixture

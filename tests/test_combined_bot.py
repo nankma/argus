@@ -19,9 +19,14 @@ def test_build_info_app_wires_bot_data(monkeypatch):
     assert app.bot_data["guard_model"] == "fake-guard-model"
     handlers = [h for group in app.handlers.values() for h in group]
     assert any(isinstance(h, MessageHandler) for h in handlers)
-    # the periodic-push scheduler (docs/bot-features-plan.md item 5) must
-    # be wired up in the combined process too, not just standalone bot.py
-    assert len(app.job_queue.jobs()) == 1
+    # the periodic-push scheduler (docs/bot-features-plan.md item 5) and
+    # the news-cache ingestion job (docs/local-news-cache-plan.md) must
+    # both be wired up in the combined process too, not just standalone
+    # bot.py -- asserting the callback names, not just a count, so a
+    # future job silently failing to register (or one accidentally
+    # registered twice) fails loudly here.
+    job_callback_names = {job.callback.__name__ for job in app.job_queue.jobs()}
+    assert job_callback_names == {"_push_job", "_ingest_job"}
     # Real incident, 2026-08-09: /start went unhandled (only checking "any
     # MessageHandler" wouldn't have caught this -- it needs its own
     # CommandHandler, since the plain-text MessageHandler excludes all

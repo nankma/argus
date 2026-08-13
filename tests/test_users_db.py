@@ -250,3 +250,58 @@ def test_list_push_enabled_subscribers_includes_language(isolated_subscribers_db
 
     subscribers = users_db.list_push_enabled_subscribers()
     assert subscribers[0]["language"] == "French"
+
+
+def test_try_consume_api_budget_allows_up_to_the_cap(isolated_subscribers_db):
+    assert users_db.try_consume_api_budget("perigon", 3, "2026-08-14") is True
+    assert users_db.try_consume_api_budget("perigon", 3, "2026-08-14") is True
+    assert users_db.try_consume_api_budget("perigon", 3, "2026-08-14") is True
+
+
+def test_try_consume_api_budget_denies_once_cap_reached(isolated_subscribers_db):
+    for _ in range(3):
+        users_db.try_consume_api_budget("perigon", 3, "2026-08-14")
+    assert users_db.try_consume_api_budget("perigon", 3, "2026-08-14") is False
+
+
+def test_try_consume_api_budget_resets_on_a_new_day(isolated_subscribers_db):
+    for _ in range(3):
+        users_db.try_consume_api_budget("perigon", 3, "2026-08-14")
+    assert users_db.try_consume_api_budget("perigon", 3, "2026-08-14") is False
+    assert users_db.try_consume_api_budget("perigon", 3, "2026-08-15") is True
+
+
+def test_try_consume_api_budget_tracks_sources_independently(isolated_subscribers_db):
+    for _ in range(1):
+        users_db.try_consume_api_budget("newsapi", 1, "2026-08-14")
+    assert users_db.try_consume_api_budget("newsapi", 1, "2026-08-14") is False
+    # perigon's budget is untouched by newsapi's being exhausted
+    assert users_db.try_consume_api_budget("perigon", 3, "2026-08-14") is True
+
+
+def test_get_source_last_pulled_at_unknown_source_returns_none(isolated_subscribers_db):
+    assert users_db.get_source_last_pulled_at("perigon") is None
+
+
+def test_set_and_get_source_last_pulled_at(isolated_subscribers_db):
+    when = datetime(2026, 8, 14, 9, 0, 0, tzinfo=timezone.utc)
+    users_db.set_source_last_pulled_at("perigon", when)
+    assert users_db.get_source_last_pulled_at("perigon") == when
+
+
+def test_set_source_last_pulled_at_upserts(isolated_subscribers_db):
+    t1 = datetime(2026, 8, 14, 9, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 8, 14, 13, 0, 0, tzinfo=timezone.utc)
+    users_db.set_source_last_pulled_at("perigon", t1)
+    users_db.set_source_last_pulled_at("perigon", t2)
+    assert users_db.get_source_last_pulled_at("perigon") == t2
+
+
+def test_list_all_interests_empty_when_nobody_has_any(isolated_subscribers_db):
+    assert users_db.list_all_interests() == []
+
+
+def test_list_all_interests_deduplicates_across_subscribers(isolated_subscribers_db):
+    users_db.set_interests(1, ["bitcoin", "AI"])
+    users_db.set_interests(2, ["AI", "robotics"])
+    assert users_db.list_all_interests() == ["bitcoin", "AI", "robotics"]

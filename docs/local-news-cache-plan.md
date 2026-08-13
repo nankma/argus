@@ -14,12 +14,14 @@ the network per request.
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Periodic ingestion job (pull all sources on a schedule) | Not built |
-| 2 | Local cache (one file per article, 2-day TTL, auto-cleanup) | Not built |
-| 3 | Article classification (rough category tags) | Not built |
+| 1 | Periodic ingestion job (pull all sources on a schedule) | **Built** — `news_ingest.py`, per-source interval + daily budget respected, wired into both `bot.py` and `combined_bot.py`'s scheduler |
+| 2 | Local cache (one file per article, 2-day TTL, auto-cleanup) | **Built** — `news_cache.py`, verified live: real fetch → real classification → real YAML file, contents match this doc's spec exactly |
+| 3 | Article classification (rough category tags) | **Built** — `news_classify.py`, one batched structured-output call per cycle, verified live against the real DeepSeek model (not just mocked) |
 | 4 | Two-stage query filtering (category, then content) | Not built |
-| 5 | `search_news` rewritten to read the cache instead of live sources | Not built |
+| 5 | `search_news` rewritten to read the cache instead of live sources | **Not built — deliberately deferred.** Changes live, user-facing agent behavior (`agent.py`'s tool, and `guardrails.classify_message`'s output schema); items 1–3 are additive and don't touch anything currently running, so they shipped first. See "Next step" below. |
 | 6 | `news_push.py` converging onto the same cache | Not built, optional — see Open Questions |
+
+**Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
 
 ## Why this is worth doing (not just "instead of on-demand")
 
