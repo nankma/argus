@@ -8,7 +8,7 @@ RUN micromamba install -y -n base -f /tmp/environment.yml && \
     micromamba clean --all --yes
 
 WORKDIR /app
-COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py guardrails.py users_db.py docker-entrypoint.sh ./
+COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py guardrails.py users_db.py test_api.py docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
 # Real incident, 2026-08-09: `docker logs` returned zero lines for this

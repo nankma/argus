@@ -44,6 +44,7 @@ from agent import MODEL, build_agent, run_agent, setup_telemetry
 import bot as info_bot
 import admin_bot
 import telemetry_monitor
+import test_api
 import users_db
 
 
@@ -101,6 +102,7 @@ async def run_both(
         await admin_app.updater.start_polling()
 
         monitor_task = _start_telemetry_monitor(admin_bot_token, admin_chat_id)
+        test_api_server = test_api.start(info_app.bot_data["agent"], info_app.bot_data["guard_model"])
 
         print("Both bots ready (polling). Ctrl+C to stop.")
         stop_event = asyncio.Event()
@@ -120,6 +122,7 @@ async def run_both(
                 monitor_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await monitor_task
+            test_api.stop(test_api_server)
             await admin_app.updater.stop()
             await admin_app.stop()
             await info_app.updater.stop()

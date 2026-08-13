@@ -1,0 +1,113 @@
+import asyncio
+import json
+import threading
+import urllib.error
+import urllib.request
+
+import pytest
+
+import bot
+import test_api
+
+
+@pytest.fixture
+def running_server(monkeypatch):
+    """A real _Server, serving on a real (ephemeral) loopback port, backed
+    by a real asyncio event loop running in its own thread -- exercises the
+    actual HTTP + threading + run_coroutine_threadsafe bridge, not a mock
+    of it. bot.process_message is monkeypatched so no real model/DB is
+    needed; individual tests can further monkeypatch it for specific
+    behavior."""
+    monkeypatch.setattr(test_api, "PORT", 0)  # ephemeral port, avoids clashing with a real deploy
+
+    async def fake_process_message(chat_id, text, agent, guard_model):
+        return {"blocked_at": None, "category": "news_query", "reply": f"echo:{text}"}
+
+    monkeypatch.setattr(bot, "process_message", fake_process_message)
+
+    loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+
+    # _Server's constructor is plain sync code (binds a socket, stores a
+    # reference to `loop` for the handler to target later via
+    # run_coroutine_threadsafe) -- no need to run it "on" the loop itself.
+    server = test_api._Server(loop, "fake-agent", "fake-model")
+    serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    serve_thread.start()
+
+    yield server
+
+    test_api.stop(server)
+    loop.call_soon_threadsafe(loop.stop)
+    loop_thread.join(timeout=5)
+
+
+def _post(port, payload):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/test_message",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
+
+
+def test_test_message_returns_process_message_result(running_server):
+    port = running_server.server_address[1]
+    status, body = _post(port, {"chat_id": 1, "text": "hello"})
+    assert status == 200
+    assert body == {"blocked_at": None, "category": "news_query", "reply": "echo:hello"}
+
+
+def test_unknown_path_returns_404(running_server):
+    port = running_server.server_address[1]
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/wrong_path", data=b"{}", method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        assert False, "expected a 404"
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 404
+
+
+def test_malformed_body_returns_400(running_server):
+    port = running_server.server_address[1]
+    status, body = _post(port, {"chat_id": "not-an-int-or-missing-text"})
+    assert status == 400
+    assert "error" in body
+
+
+def test_missing_fields_returns_400(running_server):
+    port = running_server.server_address[1]
+    status, body = _post(port, {})
+    assert status == 400
+
+
+def test_server_binds_to_loopback_only(running_server):
+    """The one security-critical property of this module: it must never be
+    reachable from anything but localhost."""
+    assert running_server.server_address[0] == "127.0.0.1"
+
+
+def test_start_does_nothing_when_env_var_unset(monkeypatch):
+    monkeypatch.delenv("ENABLE_TEST_API", raising=False)
+    assert test_api.start(agent="fake", guard_model="fake") is None
+
+
+def test_start_returns_server_when_env_var_set(monkeypatch):
+    monkeypatch.setenv("ENABLE_TEST_API", "true")
+    monkeypatch.setattr(test_api, "PORT", 0)
+
+    async def _run():
+        server = test_api.start(agent="fake", guard_model="fake")
+        try:
+            assert server is not None
+            assert server.server_address[0] == "127.0.0.1"
+        finally:
+            test_api.stop(server)
+
+    asyncio.run(_run())

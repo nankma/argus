@@ -1,0 +1,113 @@
+"""
+Local-only HTTP test API -- lets the smoke-test checklist
+(build-locally-deploy-remotely skill) run via curl instead of a real
+Telegram client. See docs/local-testing-api-plan.md.
+
+Calls bot.process_message directly -- the exact same guardrail/agent/
+formatting pipeline real Telegram traffic runs, not a separate
+reimplementation. handle_message and this module both call it; neither
+duplicates the pipeline itself.
+
+Security: binds to 127.0.0.1 only, never 0.0.0.0 -- this process has no
+public-facing HTTP surface at all. Reachable only via SSH port-forward
+from a machine already holding the VM's SSH key (`ssh -L
+8765:127.0.0.1:8765 ubuntu@<vm-ip>`), the same trust boundary as SSH
+access to the VM itself -- this endpoint doesn't grant anything beyond
+what SSH access already does (docker exec into the container would let
+you do the same and more). Gated behind ENABLE_TEST_API, off by default
+-- a production deploy that never sets it never starts this server at
+all, zero attack surface added to the normal case.
+
+Stdlib-only (http.server + threading), deliberately -- this is a debug
+tool, not a production API; aiohttp/FastAPI would be real weight for
+something meant to disappear when ENABLE_TEST_API isn't set. The HTTP
+handler runs in its own thread (http.server is synchronous) and bridges
+into the bot's asyncio event loop via run_coroutine_threadsafe, since
+process_message is a coroutine.
+"""
+
+import asyncio
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import bot as info_bot
+
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("TEST_API_PORT", "8765"))
+CALL_TIMEOUT_SECONDS = 60
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        # Route through print (PYTHONUNBUFFERED, same as the rest of this
+        # project) instead of BaseHTTPRequestHandler's default stderr
+        # logging, so requests show up in `docker logs` consistently.
+        print(f"[test_api] {self.address_string()} - {fmt % args}")
+
+    def _json_response(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        if self.path != "/test_message":
+            self._json_response(404, {"error": "unknown path, use POST /test_message"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            chat_id = int(body["chat_id"])
+            text = str(body["text"])
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._json_response(400, {"error": f"expected JSON body {{'chat_id': int, 'text': str}}: {exc!r}"})
+            return
+
+        server = self.server  # type: _Server
+        future = asyncio.run_coroutine_threadsafe(
+            info_bot.process_message(chat_id, text, server.agent, server.guard_model), server.loop
+        )
+        try:
+            result = future.result(timeout=CALL_TIMEOUT_SECONDS)
+        except Exception as exc:
+            self._json_response(500, {"error": f"process_message failed: {exc!r}"})
+            return
+
+        self._json_response(200, result)
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, loop, agent, guard_model):
+        super().__init__((HOST, PORT), _Handler)
+        self.loop = loop
+        self.agent = agent
+        self.guard_model = guard_model
+
+
+def start(agent, guard_model) -> _Server | None:
+    """Starts the test API in a background thread if ENABLE_TEST_API is
+    set; returns None (does nothing) otherwise. Call stop() with the
+    returned server on shutdown. Must be called from the thread running
+    the bot's asyncio event loop, so it can capture the loop via
+    asyncio.get_running_loop() for run_coroutine_threadsafe to target."""
+    if not os.environ.get("ENABLE_TEST_API"):
+        return None
+    loop = asyncio.get_running_loop()
+    server = _Server(loop, agent, guard_model)
+    thread = threading.Thread(target=server.serve_forever, daemon=True, name="test-api")
+    thread.start()
+    print(f"[test_api] listening on {HOST}:{PORT} (ENABLE_TEST_API set) -- POST /test_message")
+    return server
+
+
+def stop(server: "_Server | None") -> None:
+    if server is not None:
+        server.shutdown()
+        server.server_close()

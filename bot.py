@@ -36,6 +36,7 @@ from agent import MODEL, build_agent, run_agent, setup_telemetry
 import guardrails
 import news_ingest
 import news_push
+import test_api
 import users_db
 
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -314,19 +315,22 @@ async def handle_language_command(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(f"Reply language set to: {text_after_command}")
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_access(update, context):
-        return
+async def process_message(chat_id: int, user_text: str, agent, guard_model) -> dict:
+    """The actual guardrail/agent/formatting pipeline, independent of
+    Telegram's Update/Context objects -- extracted so test_api.py's local
+    curl endpoint (docs/local-testing-api-plan.md) exercises this exact
+    logic, not a separate reimplementation that could silently drift from
+    what real Telegram traffic runs. handle_message (below) is now a thin
+    wrapper: Telegram-specific I/O only, no pipeline logic of its own.
 
-    user_text = update.message.text
-
+    Returns {"blocked_at": str|None, "category": str|None, "reply": str}.
+    blocked_at names which layer stopped the message (None if it went all
+    the way through) -- useful for a test caller to assert on without
+    parsing the reply text or cross-referencing docker logs/Phoenix."""
     # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
     # docs/guardrails-plan.md for the incident this design responds to.
     if guardrails.fails_local_prefilter(user_text):
-        await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
-        return
-
-    guard_model = context.bot_data["guard_model"]
+        return {"blocked_at": "layer1_prefilter", "category": None, "reply": guardrails.REDIRECT_MESSAGE}
 
     # Guardrail layer 2 -- now the router (docs/context-management-plan.md):
     # one structured-output call answers both "is this on-topic" and "what
@@ -334,10 +338,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # it which layer-2 instructions/tool to reach for in the same pass.
     classification = await asyncio.to_thread(guardrails.classify_message, guard_model, user_text)
     if not classification.on_topic:
-        await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
-        return
+        return {"blocked_at": "layer2_router", "category": classification.category, "reply": guardrails.REDIRECT_MESSAGE}
 
-    chat_id = update.effective_chat.id
     history, history_timestamps = _get_trimmed_history(chat_id)
     working_messages = history + [{"role": "user", "content": user_text}]
 
@@ -345,7 +347,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # (layers 2/3) and the update_interests/set_push_enabled tools (which
     # need to know *which* user's row to write) -- see
     # docs/context-management-plan.md's router design.
-    agent = context.bot_data["agent"]
     try:
         result_messages = await asyncio.to_thread(
             run_agent,
@@ -354,8 +355,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context={"chat_id": chat_id, "category": classification.category},
         )
     except Exception as exc:
-        await update.message.reply_text(f"Something went wrong: {exc}")
-        return
+        return {
+            "blocked_at": "agent_error",
+            "category": classification.category,
+            "reply": f"Something went wrong: {exc}",
+        }
 
     final_content = _strip_report_preamble(_normalize_markdown_bold(result_messages[-1].content))
 
@@ -366,8 +370,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         guardrails.is_output_on_topic, guard_model, final_content, classification.category
     )
     if not output_on_topic:
-        await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
-        return
+        return {"blocked_at": "layer4_output_check", "category": classification.category, "reply": guardrails.REDIRECT_MESSAGE}
 
     # Only persisted once accepted -- a rejected exchange doesn't pollute
     # the conversation history the next turn sees. The trimmed base
@@ -379,6 +382,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     new_messages = result_messages[len(history):]
     now = datetime.now(timezone.utc)
     chat_histories[chat_id] = (result_messages, history_timestamps + [now] * len(new_messages))
+
+    return {"blocked_at": None, "category": classification.category, "reply": final_content}
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_access(update, context):
+        return
+
+    result = await process_message(
+        update.effective_chat.id,
+        update.message.text,
+        context.bot_data["agent"],
+        context.bot_data["guard_model"],
+    )
+    final_content = result["reply"]
 
     chunks = split_for_telegram(final_content)
     for i, chunk in enumerate(chunks):
@@ -451,6 +469,18 @@ def register_ingest_job(app: Application) -> None:
     app.job_queue.run_repeating(_ingest_job, interval=INGEST_TICK_SECONDS, first=10)
 
 
+async def _start_test_api(app: Application) -> None:
+    """post_init hook -- run_polling() manages its own event loop
+    internally, so this is the standalone-bot.py equivalent of
+    combined_bot.py's run_both() starting test_api after the loop is
+    already running (test_api.start() needs asyncio.get_running_loop())."""
+    app.bot_data["test_api_server"] = test_api.start(app.bot_data["agent"], app.bot_data["guard_model"])
+
+
+async def _stop_test_api(app: Application) -> None:
+    test_api.stop(app.bot_data.get("test_api_server"))
+
+
 def main():
     setup_telemetry()
     users_db.init_db()
@@ -458,7 +488,7 @@ def main():
     model = ChatDeepSeek(model=MODEL)
     agent = build_agent(model)
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_start_test_api).post_shutdown(_stop_test_api).build()
     app.bot_data["agent"] = agent
     # Reuses the same model instance for guardrail classification calls
     # (guardrails.py) -- no separate model/infra, see docs/guardrails-plan.md.
