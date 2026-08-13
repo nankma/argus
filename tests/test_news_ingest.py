@@ -151,6 +151,43 @@ def test_run_ingestion_cycle_cleans_up_expired_entries_first(monkeypatch, isolat
     assert news_cache.read_all() == []
 
 
+def test_run_ingestion_cycle_delays_between_multi_query_calls_to_same_source(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """Real incident: GNews's 1 req/sec limit returned 429 on 5 of 7
+    back-to-back queries in one cycle. Confirms the fix without actually
+    sleeping in the test suite."""
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.set_interests(1, ["bitcoin", "AI", "robotics"])
+    fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+    sleep = MagicMock()
+    monkeypatch.setattr(news_ingest.time, "sleep", sleep)
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    assert fetch.call_count == 3  # one call per distinct interest
+    # delay happens BETWEEN calls, not before the first or after the last
+    assert sleep.call_count == 2
+    sleep.assert_called_with(news_ingest.REQUEST_DELAY_SECONDS)
+
+
+def test_run_ingestion_cycle_no_delay_for_single_query_sources(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.set_interests(1, ["bitcoin", "AI"])
+    fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", fetch)])
+    sleep = MagicMock()
+    monkeypatch.setattr(news_ingest.time, "sleep", sleep)
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    fetch.assert_called_once()
+    sleep.assert_not_called()
+
+
 def test_run_ingestion_cycle_no_new_articles_skips_classification_call(
     monkeypatch, isolated_subscribers_db, isolated_news_cache
 ):

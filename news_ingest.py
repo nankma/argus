@@ -14,6 +14,7 @@ then satisfy every subscriber's queries against it for the next 2 days
 are worth sharing, not spending per-query).
 """
 
+import time
 from datetime import datetime, timezone
 
 import news_cache
@@ -23,6 +24,11 @@ import users_db
 
 MAX_RESULTS_PER_SOURCE = 5
 DEFAULT_INTERVAL_HOURS = 4
+# 1 req/sec is GNews's own documented free-tier limit (docs/ai-news-sources.md);
+# used as the general delay between consecutive same-source calls since
+# other sources' limits aren't always documented, and this is cheap
+# regardless (cycles run every 4h+).
+REQUEST_DELAY_SECONDS = 1.1
 _DEFAULT_QUERY = "technology"
 
 # Per-source pull interval, in hours -- docs/local-news-cache-plan.md's
@@ -108,7 +114,17 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
 
         queries = _queries_for_source(source_key, now, interests)
         source_articles = 0
-        for query in queries:
+        for i, query in enumerate(queries):
+            if i > 0:
+                # Real incident, first deploy of this job: GNews's
+                # documented 1-request/second limit (docs/ai-news-sources.md)
+                # returned 429 on 5 of 7 back-to-back queries for the same
+                # source in one cycle. A flat delay between consecutive
+                # calls to the SAME source is cheap here (cycles run every
+                # 4h+, a few extra seconds is nothing) and avoids needing a
+                # per-source rate table for limits that aren't always
+                # documented up front.
+                time.sleep(REQUEST_DELAY_SECONDS)
             try:
                 articles = fetch(query, MAX_RESULTS_PER_SOURCE)
             except Exception as exc:
