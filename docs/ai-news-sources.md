@@ -32,35 +32,63 @@ items whether or not any of them are actually relevant — this is why
 matched; the model reading the titles is currently the only thing that
 catches this. See `docs/local-news-cache-plan.md` for where this is headed.
 
-## Summary extraction (fixed 2026-08-13)
+## Content depth per source (investigated 2026-08-13)
+
+Prompted by a real question: besides the title, what does each source
+actually give us, and where is content genuinely unavailable versus just
+being discarded by our own code? Every number below was checked live,
+against the real, uncapped field — not assumed from a source's docs.
+
+### Fixed: `_fetch_rss` was discarding the feed's own description
 
 `_fetch_rss` previously hardcoded `summary=None` for every RSS source,
-discarding whatever the feed's own `<description>` provided — meaning the
-model only ever saw a bare title, never the lede paragraph a publisher
-already wrote. Confirmed live this was throwing away real content: BBC
-gives a one-line description, Guardian a full ~1200-char editorial lede,
-MarketWatch a sentence explicitly explaining *why* a stock moved (the
-exact kind of detail a title alone won't carry). Fixed via `_clean_summary`
-(strips embedded HTML, normalizes whitespace, caps at 300 chars — same
-cap arXiv's summary already used).
+throwing away whatever the feed's `<description>` provided regardless of
+content. Fixed via `_clean_summary` (strips embedded HTML, normalizes
+whitespace). **Still open: what cap to apply** — see the table below,
+where two sources make a fixed 300-char cap actively wrong.
 
-**Verified live across all 21 enabled sources: 18 now return a real
-summary. Three are structurally summary-less** — confirmed via
-`feedparser`, not assumed:
+### The full picture, uncapped
 
-| Source | Why no summary |
-|---|---|
-| `hackernews` | Algolia's search API returns metadata about a submission, not body text — most HN posts just link externally, there's nothing to summarize |
-| `huggingface_blog` | Feed genuinely has no `summary`/`description`/`content` field at all |
-| `nikkei_asia` | Same — the RDF feed provides title/link/date only, no excerpt |
+| Tier | Source | Raw length | Currently kept | Notes |
+|---|---|---|---|---|
+| **Substantial — likely near-full article text** | VentureBeat AI | **13,384 chars** | 300 (2%) | Feed embeds most/all of the article body directly (`content:encoded`-style), not a lede. Discarding 98% of it. |
+| | Computerworld | **4,642 chars** | 300 (6%) | Same pattern. |
+| **Full source-native content, source doesn't truncate — we do** | arXiv | ~1,700 chars (varies per paper) | 300 (~18% in the checked example) | The *complete* abstract, at zero extra cost — same API call already being made. The discarded portion is typically where the paper's actual method name and results live, not the problem statement. |
+| **Real editorial lede, moderately truncated** | Guardian Business | 750 | 300 (40%) | |
+| | Guardian Technology | 550 | 300 (55%) | |
+| | MIT Technology Review | 351 | 300 (85%) | Cap barely bites. |
+| **Short dek/summary, genuinely short by design — cap rarely or never bites** | OpenAI Blog (157) · BBC Business (108) · BBC Technology (105) · MarketWatch (115) · Economist Business (61) · Economist Sci&Tech (74) · Wired Business (141) · The Register (82) · ZDNet (120) · TechRadar (117) · TechCrunch AI (54) · Engadget (58) | — | — | These 12 sources are already giving us everything they have; the cap is not the constraint here. |
+| **Content only sometimes** | Hacker News | Full, untruncated `story_text` for ~5% of results (Ask HN/Show HN self-posts, checked: 1/20 in a live sample) | Not mapped at all today | The other ~95% are external link posts — HN's own API has nothing beyond title+url for those; it doesn't host the linked content. |
+| **Title only — genuinely nothing else in the feed** | Hugging Face Blog | — | — | Confirmed via `feedparser`: no `summary`/`description`/`content` field exists in this feed at all. |
+| | Nikkei Asia | — | — | Same — the RDF feed provides title/link/date only. |
 
-For those three, and for anything a summary's lede doesn't happen to
-mention (e.g., a consequence reported later in the article body, not the
-opening paragraph), get closer to the truth than a summary offers,
-retrieving full article content would be needed — see
-`docs/local-news-cache-plan.md`'s open question on this, since it's a
-materially bigger decision than this fix (scraping, paywalls, bot
-defenses, and per-provider free-tier content truncation all apply).
+### Not yet enabled — documented behavior, not live-verified (no key)
+
+| Source | What's mapped now | What's actually available |
+|---|---|---|
+| NewsAPI | `description` only | Also has a `content` field, but their free/Developer tier truncates it to ~200 chars with a `"… [+N chars]"` marker. Full content needs a paid plan. |
+| GNews | `description` only | Same pattern — `content` exists, free tier truncates it similarly. |
+| Perigon | `summary` only | Least certain of the three — no confident documentation on free-tier content completeness; would need a trial key to check rather than assume. |
+
+### What this means for the 300-char cap
+
+The cap was arbitrary — nothing in the code chose it deliberately, and it
+now demonstrably cuts VentureBeat/Computerworld/arXiv well before the
+content that matters (arXiv's actual result, in the one case checked in
+detail, lands in the discarded 82%). **Not yet fixed** — raising or
+dropping the cap is a small, low-risk follow-on (same shape as the
+summary-discard fix above: expose data already being fetched, at zero
+extra network cost), tracked as a pending item, separate from the API-key
+work below since it doesn't depend on it.
+
+For the three structurally content-less/near-content-less sources
+(Hugging Face Blog, Nikkei Asia, and the 95% of Hacker News that's link
+posts) — and for anything a lede genuinely doesn't mention, like a
+consequence reported deeper in an article body — closing that gap needs
+either full-page scraping or a paid API tier. See
+`docs/local-news-cache-plan.md`'s open question on this; it's a
+materially bigger decision (scraping, paywalls, bot defenses, legal
+posture, recurring cost) than anything on this page.
 
 ## Enabled now (free, no key required)
 
@@ -138,6 +166,27 @@ exist in code.
 None of these were live-tested (no credentials available). Endpoint shapes
 came from each provider's docs — verify against a real response the first
 time a key is actually configured, in case something's drifted.
+
+### Getting a key — recommendation and order
+
+**Start with GNews, not NewsAPI, despite NewsAPI being the more
+feature-rich and better-known of the two.** The deciding factor is ToS
+fit, not features:
+
+| | Free-tier restriction | Fit for this project |
+|---|---|---|
+| **GNews** | "Non-commercial use only" | Fits — this is an unpaid pilot, invite-gated, nothing sold. The 12-hour article delay is a real cost, but acceptable for the intended use (an on-demand fallback for specific/low-profile queries like AAOI, not the primary real-time push feed). |
+| **NewsAPI** | Free "Developer" plan is **explicitly for development/testing only, not production** | Doesn't fit cleanly — this bot serves real subscribers, which is production use by any reasonable reading. This project has already turned down otherwise-working sources on similar grounds (Reddit's blocked endpoint, Google News's link-resolution issue) rather than use something in a way its provider didn't intend. Worth revisiting only if paying for a real plan is later on the table. |
+| **Perigon** | 150 requests/month, non-commercial only | Technically fits the ToS, but 150/month is too low for routine use across multiple subscribers — viable only as an occasional supplementary source, not a primary one. Lowest priority of the three. |
+
+**Sign-up steps for GNews:**
+
+1. Go to `https://gnews.io/register` and create a free account (email + password, no payment method required for the free tier).
+2. After registering, the API key is shown directly on the account dashboard (`https://gnews.io/dashboard`) — no separate approval step.
+3. Send the key value in this conversation (or set it directly as an env var if working locally) and it'll be wired in: locally via `$env:GNEWS_API_KEY = "..."` for testing, and into OCI Vault following the existing secrets pattern (`docs/security-plan.md` finding 2) for the deployed bot — same handling as `DEEPSEEK_API_KEY`/`TELEGRAM_BOT_TOKEN`, never as a plaintext env var in the running container.
+4. Once the key is set, `enabled_sources()` picks it up automatically — no code change needed, it's already implemented and registered.
+
+**After GNews is working and verified live** (confirm the response shape actually matches what `fetch_gnews` expects — per this doc's standing rule, verify before trusting), Perigon is the natural second pick if broader coverage is still wanted. NewsAPI stays parked unless a paid plan is actually being considered.
 
 ## Considered, tested live, and rejected
 
