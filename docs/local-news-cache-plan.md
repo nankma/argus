@@ -235,13 +235,58 @@ doesn't exist.
 **Recommendation: keep a live fallback for on-demand chat queries.** If
 stage 1 + stage 2 over the cache come back empty, fall back to a live
 call against the query-capable sources specifically (`hackernews`,
-`arxiv`, and `newsapi`/`gnews`/`perigon` if keyed) — the same sources this
-doc's own source-class tagging already identifies as the only ones that
-do real search. This is a hybrid, not a full replacement, and it's the
-honest scope: **the cache is the fast/cheap path for broad interest-driven
-coverage; live search is what's still needed for a specific one-off ask.**
-Scheduled push digests don't need this fallback — there's no single query
-under pressure there, only whatever's freshly cached.
+`arxiv`, and `gnews`/`perigon`, now both keyed — see
+`docs/ai-news-sources.md`) — the same sources this doc's own source-class
+tagging already identifies as the only ones that do real search. This is
+a hybrid, not a full replacement, and it's the honest scope: **the cache
+is the fast/cheap path for broad interest-driven coverage; live search is
+what's still needed for a specific one-off ask.** Scheduled push digests
+don't need this fallback — there's no single query under pressure there,
+only whatever's freshly cached.
+
+**Refinement: a fallback call writes into the same shared cache, it
+doesn't just answer the one query that triggered it.** The point of a
+budget-limited source (Perigon: 150 requests/month) isn't well served by
+treating each on-demand fallback as a private, throwaway call for
+whoever happened to ask — that wastes a scarce resource on exactly one
+person's question when three other subscribers might ask something the
+same result would have answered too. Instead: a fallback fetch gets
+classified and written into the cache using the *same* file format,
+category tags, and 2-day TTL as the periodic pull. **One Perigon call can
+then satisfy every user whose interests match it for the next two days,**
+not just the query that spent the call. This is the actual reason the
+cache and the fallback can't be designed as two separate mechanisms —
+they need to share one write path from the start.
+
+**Worked example: Perigon's budget, concretely.** 150 requests/month,
+free/non-commercial tier (see `docs/ai-news-sources.md`'s key-acquisition
+section for why it was picked over NewsAPI). Reserved for on-demand
+fallback only — never called by the periodic pull or by push digests,
+both of which run automatically and frequently enough to exhaust a
+150/month budget within days on their own. Capped at **3 calls/day**
+(≈93/month), leaving ≈57/month headroom for testing. When the daily cap
+is hit, the call is skipped (not attempted) and logged, same shape as
+`news_push.py`'s existing per-cycle outcome logging — falls through to
+whatever other live sources are available, same as any single source
+failing today. Tracking the daily count is a small, global piece of
+state (source name, date, count — reset when the date rolls over),
+natural to add to `users_db.py` alongside everything else it already
+tracks, rather than a new separate mechanism.
+
+**Sequencing risk, worth stating plainly:** the Perigon key already
+exists in Vault and `docker-entrypoint.sh` already fetches it, but the
+budget-cap-plus-shared-write mechanism described above doesn't exist yet
+— it ships with the cache system, not before. If a deploy sets
+`PERIGON_API_KEY_SECRET_OCID` before that mechanism is built,
+`enabled_sources()` picks Perigon up immediately and calls it
+unthrottled on every `search_news` invocation and every push cycle,
+exhausting the 150/month budget in days — the exact failure mode this
+whole design exists to prevent. **Until this plan is implemented, deploys
+should omit the Perigon secret OCID from the running container**, even
+though the secret itself stays in Vault, ready. GNews doesn't have this
+problem at this project's current scale — its 100/day free-tier limit is
+generous enough that it's safe to enable now, before the cache/budget
+system exists.
 
 ## Interaction with `news_push.py`
 
@@ -267,9 +312,12 @@ converging it can happen once the cache path is proven for `search_news`.
    real choice, not a default to accept blindly.
 2. **Category taxonomy** — is the 13-category table above right, too
    coarse, too fine, missing something the current source mix needs?
-3. **Live fallback** — confirm the recommendation above (keep it for
-   on-demand queries, skip it for push digests) is actually wanted, not
-   assumed.
+3. ~~**Live fallback** — confirm the recommendation above is actually
+   wanted, not assumed.~~ **Resolved**: keep it for on-demand queries
+   only, skip it for push digests, and — the refinement added once
+   Perigon's real budget forced the question — a fallback call writes
+   into the shared cache rather than answering just the query that
+   triggered it. See the worked example above.
 4. **Classification model** — which model handles the batched
    classification call? Same DeepSeek instance already in use, or does
    this wait on `docs/model-portability-plan.md`'s Level 2 routing being
