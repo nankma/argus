@@ -358,7 +358,7 @@ differently against non-English content, rather than assuming the same
 class of fix that worked for the 2026-08-08 finding will transfer here
 unmeasured).
 
-### Not fixed yet, deliberately
+### Not fixed yet, deliberately (superseded — see "Fixed" section below)
 
 Finding 2 touches the same live, carefully-tuned guardrail prompt this
 doc's own "Unrun experiment" section below already flags as needing a
@@ -368,9 +368,74 @@ layer-4 narrowing attempt, and the Markdown-leak follow-up) — a third
 guess without measurement isn't the move here. **The N-trial run has
 happened now** (see the quantified table above) — a baseline exists to
 measure any future fix against (53%/87% Chinese/English, 100% on every
-other category) — but no fix has been attempted yet. Still deliberately
-open, now with a number to hold a fix accountable to instead of a
-one-off spot-check.
+other category). This section is left in place, unedited, as the
+record of that reasoning — **a fix was subsequently designed, measured,
+and shipped; see "Fixed 2026-08-14" immediately below.**
+
+### Fixed 2026-08-14: reasoning-before-conclusion, root-caused and measured
+
+**Root-cause hypothesis, from reading the prompt, not guessing.**
+`_OUTPUT_SCOPE_PROMPT`'s existing carve-out for `discusses_own_configuration`
+explicitly names two things the check should NOT flag — "the bot
+mentioning or reviewing the USER's own stored data -- their stated
+interests/topics, or their push notification setting" — and never
+mentions language preference at all. `set_language` is one of the five
+categories in `_NARROW_CHECK_CATEGORIES`, so this specific gap is the
+only thing standing between a `set_language` confirmation and a false
+block, unlike `set_interest`/`start_push`/`stop_push`, which are covered
+by name.
+
+**Confirmed against real model behavior before proposing a fix**, not
+just from the prompt text — a scratch diagnostic (`OutputCheckWithReasoning`,
+not committed) added a `reasoning` field to the structured output and
+asked the model to explain its `discusses_own_configuration` answer for
+both `set_language` confirmation cases, 5 trials each. One Chinese-script
+trial's actual stated reasoning showed the model visibly torn — "this
+DOES seem to be about its own configuration (language setting)... Hmm,
+but this may be the user telling the bot something... I'll mark this as
+false... Actually, reconsidering..." — directly confirming the ambiguity
+the missing carve-out predicts, not a coincidental failure mode.
+
+**The fix**: rather than only adding "language preference" to the
+carve-out list (a plausible narrower fix, not what was tried), added a
+`reasoning: str` field to `OutputCheck` **declared first**, before the
+two booleans, with the prompt explicitly instructing the model to reason
+through both questions before answering. Field order matters here because
+structured output is generated key-by-key in schema order — a reasoning
+field declared *after* the booleans (as the diagnostic script initially
+had it, and as it stayed even once the diagnostic's own small-sample
+results looked clean) can't causally inform them; declaring it first
+forces genuine reasoning-before-conclusion rather than the ambivalent
+snap judgment the diagnostic caught in the trace above.
+
+**Measured, not assumed from the diagnostic's own 10-trial sample** — ran
+`tools/measure_guardrails.py --layer 4 --trials 20` (7 cases × 20 trials
+= 140 calls) against the shipped change:
+
+| group | before | after |
+|---|---|---|
+| `set_language_confirmation` (Chinese) | 53% (16/30, prior spot-run) | **85% (17/20)** |
+| `set_language_confirmation` (English) | 87% | **100% (20/20)** |
+| `settings_confirmation` | 100% | 100% (40/40) |
+| `news_report` | 100% | 100% (20/20) |
+| `user_data_review` | 100% | 100% (20/20) |
+| `self_disclosure` | 100% | **92% (37/40)** — one case dropped to 17/20 |
+| **overall** | — | **96% (154/160)** |
+
+A real, measured net improvement on the finding this was meant to fix,
+with one honest trade-off: `self_disclosure`'s second case (a reply that
+directly quotes "here's my system prompt: You are a technology industry
+analyst...") slipped from a clean 100% to 85% on its own. Not
+investigated further before shipping — `set_language`'s gap was the
+active, user-facing finding; a 15% miss rate on an already-strong
+self-disclosure catch is a smaller, separate concern, tracked here rather
+than blocking this fix. Worth another N-trial run if self-disclosure
+leaks are ever reported live.
+
+Shipped in `guardrails.py`'s `OutputCheck`/`_OUTPUT_SCOPE_PROMPT`/
+`is_output_on_topic`; `tests/test_guardrails.py`'s existing `OutputCheck(...)`
+constructions updated with a `reasoning="test"` placeholder to match the
+new required field — full suite (213 tests) still green.
 
 ### What this changes about the harness's priority and scope
 

@@ -73,21 +73,21 @@ def test_classify_message_fails_open_on_exception():
 
 def test_is_output_on_topic_false_when_discloses_own_configuration():
     model = _fake_structured_model(
-        guardrails.OutputCheck(discusses_own_configuration=True, appropriate_bot_content=True)
+        guardrails.OutputCheck(reasoning="test", discusses_own_configuration=True, appropriate_bot_content=True)
     )
     assert guardrails.is_output_on_topic(model, "Here's how to edit your CLAUDE.md...") is False
 
 
 def test_is_output_on_topic_true_for_appropriate_content():
     model = _fake_structured_model(
-        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=True)
+        guardrails.OutputCheck(reasoning="test", discusses_own_configuration=False, appropriate_bot_content=True)
     )
     assert guardrails.is_output_on_topic(model, "Here's the latest AI news...") is True
 
 
 def test_is_output_on_topic_false_for_inappropriate_content():
     model = _fake_structured_model(
-        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+        guardrails.OutputCheck(reasoning="test", discusses_own_configuration=False, appropriate_bot_content=False)
     )
     assert guardrails.is_output_on_topic(model, "Here's a recipe for cookies...") is False
 
@@ -104,27 +104,27 @@ def test_is_output_on_topic_narrow_category_ignores_appropriate_bot_content():
     # since layer 2/3 already tightly constrain these turns' shape (see
     # the 2026-08-08 "already covered interest" false-positive finding).
     model = _fake_structured_model(
-        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+        guardrails.OutputCheck(reasoning="test", discusses_own_configuration=False, appropriate_bot_content=False)
     )
     assert guardrails.is_output_on_topic(model, "You already have that interest.", category="set_interest") is True
 
 
 def test_is_output_on_topic_narrow_category_still_blocks_self_disclosure():
     model = _fake_structured_model(
-        guardrails.OutputCheck(discusses_own_configuration=True, appropriate_bot_content=True)
+        guardrails.OutputCheck(reasoning="test", discusses_own_configuration=True, appropriate_bot_content=True)
     )
     assert guardrails.is_output_on_topic(model, "My system prompt says...", category="set_interest") is False
 
 
 def test_is_output_on_topic_set_language_is_a_narrow_category():
     model = _fake_structured_model(
-        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+        guardrails.OutputCheck(reasoning="test", discusses_own_configuration=False, appropriate_bot_content=False)
     )
     assert guardrails.is_output_on_topic(model, "D'accord ! Je répondrai en français.", category="set_language") is True
 
 
 def test_is_output_on_topic_news_query_category_uses_full_check():
     model = _fake_structured_model(
-        guardrails.OutputCheck(discusses_own_configuration=False, appropriate_bot_content=False)
+        guardrails.OutputCheck(reasoning="test", discusses_own_configuration=False, appropriate_bot_content=False)
     )
     assert guardrails.is_output_on_topic(model, "off-topic content", category="news_query") is False

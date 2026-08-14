@@ -306,6 +306,92 @@ accuracy before committing — the same discipline applied in
 `docs/system-overview.md` Appendix B.1, where a plausible prompt change measured
 dramatically worse.
 
+### Splitting layer 3 and layer 4 by branch, not just by narrow/full
+
+**Proposed 2026-08-14.** Once the router has decided which branch a
+message belongs to (Route A/query vs. Route B/command), that decision
+should keep shaping every layer downstream of it, not just layer 2's
+routing choice — layer 3 (the instructions/tools the model is given) and
+layer 4 (the output check) should each split into a command variant and a
+query variant:
+
+- **3.1 / 4.1 — command branch.** Layer 3 instructions are narrow and
+  templated (per category: add/remove an interest, toggle push, change
+  language). Layer 4 already does a version of this today —
+  `_NARROW_CHECK_CATEGORIES` in `guardrails.py` skips
+  `appropriate_bot_content` for exactly these categories — but the prompt
+  text itself (`_OUTPUT_SCOPE_PROMPT`) is still one shared string for both
+  branches. 4.1 would get its own prompt, tuned specifically for judging a
+  short settings confirmation, instead of a general-purpose prompt with a
+  category-gated field subset bolted on.
+- **3.2 / 4.2 — query branch.** Layer 3 stays the open-ended `news_query`
+  research instructions (search, synthesize, cite). Layer 4 keeps the full
+  two-question check (self-disclosure *and* content-appropriateness),
+  since query replies are free-form in a way command confirmations aren't.
+
+**Why this matters beyond tidiness**: the `set_language` reliability gap
+found in `docs/guardrails-plan.md` (53%/87% pass rate on the command
+branch's `discusses_own_configuration` check) is a concrete case where the
+shared prompt was carrying an implicit assumption that didn't hold for one
+category — the carve-out language named "interests" and "push
+notifications" explicitly but never "language preference," and a shared
+prompt made that omission easy to miss until measured. A per-branch (or
+even per-category) prompt makes each omission a smaller, more visible
+surface, and a fix to one branch's prompt can be measured
+(`tools/measure_guardrails.py`) without touching the other branch at all —
+the same isolation argument already made for the agent-loop split above,
+just one layer earlier.
+
+**Relationship to the agent-loop split above**: this is a refinement of
+that same Route A/Route B split, not a separate idea — 3.1/4.1 is what
+Route B's dispatch handler uses instead of the shared agent prompt/output
+check, and 3.2/4.2 is what Route A (the `news_query` agent loop) keeps
+using largely as-is. It doesn't require deciding the agent-loop dispatch
+question first; the prompts can be split now, with both branches still
+running through today's single agent loop, and the dispatch-out-of-the-
+agent refactor above can land independently later.
+
+### Open question: a message with both a command and a query in one turn
+
+**Raised 2026-08-14, not resolved.** Once routing depends on which branch
+a message belongs to, a message that is genuinely both — e.g. "add
+robotics to my interests and tell me what's new with it" — needs an
+explicit answer, not an accidental one. Three options were raised:
+
+- **(a) Loop the pipeline**: run the command branch (3.1/4.1) first,
+  execute the state change, then run the query branch (3.2/4.2) for the
+  remaining intent, and send both results (either as one combined reply or
+  two messages). Requires the router to detect *and preserve* the
+  remainder of the message after extracting the command part, which is a
+  real complication — most naturally as a router that returns a *list* of
+  categories/intents for one message instead of exactly one, with each
+  intent then dispatched to its own branch in sequence.
+- **(b) Branch and merge**: recognize both intents up front, run both
+  branches in parallel (or in either order — no dependency between them),
+  and merge the two replies into one response. Avoids the sequential
+  latency of (a) but adds a merge step that has to produce one coherent
+  Telegram message out of two independently-generated pieces (formatting,
+  ordering, avoiding a jarring tone shift between a templated confirmation
+  and a free-form report).
+- **(c) Ask the user to split it**: detect that a message carries more
+  than one intent and reply asking them to send the command and the query
+  as separate messages, rather than trying to handle both at once.
+  Simplest to implement and reason about, but adds friction on a
+  real, plausible phrasing (the exact "add X and tell me about X" pattern
+  is a natural single sentence, not a contrived edge case) and pushes a
+  system limitation onto the user as extra typing.
+
+**Leaning (a), specifically as "router returns a list, not one category"**:
+closest to how a person would actually read a mixed message (do the thing,
+then answer the thing), and reuses each branch's existing single-intent
+logic unchanged rather than needing a bespoke merge step per branch
+combination like (b), or asking the user to fight the interface like (c).
+Not decided — needs the router's structured-output schema to change
+(`category: Literal[...]` → `categories: list[Literal[...]]`), which has
+the same "does a richer structured output degrade classification
+accuracy" risk already flagged for the argument-extraction expansion
+above, and should be measured the same way before committing.
+
 ## Open questions
 
 - ~~Exact LangChain middleware API surface~~ — **verified**, see above.
