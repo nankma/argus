@@ -224,6 +224,24 @@ the same monthly/daily cap (`try_consume_api_budget` is only called from
 `news_ingest.py` today). Worth revisiting if this becomes a real problem
 in practice, not before.
 
+**Real gap found and fixed 2026-08-14**: this restriction was only ever
+applied to `search_news` (the on-demand chat tool). `news_push.py`'s
+periodic-digest cycle called `news_sources.enabled_sources()` with no
+argument at all, which defaults to `include_restricted=True` — so every
+push-enabled subscriber's digest fetch included NewsAPI/Perigon
+regardless of their own `restricted_sources_enabled` flag, the exact
+thing this section says is supposed to default to "nobody but the
+admin." Found while diagnosing a real subscriber's stalled pushes (a
+separate, unrelated `TypeError` in `_parse_iso_published` was the actual
+crash — see that function's docstring — but this gap meant restricted
+sources were live in every subscriber's push path either way). Fixed by
+adding `list_push_enabled_subscribers`' `restricted_sources_enabled`
+field and threading it through `run_push_cycle` →
+`fetch_new_articles(..., include_restricted=...)`, whose own default
+was also flipped to `False` (unlike `enabled_sources` itself) so a
+future caller that forgets to pass it explicitly fails closed, not
+open.
+
 ## Considered, tested live, and rejected
 
 All verified live on 2026-08-13 before being ruled out — per this doc's

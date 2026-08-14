@@ -219,6 +219,21 @@ def test_list_push_enabled_subscribers_only_returns_approved_and_enabled(isolate
     assert subscribers[0]["language"] is None
 
 
+def test_list_push_enabled_subscribers_includes_restricted_sources_flag(isolated_subscribers_db):
+    users_db.request_access(23, "rex", "Rex")
+    users_db.decide(23, approved=True)
+    users_db.set_push_enabled(23, True)
+    users_db.set_restricted_sources_enabled(23, True)
+
+    users_db.request_access(24, "sam", "Sam")
+    users_db.decide(24, approved=True)
+    users_db.set_push_enabled(24, True)  # restricted flag left at its default (False)
+
+    subscribers = {s["chat_id"]: s for s in users_db.list_push_enabled_subscribers()}
+    assert subscribers[23]["restricted_sources_enabled"] is True
+    assert subscribers[24]["restricted_sources_enabled"] is False
+
+
 def test_get_language_none_for_unset_chat(isolated_subscribers_db):
     assert users_db.get_language(25) is None
 

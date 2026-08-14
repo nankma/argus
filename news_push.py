@@ -45,15 +45,27 @@ def fetch_new_articles(
     since: datetime | None,
     already_pushed_links: set[str],
     max_results_per_source: int = MAX_RESULTS_PER_SOURCE,
+    include_restricted: bool = False,
 ) -> list[dict]:
     """Fetches across all enabled sources for each topic, returns only
     articles judged "new": published after `since` when published_dt
     parsed successfully, otherwise not in `already_pushed_links`.
-    Deduplicated by link across topics/sources within this call too."""
+    Deduplicated by link across topics/sources within this call too.
+
+    `include_restricted` defaults to False (unlike news_sources.
+    enabled_sources itself) because a push cycle has no per-request
+    caller to gate the way agent.py's search_news tool does -- the
+    subscriber's own restricted_sources_enabled flag must be passed
+    explicitly by the caller (see run_push_cycle) or this silently
+    reverts to including NewsAPI/Perigon for every subscriber, not just
+    admin-approved ones. Real incident, 2026-08-14: this defaulted to
+    True (via enabled_sources' own default) for every push cycle before
+    this parameter existed, so restricted sources were live in every
+    subscriber's push digest regardless of their DB flag."""
     seen_links = set()
     new_articles = []
     for topic in topics:
-        for _name, fetch in news_sources.enabled_sources():
+        for _name, fetch in news_sources.enabled_sources(include_restricted=include_restricted):
             try:
                 articles = fetch(topic, max_results_per_source)
             except Exception:
@@ -159,7 +171,10 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
 
         try:
             new_articles = fetch_new_articles(
-                interests, subscriber["last_push_at"], set(subscriber["pushed_links"])
+                interests,
+                subscriber["last_push_at"],
+                set(subscriber["pushed_links"]),
+                include_restricted=subscriber["restricted_sources_enabled"],
             )
             if not new_articles:
                 # Nothing new this cycle -- still advance last_push_at so

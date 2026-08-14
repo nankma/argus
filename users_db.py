@@ -368,14 +368,15 @@ def list_push_enabled_subscribers() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT chat_id, interests, push_interval_hours, last_push_at, pushed_links, language
+            SELECT chat_id, interests, push_interval_hours, last_push_at, pushed_links, language,
+                   restricted_sources_enabled
             FROM subscribers
             WHERE status = ? AND push_enabled = 1
             """,
             (APPROVED,),
         ).fetchall()
     result = []
-    for chat_id, interests_json, interval_hours, last_push_at, pushed_links_json, language in rows:
+    for chat_id, interests_json, interval_hours, last_push_at, pushed_links_json, language, restricted in rows:
         result.append(
             {
                 "chat_id": chat_id,
@@ -384,6 +385,7 @@ def list_push_enabled_subscribers() -> list[dict]:
                 "last_push_at": datetime.fromisoformat(last_push_at) if last_push_at else None,
                 "pushed_links": json.loads(pushed_links_json) if pushed_links_json else [],
                 "language": language,
+                "restricted_sources_enabled": bool(restricted),
             }
         )
     return result

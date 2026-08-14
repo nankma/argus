@@ -19,7 +19,7 @@ def test_fetch_new_articles_filters_by_published_dt(monkeypatch):
     old = _article("https://example.com/old", published_dt=datetime(2026, 7, 1, tzinfo=timezone.utc))
     new = _article("https://example.com/new", published_dt=datetime(2026, 8, 5, tzinfo=timezone.utc))
     monkeypatch.setattr(
-        news_sources, "enabled_sources", lambda: [("test", lambda query, n: [old, new])]
+        news_sources, "enabled_sources", lambda include_restricted=True: [("test", lambda query, n: [old, new])]
     )
 
     result = news_push.fetch_new_articles(["AI"], since, set())
@@ -33,7 +33,7 @@ def test_fetch_new_articles_falls_back_to_pushed_links_for_unparsed_dates(monkey
     monkeypatch.setattr(
         news_sources,
         "enabled_sources",
-        lambda: [("test", lambda query, n: [unparsed_seen, unparsed_unseen])],
+        lambda include_restricted=True: [("test", lambda query, n: [unparsed_seen, unparsed_unseen])],
     )
 
     result = news_push.fetch_new_articles(["AI"], None, {"https://example.com/seen"})
@@ -44,7 +44,7 @@ def test_fetch_new_articles_falls_back_to_pushed_links_for_unparsed_dates(monkey
 def test_fetch_new_articles_dedupes_across_topics(monkeypatch):
     article = _article("https://example.com/shared", published_dt=datetime(2026, 8, 5, tzinfo=timezone.utc))
     monkeypatch.setattr(
-        news_sources, "enabled_sources", lambda: [("test", lambda query, n: [article])]
+        news_sources, "enabled_sources", lambda include_restricted=True: [("test", lambda query, n: [article])]
     )
 
     result = news_push.fetch_new_articles(["AI", "robotics"], None, set())
@@ -56,7 +56,7 @@ def test_fetch_new_articles_isolates_source_errors(monkeypatch):
     def failing_source(query, n):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("broken", failing_source)])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda include_restricted=True: [("broken", failing_source)])
 
     result = news_push.fetch_new_articles(["AI"], None, set())
 
@@ -120,7 +120,15 @@ def test_is_subscriber_due_true_after_interval():
     assert news_push.is_subscriber_due(last_push, 24, now) is True
 
 
-def _subscriber(chat_id, interests=("AI",), interval=24, last_push_at=None, pushed_links=(), language=None):
+def _subscriber(
+    chat_id,
+    interests=("AI",),
+    interval=24,
+    last_push_at=None,
+    pushed_links=(),
+    language=None,
+    restricted_sources_enabled=False,
+):
     return {
         "chat_id": chat_id,
         "interests": list(interests),
@@ -128,6 +136,7 @@ def _subscriber(chat_id, interests=("AI",), interval=24, last_push_at=None, push
         "last_push_at": last_push_at,
         "pushed_links": list(pushed_links),
         "language": language,
+        "restricted_sources_enabled": restricted_sources_enabled,
     }
 
 
@@ -194,6 +203,37 @@ def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch):
     write_digest.assert_called_once_with("fake-model", new_articles, "French")
 
 
+def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypatch):
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        users_db,
+        "list_push_enabled_subscribers",
+        lambda: [_subscriber(9, restricted_sources_enabled=True), _subscriber(10, restricted_sources_enabled=False)],
+    )
+    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(news_push, "fetch_new_articles", fetch)
+
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+
+    assert fetch.call_args_list[0].kwargs["include_restricted"] is True
+    assert fetch.call_args_list[1].kwargs["include_restricted"] is False
+
+
+def test_fetch_new_articles_defaults_to_excluding_restricted_sources(monkeypatch):
+    called_with = {}
+
+    def fake_enabled_sources(include_restricted=True):
+        called_with["include_restricted"] = include_restricted
+        return []
+
+    monkeypatch.setattr(news_sources, "enabled_sources", fake_enabled_sources)
+
+    news_push.fetch_new_articles(["AI"], None, set())
+
+    assert called_with["include_restricted"] is False
+
+
 def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(4)])
@@ -235,7 +275,7 @@ def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch):
 
     call_count = {"n": 0}
 
-    def fetch_side_effect(topics, since, pushed_links):
+    def fetch_side_effect(topics, since, pushed_links, include_restricted=False):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("boom")
