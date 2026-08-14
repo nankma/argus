@@ -45,6 +45,15 @@ def test_parse_iso_published_handles_missing_and_malformed():
     assert news_sources._parse_iso_published("not a date") is None
 
 
+def test_parse_iso_published_assumes_utc_when_offset_is_missing():
+    # Real incident, 2026-08-14: a source returning a timestamp with no
+    # offset at all produced a naive datetime, which crashed every
+    # news_push.py cycle when compared against an aware `since` value.
+    result = news_sources._parse_iso_published("2026-08-13T22:00:00")
+    assert result == datetime(2026, 8, 13, 22, 0, 0, tzinfo=timezone.utc)
+    assert result.tzinfo is not None
+
+
 def test_parse_rss_published_handles_missing():
     assert news_sources._parse_rss_published({}) is None
 

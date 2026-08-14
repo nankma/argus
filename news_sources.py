@@ -38,13 +38,28 @@ _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 
 def _parse_iso_published(raw: str | None) -> datetime | None:
     """For sources that give an ISO-8601-ish string (HN's created_at,
-    NewsAPI/GNews/Perigon's publishedAt/pubDate)."""
+    NewsAPI/GNews/Perigon's publishedAt/pubDate).
+
+    Real incident, 2026-08-14: a source returning a timestamp with no UTC
+    offset at all (e.g. "2026-08-13T22:00:00", no "Z", no "+00:00") made
+    `datetime.fromisoformat` return a naive datetime, silently breaking
+    this function's documented "always timezone-aware" contract. That
+    naive value then crashed every news_push.py cycle for two real
+    subscribers with `TypeError: can't compare offset-naive and
+    offset-aware datetimes` (published_dt <= since, where since is
+    always aware) -- not an occasional glitch, a deterministic failure on
+    every single tick once that source had a new article. Fixed by
+    assuming UTC for any parse that comes back naive, same as this
+    function already does explicitly for "Z"."""
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _parse_rss_published(entry) -> datetime | None:
