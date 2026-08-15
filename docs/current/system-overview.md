@@ -77,7 +77,7 @@ genuinely needed — not defaults carried over from another stack.
 
 | Component | Role | Why this over the obvious alternative |
 |---|---|---|
-| **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. Model choice is injected rather than hardcoded into consumers, so it stays swappable — see `docs/plans/model-portability-plan.md` |
+| **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. Model choice is config-driven (`LLM_MODEL`/`LLM_MODEL_CLASSIFIER` environment variables), not hardcoded, so switching provider or model is a restart, not a code change — see `docs/plans/model-portability-plan.md` |
 | **LangChain** | Agent framework | Framework-managed agent loop, and — critically — a swappable model interface. That's what lets the entire test suite run against a scripted fake with no network and no API cost. |
 | **Telegram** | Delivery channel | Supports *long polling*, so the bot needs no public endpoint, no TLS, no domain. Eliminates an entire class of attack surface and operational burden. |
 | **SQLite** | Persistence | Zero operational overhead and adequate at current scale. A known limitation, deliberately accepted — see Appendix B.2. |
@@ -129,7 +129,7 @@ path is designed and covered below.
 ```mermaid
 flowchart TB
     DEV["Developer workstation"]
-    GH["GitHub<br/>source of truth<br/>CI: 160 tests per change"]
+    GH["GitHub<br/>source of truth<br/>CI: 280 tests per change"]
     BUILD["Local build server<br/>self-hosted runner<br/>builds image, deploys on commit"]
     TG["Telegram servers"]
     EXT["10 news sources"]
@@ -256,8 +256,9 @@ flowchart TB
 
 ### The request pipeline
 
-**The first LLM call is a router.** Its job is to decide which route the
-request takes — not to answer it. Different routes then do genuinely
+**The first LLM call is a router.** Its job is to decide which route (or
+routes — see below) the request takes, and extract whatever arguments
+that route needs — not to answer it. Different routes then do genuinely
 different work, because a request to change a setting has nothing in
 common with a request to research a topic.
 
@@ -265,27 +266,45 @@ common with a request to research a topic.
 flowchart TB
     M["incoming message"] --> R{"regex pre-filter<br/>zero LLM cost"}
     R -->|known attack pattern| REJ["reject, with guidance<br/>on what is supported"]
-    R -->|pass| S1{"<b>Router — LLM call 1</b><br/>structured output:<br/>in scope? which route?"}
+    R -->|pass| S1{"<b>Router — LLM call 1</b><br/>structured output:<br/>in scope? which route(s)?<br/>which arguments?"}
 
     S1 -->|off-topic| REJ
-    S1 -->|news query| RA["<b>Route A — Research</b><br/>tool-calling agent:<br/>search sources, synthesize,<br/>cite links"]
-    S1 -->|"interests / language / schedule"| RB["<b>Route B — Settings</b><br/>bounded state change:<br/>update the subscriber record"]
+    S1 -->|"one or more routes, in order<br/>(almost always one; occasionally<br/>a message carries two intents)"| DISPATCH{"dispatch each<br/>selected route"}
+
+    DISPATCH --> RA["<b>Route A — Research</b><br/>tool-calling agent:<br/>search sources, synthesize,<br/>cite links"]
+    DISPATCH --> RB["<b>Route B — Settings</b><br/>bounded state change,<br/>applied directly:<br/>update the subscriber record"]
 
     RA --> V{"<b>Verify — final LLM call</b><br/>check what was actually written"}
-    RB --> V
+    RB -->|"reply needed translating<br/>into the user's language"| V
+    RB -->|"plain templated reply,<br/>no translation needed"| JOIN
     V -->|fail| REJ
-    V -->|pass| OUT["send to user"]
+    V -->|pass| JOIN["join every dispatched<br/>route's reply, in order"]
+    JOIN --> OUT["send to user"]
 ```
 
-| Route | Tools it uses | Why it's a separate route |
+| Route | How it works | Why it's a separate route |
 |---|---|---|
-| **A — Research** | News search across the source registry | Its tools return **content** — articles the model has to read, filter, and merge into a trend report. That interpretation step is what requires several model turns |
-| **B — Settings** | Update interests, reply language, push schedule | Its tools perform a **bounded state change**. The router has already established the intent, and the tool's result needs no interpretation — it either succeeded or it didn't |
+| **A — Research** | The tool-calling agent searches the source registry and reasons over what comes back | Its tool returns **content** — articles the model has to read, filter, and merge into a trend report. That interpretation step is what requires several model turns |
+| **B — Settings** | The router's extracted arguments (which topic, which interval, which language) are applied directly against the subscriber record — no agent loop, no tool-calling reasoning | A **bounded state change**. The router has already established both the intent and its arguments, and the result needs no interpretation — it either succeeded or it didn't |
 
-Both routes call tools; the difference is what comes back. Route A's
-tools hand the model raw material it must reason over. Route B's tools
-simply commit a change, so there is nothing left to reason about once the
-router has decided what the user wanted.
+Route A hands the model raw material it must reason over across several
+turns. Route B commits a change directly from what the router already
+extracted, so there is nothing left to reason about — which is also why
+Route A always reaches the verify step and Route B usually doesn't: a
+plain templated confirmation isn't model output, so there's nothing to
+check. It only rejoins the verify step when it had to be translated into
+a subscriber's preferred reply language (a real, if less common, model
+call on this path).
+
+**A message can carry more than one intent** — "add robotics to my
+interests and tell me what's new with it" is both a settings change and a
+research request. The router returns an *ordered list* of routes for
+that case (not just one), each is dispatched in turn against the same
+original message, and their replies are joined into a single reply.
+**All-or-nothing**: if any one segment fails the verify step, the whole
+reply is rejected rather than sent partially — simpler to reason about
+than a partially-successful message, at the cost of an all-or-nothing
+retry on a rare failure.
 
 ### Why multiple LLM calls
 
@@ -295,14 +314,17 @@ quality:
 
 | Call | Job | Why it can't be folded into the agent |
 |---|---|---|
-| **Router** | Is this in scope, and which route does it take? | Runs *before* any expensive work, so off-topic input is rejected without paying for tool use and a long generation. Its decision also determines what the chosen route is allowed to do. |
-| **Route A agent** | Search, synthesize, cite | The only route whose tools return content needing interpretation, so it's the only one that needs multiple model turns. Route B's single state-changing call doesn't. |
-| **Verify** | Is what was actually written acceptable to send? | Some failures are only visible in the output. A model asked to check its own output in the same breath as producing it is grading its own work. |
+| **Router** | Is this in scope, which route(s) does it take, and what arguments does each need? | Runs *before* any expensive work, so off-topic input is rejected without paying for tool use and a long generation. Its decision also determines what each chosen route does — Route B never has to ask the model again for the topic/interval/language it already extracted. |
+| **Route A agent** | Search, synthesize, cite | The only route whose tool returns content needing interpretation, so it's the only one that needs multiple model turns. Route B's state change doesn't. |
+| **Verify** | Is what was actually written acceptable to send? | Some failures are only visible in the output. A model asked to check its own output in the same breath as producing it is grading its own work. Skipped on Route B when nothing was translated — a fixed template isn't model output, so there's nothing to verify. |
 
-The router deliberately does **two jobs in one call** — safety gate *and*
-route selection. The obvious implementation is two separate calls; both
-questions need the same understanding of the message, so merging them
-halves the cost and latency of the gate on every message.
+The router deliberately does **more than one job in one call** — safety
+gate, route selection, and (for Route B) extracting the exact arguments
+that route needs, all from the same read of the message. The obvious
+implementation is a separate call per question; all of them need the same
+understanding of the message, so merging them keeps the cost and latency
+of the gate close to flat as more request types were added, rather than
+growing with each one.
 
 ### The push workflow
 
@@ -345,7 +367,7 @@ being a fixed string:
 
 ```mermaid
 flowchart LR
-    L1["Layer 1<br/>identity + scope<br/><i>always present</i>"] --> L2["Layer 2<br/>per-category instructions<br/><i>selected by Stage 1</i>"]
+    L1["Layer 1<br/>identity + scope<br/><i>always present</i>"] --> L2["Layer 2<br/>research + report<br/>instructions<br/><i>the only route that<br/>reaches this loop</i>"]
     L2 --> L3["Layer 3<br/>this user's stored<br/>interests + language<br/><i>read live from DB</i>"]
     L3 --> L4["Layer 4<br/>the user's message"]
 ```
@@ -353,7 +375,7 @@ flowchart LR
 | Layer | Purpose |
 |---|---|
 | **1 — Identity and scope** | Who the agent is and what it will not do. Constant across every request; the anchor the guardrails back up. |
-| **2 — Task instructions** | Selected by Stage 1's classification. A "change my language" turn gets different instructions *and different tools* than a news query — so the agent isn't carrying report-formatting rules while updating a setting. |
+| **2 — Task instructions** | Research and trend-report-formatting instructions. Route B (settings changes) no longer reaches this loop at all — it's dispatched directly against the database (§B2) — so as of the settings-dispatch refactor, this layer no longer branches by category; it's unconditionally the research instructions. |
 | **3 — User memory** | This subscriber's interests and reply language, read live from the database. **This layer is the entire personalization mechanism.** |
 | **4 — The message** | The actual request. |
 
@@ -395,7 +417,7 @@ admin bot, which bounds cost-abuse exposure to a known set of people.
 
 ## C1. Test cases
 
-**160 tests, ~2.5 seconds, $0 API cost per run.**
+**280 tests, ~15 seconds, $0 API cost per run.**
 
 That's possible because the model is dependency-injected: production
 passes a real client, tests pass a scripted fake. No conditional
@@ -404,8 +426,8 @@ to run on every change rather than before a release.
 
 | Area | What's covered |
 |---|---|
-| Agent core | Tool dispatch, prompt composition per category, user-memory injection |
-| Guardrails | Each layer independently: pre-filter patterns, classification handling, output checks, fail-open behavior |
+| Agent core | Tool dispatch, prompt composition, settings dispatch (Route B — deterministic, so directly assertable with no fake model needed), user-memory injection |
+| Guardrails | Each layer independently: pre-filter patterns, router classification and argument extraction (including multi-category routing), output checks, fail-open behavior on both an error and a `None` result |
 | User store | Interests, language, push settings, approval state transitions, schema migration |
 | Push scheduler | Due-checking, both deduplication paths, per-subscriber failure isolation |
 | Bot layer | Message chunking against the 4096-char limit, formatting normalization, malformed-markup fallback |
@@ -433,7 +455,7 @@ broken.
 
 ## C3. Post-deployment testing
 
-Unit tests can't cover the real model, so a **13-case checklist runs
+Unit tests can't cover the real model, so a **14-case checklist runs
 against the live service after every deployment**, with defined inputs and
 expected outputs:
 
@@ -444,6 +466,7 @@ expected outputs:
 | 7–8 | Push enable/disable; interval change takes effect |
 | 9–11 | Language set including script variants; applies to subsequent replies |
 | 12–13 | Guardrail rejection is informative; new-user onboarding from a genuinely fresh account |
+| 14 | Multi-category routing: one message combining a settings change and a news query gets both addressed in one reply |
 
 Each case was derived from a real regression class, so the checklist grows
 as the system teaches me what breaks. A deploy isn't done until it passes.
@@ -484,7 +507,7 @@ service, and no paging tool.
 before theorizing → root cause → fix → close the hole that let it
 through.* That last step is the one that compounds — every incident
 resolves into either a new test case or a new post-deploy check, so the
-same class of failure can't recur silently. The 13-case checklist in §C3
+same class of failure can't recur silently. The 14-case checklist in §C3
 is built entirely from past incidents.
 
 **Possible extension, not built:** the same alert path could carry an
@@ -735,7 +758,7 @@ acceptable.
 | **No rate limiting** | An approved user could burn API quota | Access is approval-gated, bounding exposure | Before opening access more widely |
 | **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access. All access sits behind one module, keeping migration cheap — see `docs/plans/data-layer-plan.md` | When a second host or real concurrency is needed |
 | **Linear cost scaling** | Each push subscriber costs LLM calls per interval | Cheap model; conservative 1-hour interval floor | Before any open signup |
-| **Manual deploy step** | Human error surface each release | Documented workflow plus the 13-case checklist | CD is designed (§A1), not built |
+| **Manual deploy step** | Human error surface each release | Documented workflow plus the 14-case checklist | CD is designed (§A1), not built |
 | **Silent source degradation** | An upstream format change makes that source quietly return nothing | Per-source isolation keeps the request succeeding on the rest | Needs a source-health check; not built |
 
 ## B.3 Work deliberately declined
