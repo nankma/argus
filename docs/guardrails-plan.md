@@ -473,6 +473,110 @@ case harder to argue against, not weaker:
    makes it harder to isolate whether a fix for one risks regressing the
    other. Recorded in that doc's open questions, not duplicated here.
 
+## Retracted: "Chinese-language crypto/blockchain interest requests misclassified" — a second testing artifact, corrected 2026-08-16
+
+**This was reported as a confirmed finding, then disproved within the
+same investigation** — left visible here rather than deleted, same
+policy as the "testing artifact" incident below it originally was (this
+section now sits above that one only because it was written second;
+chronologically it repeats that incident's exact lesson).
+
+**What was reported**: while running the post-deploy smoke-test checklist
+(case 3, non-English interest phrasing), `curl` calls through an SSH
+tunnel to `test_api.py` scored **0/15+** on `"我對區塊鏈很感興趣"`
+("I'm interested in blockchain") and similar crypto-topic phrasings —
+every single call came back `off_topic` instead of `set_interest`. This
+looked well-isolated at the time: reproduced across multiple `chat_id`s,
+across traditional and simplified Chinese, across blockchain/crypto/
+Bitcoin phrasings, with a clean English control passing 3/3 — a real
+signature of a language-specific router bug, not random flakiness.
+
+**What actually happened**: `classify_message` called directly (both
+locally and via `docker exec` inside the deployed container, bypassing
+`curl`/the SSH tunnel entirely) scored **10/10 and 39/40** on the exact
+same text. That discrepancy — real logic, tested two different ways,
+both clean; only the `curl`-over-tunnel path failing — was the same
+shape as the retracted Finding 1 below, so it was chased the same way:
+isolate one variable at a time instead of trusting the first plausible
+story. The decisive test was sending the identical request via Python's
+`urllib` (proper UTF-8 byte encoding) through the *same* SSH tunnel that
+`curl` was using — it succeeded immediately, `set_interest`, correctly.
+`curl -d '{"text": "我對區塊鏈很感興趣", ...}'` invoked through this
+session's shell tooling was silently mangling this specific multi-byte
+Chinese payload before it ever left the local machine — the router
+correctly classified the *corrupted* text it actually received as
+off-topic gibberish, because that's genuinely what arrived.
+`tools/measure_guardrails.py --via-http` was never affected because it
+already used `urllib` internally, not `curl` — which is exactly why its
+100/100 result during the same session correctly did not reproduce this.
+
+**Lesson, stated plainly so it isn't relearned a third time**: `curl`
+invoked with non-ASCII text embedded directly in a `-d` argument, from
+this shell tooling, is not trustworthy for multi-byte payloads — prefer
+a Python script (`urllib`/`requests`, whether ad hoc or via
+`tools/measure_guardrails.py --via-http`) for any live test involving
+non-English text, full stop. This is now the second time an ad hoc
+`curl`-based manual check produced a false signal that a scripted,
+UTF-8-correct method didn't reproduce; the fix isn't a smarter one-off
+check next time, it's not reaching for raw `curl` with Chinese/non-ASCII
+payloads at all.
+
+**What's real and kept**: the four `chinese_crypto` cases added to
+`tools/measure_guardrails.py`'s `LAYER2_CASES` during this investigation
+are legitimate regression coverage regardless of the retraction —
+verified passing (10/10 each) via the harness's own `urllib`-based
+runner, so they now guard against a real future regression even though
+none was found this time.
+
+## Incident: history trimming can produce an invalid tool-call/tool-response sequence — found 2026-08-16
+
+**Also found during the same smoke-test run**, case 4 (start/stop push),
+at `chat_id=999` specifically (a chat_id this session had already used
+heavily for cases 1/2/3, accumulating real tool-calling turns in its
+history). `"Stop pushing me news"` failed with `blocked_at: "agent_error"`
+and a specific, actionable error surfaced in the reply text (per
+`process_message`'s `except Exception as exc` handler, which puts `exc`
+directly into the user-facing reply):
+
+```
+Error code: 400 - {'error': {'message': "Messages with role 'tool' must
+be a response to a preceding message with 'tool_calls'", 'type':
+'invalid_request_error', ...}}
+```
+
+**Root cause, read directly from the code, not guessed**: `bot.py`'s
+`_trim_history` trims stored per-chat conversation history purely by
+position and age —
+
+```python
+kept = [(m, t) for m, t in zip(messages, timestamps) if now - t <= MAX_HISTORY_AGE]
+kept = kept[-MAX_HISTORY_MESSAGES:]
+```
+
+— with no awareness that a `ToolMessage` in that history is only valid
+immediately after the `AIMessage` that issued its `tool_calls`. If the
+`MAX_HISTORY_MESSAGES` (20) or `MAX_HISTORY_AGE` (~1h) cutoff happens to
+land between an assistant's tool-calling turn and its tool response(s),
+the trimmed history starts with an orphaned `tool`-role message with no
+preceding `tool_calls` — exactly what DeepSeek's API rejected here. Any
+chat that racks up enough tool-using turns (every `news_query`/
+`set_interest`/`start_push`/etc. turn involves at least one tool call)
+within the trim window is at risk, not a one-off fluke.
+
+**Confirmed isolated to the trimming bug, not a start_push/stop_push
+functional defect**: the identical `"Start pushing me news"` /
+`"Stop pushing me news"` pair against a fresh `chat_id` (no accumulated
+history to trim awkwardly) succeeded cleanly both times.
+
+**Not fixed yet** — the fix needs to make `_trim_history` cut on a
+tool-call-pair-aware boundary (e.g., never cut immediately after an
+`AIMessage` that has `tool_calls`, always keep or drop the whole
+call+response group together) rather than a blind positional slice.
+Flagging here rather than guessing at the exact trim-boundary logic and
+shipping it unmeasured — this needs a unit test reproducing the exact
+orphaned-`ToolMessage` shape before/after the fix, same discipline as
+everything else in this doc.
+
 ## Unrun experiment: what actually made the output check reliable
 
 **Status: not run.** Identified 2026-08-09 while writing up the layer-4
