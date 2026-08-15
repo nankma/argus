@@ -22,11 +22,11 @@ their cost at current scale.
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Config-driven model selection | **Not built** — recommended first step |
-| 2 | Per-stage model routing (cheap model for classifiers) | **Not built** — recommended; the seam already exists |
+| 1 | Config-driven model selection | **Built 2026-08-16** — `agent.build_model()`, `LLM_MODEL` env var, see below |
+| 2 | Per-stage model routing (cheap model for classifiers) | **Built 2026-08-16 as plumbing** — `LLM_MODEL_CLASSIFIER` env var; both default to the same model today since no second provider is configured yet, so production behavior is unchanged until one is set |
 | 3 | Provider failover | Not built — deferred until availability is a real requirement |
 | 4 | Dedicated AI gateway (LiteLLM / OpenRouter / Cloudflare) | **Evaluated, not recommended at current scale** |
-| 5 | Re-validating guardrail reliability after any model change | **Blocking prerequisite** for 1–3 — see "The behavioral caveat" |
+| 5 | Re-validating guardrail reliability after any model change | **Blocking prerequisite** for 1–3 — see "The behavioral caveat". A fresh baseline was measured 2026-08-16 against the newly-wired config, see below |
 
 ## Where things stand today
 
@@ -65,6 +65,53 @@ objects (no API calls):
 | `init_chat_model(configurable_fields=("model", "model_provider"))` | Works — returns `_ConfigurableModel`, allowing the model to be chosen **per invocation** via runtime config. |
 | `Runnable.with_fallbacks([...])` | Works — returns `RunnableWithFallbacks`. Automatic failover to a secondary model. |
 | `configurable_alternatives` / `configurable_fields` on `RunnableSerializable` | Present. (Not on the base `Runnable` — confirmed, so target the right class if used.) |
+
+## Built 2026-08-16 — Levels 1 and 2, plus a fresh baseline
+
+`agent.build_model(env_var, default=DEFAULT_MODEL)` wraps
+`langchain.chat_models.init_chat_model(os.environ.get(env_var, default))`.
+`agent.main()` calls it once (`LLM_MODEL`); `bot.py`/`combined_bot.py`'s
+`main()` call it twice -- `LLM_MODEL` for the agent, `LLM_MODEL_CLASSIFIER`
+for `guard_model` (Stages 1/3, the router and output check). Both default
+to `DEFAULT_MODEL = "deepseek:deepseek-chat"`, so this is pure plumbing
+today, not a behavior change -- no second provider is configured yet (see
+"Open questions" below, still open). `tools/measure_guardrails.py`
+deliberately keeps its own hardcoded `ChatDeepSeek(model="deepseek-chat")`
+rather than reading these env vars -- the harness needs to pin a known
+model for reproducible scoring runs, independent of whatever the live app
+happens to be configured with at the time.
+
+**Fresh baseline, measured against this code path** (all layers,
+`tools/measure_guardrails.py`, 2026-08-16):
+
+| Layer | Result |
+|---|---|
+| 1 (`fails_local_prefilter`) | 8/8 (100%) |
+| 2 (`classify_message`, the router) | 190/190 (100%), 10 trials/case |
+| 4 (`is_output_on_topic`, the output check) | 158/160 (99%), 20 trials/case |
+
+Consistent with (slightly better than) the last recorded layer-4 numbers
+in `docs/plans/guardrails-plan.md` (85%/100% on `set_language`, 92% on
+self-disclosure) -- confirms the config-driven wiring is behavior-neutral,
+as expected since both env vars still resolve to the same model.
+
+**A real bug found and fixed while establishing this baseline, not
+hypothetical**: the first `--layer 4` run crashed with `AttributeError:
+'NoneType' object has no attribute 'discusses_own_configuration'`.
+`classify_message`/`is_output_on_topic` both fail open on an *exception*
+from `structured.invoke(...)`, but a `None` return (no exception at all --
+seen once in ~160 trials, hit specifically on this run) wasn't guarded.
+Since neither call is wrapped in a try/except at the `bot.py`
+`process_message` call site, this could have crashed real message
+handling in production, not just the harness. Fixed in `guardrails.py` --
+both functions now also return their fail-open default on a `None`
+result, with regression tests in `tests/test_guardrails.py`.
+
+**Before pointing `LLM_MODEL_CLASSIFIER` (or `LLM_MODEL`) at a different
+model**, re-run `python tools/measure_guardrails.py --layer 2` and
+`--layer 4` against it and compare to the table above -- this is what "The
+behavioral caveat" below means in practice, made concrete rather than left
+as prose.
 
 ## Level 1 — Config-driven model selection
 

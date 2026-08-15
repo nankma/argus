@@ -244,8 +244,9 @@ goal.
 
 ## Planned refactor: dispatch settings routes out of the agent
 
-**Status: not built.** Identified 2026-08-09 while documenting the request
-pipeline for `docs/current/system-overview.md` §B2.
+**Status: built 2026-08-16.** Identified 2026-08-09 while documenting the
+request pipeline for `docs/current/system-overview.md` §B2; see "What got
+built" below for the design points this section originally left open.
 
 **The observation.** The router (built, live) classifies every message
 into a category, and the agent's layer-2 instructions and tool set are
@@ -316,6 +317,56 @@ measuring whether a richer structured output degrades its classification
 accuracy before committing — the same discipline applied in
 `docs/current/system-overview.md` Appendix B.1, where a plausible prompt change measured
 dramatically worse.
+
+## What got built
+
+`guardrails.MessageClassification` gained three optional fields
+(`topic`, `push_interval_hours`, `language`), extracted by the router
+itself -- `_ROUTER_PROMPT` absorbed the normalization instructions
+(short topic label, language typo/variant correction) that used to live
+in `agent.py`'s per-category prompt fragments, since the agent no longer
+sees these categories at all. `agent.dispatch_settings(category, chat_id,
+classification)` performs the state change directly against `users_db`
+and returns an English template confirmation -- no model call, fully
+unit-testable, exactly the doc's original stated goal. `bot.py`'s
+`process_message` checks each category against `agent.ROUTE_B_CATEGORIES`
+(`classification.categories` is a list -- see the multi-category routing
+section below) and calls this instead of `run_agent` for the five
+settings categories; `news_query` is now the only category that still
+enters the agent loop (Route A) at all, which let `agent.py`'s
+`_compose_prompt` drop its per-category branching entirely -- it's
+unconditionally the news_query instructions now.
+
+**The open design points, resolved:**
+
+- **Layer 4 stays, but conditionally.** Route B only runs
+  `is_output_on_topic` when the confirmation was actually translated (see
+  next point) -- a plain English template is our own fixed string, not
+  model output, so there's nothing to check. `bot.py`'s `_route_b_reply`
+  also runs the same Markdown/preamble safety nets Route A applies to its
+  own model output, since a translated confirmation is real LLM text with
+  the same stray-Markdown risk.
+- **Translation, not prompt-driven language matching.** `bot.py`'s
+  `_translate_confirmation` makes one small model call, checked against
+  `users_db.get_language(chat_id)` *after* `dispatch_settings` runs -- so
+  a fresh `set_language` change gets its own confirmation translated into
+  the language it just set, and a pre-existing preference governs every
+  other Route B category's confirmation too, per
+  `docs/plans/bot-features-plan.md` item 2's original requirement.
+- **Argument extraction, measured before committing, per this section's
+  own stated discipline.** `tools/measure_guardrails.py`'s `LAYER2_CASES`
+  now checks the new fields (`expects_topic`, `expected_push_interval_hours`,
+  `expected_language_contains`), not just `on_topic`/`category`. Measured
+  2026-08-16: **187/190 (98%)** overall, matching the pre-change baseline
+  on every group except one -- `mixed_language_control` (a single
+  real-subscriber sentence bundling a push-interval request *and* a
+  language-preference request in one clause) dropped to **7/10 (70%)** on
+  `push_interval_hours` extraction specifically, while `category`/`on_topic`
+  stayed perfect. Not fixed here: this sentence is genuinely two intents
+  in one message -- exactly the multi-category open question below --
+  and is expected to resolve more naturally once the router can return
+  more than one category for it, rather than by further tuning a
+  single-category prompt to do two things well at once.
 
 ### Splitting layer 3 and layer 4 by branch, not just by narrow/full
 
@@ -392,16 +443,60 @@ explicit answer, not an accidental one. Three options were raised:
   is a natural single sentence, not a contrived edge case) and pushes a
   system limitation onto the user as extra typing.
 
-**Leaning (a), specifically as "router returns a list, not one category"**:
-closest to how a person would actually read a mixed message (do the thing,
-then answer the thing), and reuses each branch's existing single-intent
-logic unchanged rather than needing a bespoke merge step per branch
-combination like (b), or asking the user to fight the interface like (c).
-Not decided — needs the router's structured-output schema to change
-(`category: Literal[...]` → `categories: list[Literal[...]]`), which has
-the same "does a richer structured output degrade classification
-accuracy" risk already flagged for the argument-extraction expansion
-above, and should be measured the same way before committing.
+**Built 2026-08-16, as (a).** `guardrails.MessageClassification.category`
+became `categories: list[Category]`; `_ROUTER_PROMPT` instructs a
+single-element list for the overwhelmingly common single-intent case and
+only a longer list when the message genuinely asks for more than one
+distinct thing. `bot.py`'s `process_message` special-cases
+`len(categories) == 1` to reuse the exact pre-existing single-category
+code path unchanged (`_process_single_category` -- Route A keeps its full
+message-list history fidelity, Route B keeps its own shape); a real
+multi-category list goes through the new `_process_multi_category`, which
+dispatches each category (reusing `_route_a_reply`/`_route_b_reply`, the
+same logic `_process_single_category` calls) against the same original
+`history`/`user_text`, joins the replies with a blank line in category
+order, and persists the whole turn as one `(Human, AI)` history pair, not
+one per category. **All-or-nothing**: if any segment is blocked by layer
+4, the entire reply becomes `REDIRECT_MESSAGE` rather than sending a
+partial result -- note that a Route B state change from an earlier
+segment in the same turn still commits even if a later segment gets
+blocked, since dispatch_settings's write already happened; this is a
+judgment call, not something the three original options above resolved,
+and is easy to revisit if partial replies turn out to be preferable.
+
+**Measured before committing, per this section's own stated discipline.**
+`tools/measure_guardrails.py` gained `LAYER2_MULTI_INTENT_CASES` (two
+genuine multi-intent examples in English and Chinese, two single-intent
+negative controls confirming the router doesn't over-split ordinary
+messages, and one maximally-ambiguous real case, below) and
+`measure_layer2_multi_intent`. Results, 10 trials/case:
+
+| Case | Result |
+|---|---|
+| `[set_interest, news_query]` (English + Chinese) | 20/20 (100%) |
+| `[start_push, set_language]` (English) | 10/10 (100%) |
+| Single-intent negative controls (2 cases) | 20/20 (100%) — confirms no over-splitting |
+| The pre-existing `mixed_language_control` real-subscriber sentence | 6/10 (60%) — see below |
+
+The base (single-category) `LAYER2_CASES` dataset held at **180/180
+(100%)** after the schema change -- no regression from the richer
+structured output, the risk this section originally flagged.
+
+**One real, unresolved finding, not swept under the rug**: the
+`mixed_language_control` case (a real subscriber's sentence bundling a
+push-interval request, a language-preference request, and an ambiguous
+"tech/finance/bitcoin" phrase that could be read as either a topic filter
+or a new interest) doesn't have one stable answer -- direct inspection
+across 10 raw trials showed the model reading it as 2 *or* 3 intents,
+with both the third intent's presence and the list's order varying trial
+to trial. Scored with an order-independent, extras-tolerant
+`expected_categories_containing = {start_push, set_language}` (added
+alongside the existing exact-match `expected_categories`, for cases that
+don't have one correct exact list) rather than pinned to one exact
+answer. Not chased to 100% -- this is a genuinely ambiguous real sentence
+where trial-to-trial variation is itself the honest finding, the same
+judgment call as `docs/plans/guardrails-plan.md` not chasing
+`self_disclosure`'s 98% to 100%.
 
 ## Open questions
 

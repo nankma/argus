@@ -296,7 +296,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                 continue
 
             # A stored interest is user-supplied, unsanitized text (see
-            # agent.py's update_interests) that ends up embedded in the
+            # agent.py's dispatch_settings) that ends up embedded in the
             # digest prompt above -- the same output-guardrail check
             # bot.py runs on chat replies applies here too, since this is
             # also model output about to be sent to a real user unread.

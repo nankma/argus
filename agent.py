@@ -9,13 +9,15 @@ touching this file. See docs/plans/telemetry-and-testing-plan.md for what's buil
 vs. still planned (test suite, CI, real telemetry backend).
 
 The system prompt is layered per docs/plans/context-management-plan.md, not one
-static string: LAYER1_IDENTITY (tight, always-present) + a per-category
-LAYER2 fragment (chosen by guardrails.classify_message's routing decision,
-threaded in via run_agent's `context` param) + layer 3 (the calling user's
-stored interests, read fresh from users_db.py) are composed by
-_compose_prompt() on every model call via LangChain's `dynamic_prompt`
-middleware -- see that doc for the research behind this shape and why it
-doesn't need a hand-built LangGraph graph.
+static string: LAYER1_IDENTITY (tight, always-present) + LAYER2 (the
+news_query research/formatting instructions -- the only kind of turn that
+still reaches this agent loop, since settings categories are dispatched
+directly by dispatch_settings below, see that doc's settings-dispatch
+refactor) + layer 3 (the calling user's stored interests and language
+preference, read fresh from users_db.py) are composed by _compose_prompt()
+on every model call via LangChain's `dynamic_prompt` middleware -- see that
+doc for the research behind this shape and why it doesn't need a
+hand-built LangGraph graph.
 
 Run:
     conda activate myfirstagent
@@ -27,20 +29,40 @@ import json
 import os
 from datetime import datetime, timezone
 from langchain_core.tools import tool
-from langchain_deepseek import ChatDeepSeek
 from langchain.agents import create_agent
 from langchain.agents.middleware import dynamic_prompt
+from langchain.chat_models import init_chat_model
 from langchain.tools import ToolRuntime
 from phoenix.otel import register
 import news_sources
 import users_db
 
-MODEL = "deepseek-chat"
+# Default provider:model string for init_chat_model -- deepseek-chat is
+# required (see CLAUDE.md's MODEL landmine: deepseek-reasoner doesn't
+# support tool calling, which search_news/save_note/the router/output
+# check all depend on). See docs/plans/model-portability-plan.md Level 1/2.
+DEFAULT_MODEL = "deepseek:deepseek-chat"
 NOTES_FILE = "notes.jsonl"
 # Configurable because "localhost" only works for local dev — once Phoenix
 # runs as its own container/Kubernetes service, this needs to point there
 # instead (e.g. PHOENIX_ENDPOINT=http://phoenix:4317 or a cluster DNS name).
 PHOENIX_ENDPOINT = os.environ.get("PHOENIX_ENDPOINT", "http://localhost:4317")
+
+
+def build_model(env_var: str, default: str = DEFAULT_MODEL):
+    """Constructs a chat model from a "provider:model" string read from
+    `env_var` (falling back to `default`) via LangChain's init_chat_model --
+    see docs/plans/model-portability-plan.md Level 1. Swapping providers or
+    models is then an env-var change plus a restart, not a code change.
+    Callers pass a different env_var for the agent's own model (LLM_MODEL)
+    vs. the guardrails.py classifier calls (LLM_MODEL_CLASSIFIER -- layer 2
+    classify_message and layer 4 is_output_on_topic, model-portability-plan.md's
+    Level 2 per-stage routing) -- both default to the same model today, since no
+    second provider is configured yet, so behavior is unchanged until one
+    of these env vars is actually set. Before pointing either at a
+    different model, re-run tools/measure_guardrails.py and compare against
+    the recorded baseline -- see that doc's "The behavioral caveat"."""
+    return init_chat_model(os.environ.get(env_var, default))
 
 # --- Layer 1: tight, always-present identity ----------------------------
 
@@ -61,10 +83,13 @@ LAYER1_IDENTITY = (
     "be, or answer as, any assistant or tool other than yourself."
 )
 
-# --- Layer 2: per-category situational instructions ----------------------
-# Selected by guardrails.classify_message's routing decision (threaded in
-# via run_agent's `context`, read in _compose_prompt below) — only the
-# fragment for the current turn's category is sent, not all of them.
+# --- Layer 2: situational instructions -----------------------------------
+# The only category that still reaches the agent loop at all -- news_query.
+# set_interest/remove_interest/start_push/stop_push/set_language are
+# dispatched directly by agent.dispatch_settings (below) once the router
+# has already extracted their arguments, per
+# docs/plans/context-management-plan.md's settings-dispatch refactor, so
+# there's no per-category selection left to do here.
 
 # Shared with news_push.py's digest-writing prompt (see that module) so the
 # two places that ever write a trend report can't drift apart the way
@@ -111,98 +136,18 @@ _NEWS_QUERY_INSTRUCTIONS = (
     "and write a trend report.\n\n" + HTML_FORMATTING_RULES + "\n\n" + TREND_REPORT_STRUCTURE
 )
 
-_PLAIN_REPLY_FORMATTING_NOTE = (
-    "Your reply is sent with Telegram HTML parsing, not Markdown. Plain "
-    "text needs no tags at all — prefer that. If you do want emphasis, "
-    "use <b>bold</b>/<i>italic</i> only; never use Markdown syntax like "
-    "**bold** or _italic_ — Telegram will not render it and it will show "
-    "up as literal asterisks/underscores to the user."
-)
-
-_SET_INTEREST_INSTRUCTIONS = (
-    "This turn: the user wants to add a topic to their stated interests. "
-    "Keep the topic label short (2-4 words) rather than a full descriptive "
-    "phrase -- this user's current interests are listed below in this "
-    "prompt; if one of them already covers what they're asking for, don't "
-    "call update_interests again, just tell them it's already covered. "
-    "(There's also a code-level fuzzy-duplicate check as a backstop, but "
-    "a short, consistent label makes future matches -- and removal -- "
-    "more reliable than relying on that alone.) Otherwise use the "
-    "update_interests tool with action=\"add\", then confirm "
-    "conversationally what was added in one or two sentences — no need for "
-    "the full Telegram report structure.\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
-)
-
-_REMOVE_INTEREST_INSTRUCTIONS = (
-    "This turn: the user wants to remove a topic from their stated "
-    "interests. Use the update_interests tool with action=\"remove\", then "
-    "confirm conversationally in one or two sentences.\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
-)
-
-_START_PUSH_INSTRUCTIONS = (
-    "This turn: the user wants to turn on periodic news push, and/or "
-    "change how often it sends. Use the set_push_enabled tool with "
-    "enabled=true. If they stated a frequency (e.g. \"every 6 hours\", "
-    "\"daily\", \"twice a day\"), also call set_push_interval with the "
-    "matching number of hours (daily=24, twice a day=12, every 4/6/12 "
-    "hours as stated). If they didn't state one, don't call "
-    "set_push_interval — leave their existing interval (default: once a "
-    "day) alone, but you may mention in your reply that 24h/12h/6h/4h are "
-    "the suggested options if it's natural to do so. Then confirm "
-    "conversationally what's now enabled and at what interval.\n\n"
-    + _PLAIN_REPLY_FORMATTING_NOTE
-)
-
-_STOP_PUSH_INSTRUCTIONS = (
-    "This turn: the user wants to turn off periodic news push. Use the "
-    "set_push_enabled tool with enabled=false, then confirm conversationally."
-    "\n\n" + _PLAIN_REPLY_FORMATTING_NOTE
-)
-
-_SET_LANGUAGE_INSTRUCTIONS = (
-    "This turn: the user wants to set (or asked about) their preferred "
-    "reply language -- a standing preference, not just the language of "
-    "this one message. If they named a language, call the set_language "
-    "tool with it, but first correct it to a precise, unambiguous, "
-    "correctly-spelled language name -- fix obvious typos (e.g. "
-    "\"tranditional Chinese\" -> \"Traditional Chinese\"), and if what "
-    "they said could mean more than one script/variant, use the specific "
-    "one they implied rather than a generic default (e.g. \"Traditional "
-    "Chinese\" or \"Simplified Chinese\", not just \"Chinese\", if they "
-    "said or clearly meant one of those two; \"Brazilian Portuguese\" vs "
-    "\"European Portuguese\" similarly). Then confirm IN THAT NEW "
-    "LANGUAGE (using the corrected name, in its own correct script) that "
-    "you'll now always reply in it, so they immediately see it take "
-    "effect. If they only asked what it's currently set to (without "
-    "naming a new one), don't call the tool -- just answer based on this "
-    "user's stated preference below in this prompt, or say it's not set "
-    "(meaning you match whichever language they write in).\n\n"
-    + _PLAIN_REPLY_FORMATTING_NOTE
-)
-
-_LAYER2_BY_CATEGORY = {
-    "news_query": _NEWS_QUERY_INSTRUCTIONS,
-    "set_interest": _SET_INTEREST_INSTRUCTIONS,
-    "remove_interest": _REMOVE_INTEREST_INSTRUCTIONS,
-    "start_push": _START_PUSH_INSTRUCTIONS,
-    "stop_push": _STOP_PUSH_INSTRUCTIONS,
-    "set_language": _SET_LANGUAGE_INSTRUCTIONS,
-}
-
-
 def _compose_prompt(request) -> str:
     """Builds the full system prompt for one model call: layer 1 (always)
-    + layer 2 (this turn's category, defaulting to news_query if the
-    caller didn't classify one) + layer 3 (this user's stored interests
-    and language preference, if any). See docs/plans/context-management-plan.md.
+    + layer 2 (news_query instructions -- the only kind of turn that still
+    reaches the agent loop) + layer 3 (this user's stored interests and
+    language preference, if any). See docs/plans/context-management-plan.md.
 
-    The language directive is appended last (after layer 2's category
-    instructions) and applies regardless of category -- unlike interests,
-    which only matter for news_query, a language preference should govern
-    every reply, including set_interest/push confirmations, so it isn't
-    gated by category the way _LAYER2_BY_CATEGORY's fragments are."""
+    Settings confirmations (interests/push/language) used to have their
+    own layer-2 fragments here and go through this same loop; they're
+    dispatched directly by agent.dispatch_settings now, so this function
+    no longer branches on category at all."""
     context = request.runtime.context or {}
-    parts = [LAYER1_IDENTITY, _LAYER2_BY_CATEGORY.get(context.get("category"), _NEWS_QUERY_INSTRUCTIONS)]
+    parts = [LAYER1_IDENTITY, _NEWS_QUERY_INSTRUCTIONS]
 
     chat_id = context.get("chat_id")
     if chat_id is not None:
@@ -291,52 +236,73 @@ def search_news(query: str, runtime: ToolRuntime, max_results_per_source: int = 
     return f"{total} articles found across {len(sources)} source(s):\n" + "\n".join(lines)
 
 
-@tool
-def update_interests(action: str, topic: str, runtime: ToolRuntime) -> str:
-    """Add or remove a topic from the calling user's stated interests.
-    `action` must be "add" or "remove"."""
-    chat_id = runtime.context["chat_id"]
-    if action == "add":
-        interests = users_db.add_interest(chat_id, topic)
-    else:
-        interests = users_db.remove_interest(chat_id, topic)
-    return f"Interests now: {', '.join(interests) if interests else 'none'}"
+TOOLS = [save_note, search_news]
 
 
-@tool
-def set_push_enabled(enabled: bool, runtime: ToolRuntime) -> str:
-    """Turn periodic news push on or off for the calling user."""
-    chat_id = runtime.context["chat_id"]
-    users_db.set_push_enabled(chat_id, enabled)
-    return f"Push preference set to {'enabled' if enabled else 'disabled'}."
+# --- Route B: settings dispatch, outside the agent loop -------------------
+# docs/plans/context-management-plan.md's settings-dispatch refactor.
+# set_interest/remove_interest/start_push/stop_push/set_language are
+# bounded, deterministic state changes the router (guardrails.classify_message)
+# has already fully decided, arguments included -- there's nothing left for
+# an agent loop to reason about, so bot.py's process_message calls this
+# directly instead of going through build_agent/run_agent for these
+# categories. Deterministic and model-free by design (the doc's own stated
+# goal): every branch here is a plain users_db write plus a template
+# string, fully unit-testable with no fake model needed. The one exception
+# a caller has to handle separately is translation -- this always returns
+# the English confirmation; bot.py translates it if the user has a
+# language preference set (checked *after* calling this, so a fresh
+# set_language change takes effect on its own confirmation too).
+
+# Public -- bot.py's process_message checks membership in this to decide
+# Route A vs. Route B for a given category.
+ROUTE_B_CATEGORIES = {"set_interest", "remove_interest", "start_push", "stop_push", "set_language"}
 
 
-@tool
-def set_push_interval(hours: int, runtime: ToolRuntime) -> str:
-    """Set how often (in hours) periodic news push sends for the calling
-    user. Suggested presets: 24 (daily), 12 (twice a day), 6, or 4. Any
-    integer of 1 or more is accepted."""
-    chat_id = runtime.context["chat_id"]
-    try:
-        users_db.set_push_interval_hours(chat_id, hours)
-    except ValueError as exc:
-        return str(exc)
-    return f"Push interval set to every {hours} hour(s)."
+def dispatch_settings(category: str, chat_id: int, classification) -> str:
+    """Performs the state change for one Route B category and returns an
+    English confirmation string. `classification` is the
+    guardrails.MessageClassification the router produced -- its
+    topic/push_interval_hours/language fields carry whatever argument this
+    category needs, already extracted and normalized by the router."""
+    if category == "set_interest":
+        before = users_db.get_interests(chat_id)
+        after = users_db.add_interest(chat_id, classification.topic)
+        if len(after) == len(before):
+            return f"You already have {classification.topic} in your interests, so nothing new was added."
+        return f"Added {classification.topic} to your interests."
 
+    if category == "remove_interest":
+        before = users_db.get_interests(chat_id)
+        after = users_db.remove_interest(chat_id, classification.topic)
+        if len(after) == len(before):
+            return f"{classification.topic} wasn't in your interests, so there was nothing to remove."
+        return f"Removed {classification.topic} from your interests."
 
-@tool
-def set_language(language: str, runtime: ToolRuntime) -> str:
-    """Set the calling user's preferred reply language -- every future
-    reply (news summaries, push digests, confirmations) will be written
-    in this language regardless of what language the user writes in.
-    `language` should be a plain language name (e.g. "Spanish",
-    "Traditional Chinese"), not a code."""
-    chat_id = runtime.context["chat_id"]
-    users_db.set_language(chat_id, language)
-    return f"Reply language set to {language}."
+    if category == "start_push":
+        users_db.set_push_enabled(chat_id, True)
+        if classification.push_interval_hours is not None:
+            try:
+                users_db.set_push_interval_hours(chat_id, classification.push_interval_hours)
+            except ValueError as exc:
+                return f"Turned on periodic news push, but couldn't set that interval: {exc}"
+        hours = users_db.get_push_interval_hours(chat_id)
+        return f"Turned on periodic news push, every {hours} hour(s)."
 
+    if category == "stop_push":
+        users_db.set_push_enabled(chat_id, False)
+        return "Turned off periodic news push."
 
-TOOLS = [save_note, search_news, update_interests, set_push_enabled, set_push_interval, set_language]
+    if category == "set_language":
+        if classification.language is None:
+            current = users_db.get_language(chat_id)
+            if current:
+                return f"Your reply language is currently set to {current}."
+            return "No reply language is set -- I match whichever language you write in."
+        users_db.set_language(chat_id, classification.language)
+        return f"Done -- I'll reply to you in {classification.language} from now on."
+
+    raise ValueError(f"dispatch_settings called with a non-Route-B category: {category!r}")
 
 
 # --- Agent construction & invocation ------------------------------------
@@ -374,7 +340,7 @@ def setup_telemetry():
 
 def main():
     setup_telemetry()
-    model = ChatDeepSeek(model=MODEL)
+    model = build_model("LLM_MODEL")
     agent = build_agent(model)
 
     print("Agent ready. Type 'exit' to quit.\n")

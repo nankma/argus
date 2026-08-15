@@ -80,27 +80,32 @@ LAYER2_CASES = [
     # dataset is what found the router was actually fine (140/140) and an
     # SSH tunnel was corrupting requests, not classify_message. See
     # docs/plans/guardrails-plan.md.
-    {"text": "我對機器人科技很感興趣，請加入我的追蹤主題", "on_topic": True, "category": "set_interest", "group": "chinese_set_interest"},
-    {"text": "請把機器人科技加入我的興趣", "on_topic": True, "category": "set_interest", "group": "chinese_set_interest"},
-    {"text": "我想追蹤機器人科技的新聞", "on_topic": True, "category": "set_interest", "group": "chinese_set_interest"},
+    #
+    # expects_topic/expected_push_interval_hours/expected_language_contains
+    # (added 2026-08-16, docs/plans/context-management-plan.md's
+    # settings-dispatch refactor) check the router's newly-added argument
+    # extraction, not just on_topic/category -- the exact risk that doc
+    # flags as needing measurement before committing: does asking the
+    # router to extract more fields degrade its base classification
+    # accuracy. expects_topic is a shape check (short label present), not
+    # an exact-string check, since the topic's phrasing/language is a
+    # legitimate model choice, not a fixed answer.
+    {"text": "我對機器人科技很感興趣，請加入我的追蹤主題", "on_topic": True, "category": "set_interest", "expects_topic": True, "group": "chinese_set_interest"},
+    {"text": "請把機器人科技加入我的興趣", "on_topic": True, "category": "set_interest", "expects_topic": True, "group": "chinese_set_interest"},
+    {"text": "我想追蹤機器人科技的新聞", "on_topic": True, "category": "set_interest", "expects_topic": True, "group": "chinese_set_interest"},
     {"text": "機器人科技最近有什麼新聞", "on_topic": True, "category": "news_query", "group": "chinese_news_query"},
     # English controls, same topic -- confirmed 100% reliable in the incident.
-    {"text": "Add robotics to my interests", "on_topic": True, "category": "set_interest", "group": "english_control"},
+    {"text": "Add robotics to my interests", "on_topic": True, "category": "set_interest", "expects_topic": True, "group": "english_control"},
     {"text": "What is happening with robotics lately?", "on_topic": True, "category": "news_query", "group": "english_control"},
     # Other categories, untested in Chinese before this harness.
-    {"text": "把機器人科技從我的興趣移除", "on_topic": True, "category": "remove_interest", "group": "chinese_other_categories"},
-    {"text": "幫我每六小時推送一次新聞", "on_topic": True, "category": "start_push", "group": "chinese_other_categories"},
+    {"text": "把機器人科技從我的興趣移除", "on_topic": True, "category": "remove_interest", "expects_topic": True, "group": "chinese_other_categories"},
+    {"text": "幫我每六小時推送一次新聞", "on_topic": True, "category": "start_push", "expected_push_interval_hours": 6, "group": "chinese_other_categories"},
     {"text": "停止推送新聞給我", "on_topic": True, "category": "stop_push", "group": "chinese_other_categories"},
-    {"text": "以後都用繁體中文回覆我", "on_topic": True, "category": "set_language", "group": "chinese_other_categories"},
-    # A real subscriber's phrasing, confirmed to have worked in production
-    # (see the SHioufen trace investigation earlier this project) -- a
-    # positive control that mixes Chinese and English in one message.
-    {
-        "text": "請幫我每四個小時給我推送，有關於科技財經跟bitcoin相關的新聞並把它轉成繁體中文",
-        "on_topic": True,
-        "category": "start_push",
-        "group": "mixed_language_control",
-    },
+    {"text": "以後都用繁體中文回覆我", "on_topic": True, "category": "set_language", "expected_language_contains": ("traditional", "chinese"), "group": "chinese_other_categories"},
+    # A real subscriber's phrasing (see the SHioufen trace investigation
+    # earlier this project), moved to LAYER2_MULTI_INTENT_CASES below
+    # 2026-08-16 -- see that dataset for why an exact single category no
+    # longer fits it.
     # Genuine off-topic in Chinese -- a fix must not just make everything
     # pass; true rejections still need to work.
     {"text": "幫我寫一首關於貓的詩", "on_topic": False, "category": "off_topic", "group": "chinese_off_topic"},
@@ -121,6 +126,74 @@ LAYER2_CASES = [
     # a future fix's measurement shows the language-specific gap closing,
     # not just "crypto topics in general got easier."
     {"text": "Add bitcoin to my interests", "on_topic": True, "category": "set_interest", "group": "english_control"},
+]
+
+# --- Layer 2 multi-intent cases (added 2026-08-16, --------------------------
+# docs/plans/context-management-plan.md's multi-category routing) -----------
+# A message genuinely asking for more than one distinct thing at once --
+# `expected_categories` is the full ordered list, checked against
+# `categories`, not a single value. Includes negative cases (a single
+# request with multiple clauses/details) to confirm the router doesn't
+# over-split ordinary messages into spurious multi-category lists.
+
+LAYER2_MULTI_INTENT_CASES = [
+    {
+        "text": "Add robotics to my interests and tell me what's new with it",
+        "on_topic": True,
+        "expected_categories": ["set_interest", "news_query"],
+        "expects_topic": True,
+        "group": "english_multi_intent",
+    },
+    {
+        "text": "請把機器人科技加入我的興趣，並告訴我最近有什麼新聞",
+        "on_topic": True,
+        "expected_categories": ["set_interest", "news_query"],
+        "expects_topic": True,
+        "group": "chinese_multi_intent",
+    },
+    {
+        "text": "Turn on push every 6 hours and always reply to me in Spanish",
+        "on_topic": True,
+        "expected_categories": ["start_push", "set_language"],
+        "expected_push_interval_hours": 6,
+        "expected_language_contains": ("spanish",),
+        "group": "english_multi_intent",
+    },
+    # Negative controls -- a single request with multiple clauses/details
+    # is still ONE category, not several. Over-splitting these would be
+    # its own regression, not caught by the positive cases above.
+    {
+        "text": "What's new with OpenAI's latest model release this week?",
+        "on_topic": True,
+        "expected_categories": ["news_query"],
+        "group": "single_intent_control",
+    },
+    {
+        "text": "Turn on push every 6 hours",
+        "on_topic": True,
+        "expected_categories": ["start_push"],
+        "expected_push_interval_hours": 6,
+        "group": "single_intent_control",
+    },
+    # A real subscriber's phrasing (see the SHioufen trace investigation
+    # earlier this project) -- moved here from LAYER2_CASES 2026-08-16 once
+    # multi-category classification was measured against it directly:
+    # inspecting 10 raw trials showed the model reading this as genuinely
+    # 2-3 intents (start_push always; set_language in 9/10; set_interest,
+    # for the "tech/finance/bitcoin" qualifier, in 8/10), not a stable
+    # fixed set -- both the presence of a third intent and its ordering
+    # varied trial to trial. expected_categories_containing checks the
+    # two unambiguous intents are always present as a set (order- and
+    # extras-tolerant) rather than pinning an exact list this sentence
+    # doesn't actually have one true answer for.
+    {
+        "text": "請幫我每四個小時給我推送，有關於科技財經跟bitcoin相關的新聞並把它轉成繁體中文",
+        "on_topic": True,
+        "expected_categories_containing": {"start_push", "set_language"},
+        "expected_push_interval_hours": 4,
+        "expected_language_contains": ("traditional", "chinese"),
+        "group": "mixed_language_control",
+    },
 ]
 
 # --- Layer 4 test cases (non-deterministic -- run N times, tabulate) ------
@@ -197,17 +270,90 @@ def measure_layer1(cases: list[dict]) -> list[dict]:
     return results
 
 
+def _argument_extraction_correct(case: dict, classification) -> bool:
+    """Checks the router's newly-added argument fields (topic/
+    push_interval_hours/language) against whichever expectation a case
+    declares -- see LAYER2_CASES' module docstring for why these are
+    shape checks for `topic`, not exact-string ones."""
+    if case.get("expects_topic") and not (classification.topic and len(classification.topic.split()) <= 4):
+        return False
+    if "expected_push_interval_hours" in case and classification.push_interval_hours != case["expected_push_interval_hours"]:
+        return False
+    if "expected_language_contains" in case:
+        language = (classification.language or "").lower()
+        if not all(term in language for term in case["expected_language_contains"]):
+            return False
+    return True
+
+
 def measure_layer2(model, cases: list[dict], trials: int) -> list[dict]:
+    """LAYER2_CASES are all single-intent -- each expects exactly the
+    one-element list ["category"] the ordinary case produces (see
+    docs/plans/context-management-plan.md's multi-category routing:
+    "no behavior change for the common case"). LAYER2_MULTI_INTENT_CASES
+    below covers genuinely multi-intent messages against `categories`
+    directly."""
     results = []
     for case in cases:
         trial_results = []
         for _ in range(trials):
             classification = guardrails.classify_message(model, case["text"])
+            correct = (
+                classification.on_topic == case["on_topic"]
+                and classification.categories == [case["category"]]
+                and _argument_extraction_correct(case, classification)
+            )
             trial_results.append(
                 {
                     "on_topic": classification.on_topic,
-                    "category": classification.category,
-                    "correct": classification.on_topic == case["on_topic"] and classification.category == case["category"],
+                    "category": classification.categories[0] if classification.categories else None,
+                    "topic": classification.topic,
+                    "push_interval_hours": classification.push_interval_hours,
+                    "language": classification.language,
+                    "correct": correct,
+                }
+            )
+        correct_count = sum(t["correct"] for t in trial_results)
+        results.append({**case, "trials": trial_results, "correct_count": correct_count, "trial_count": trials})
+    return results
+
+
+def _categories_correct(case: dict, classification) -> bool:
+    """`expected_categories` is an exact, order-sensitive match -- use it
+    when a message has one genuinely correct answer. `expected_categories_containing`
+    is a set the actual categories must be a superset of, order-independent
+    and tolerant of extra categories -- use it for a message ambiguous
+    enough that trial-to-trial variation is itself the finding (see
+    LAYER2_MULTI_INTENT_CASES' mixed_language_control case)."""
+    if "expected_categories" in case:
+        return classification.categories == case["expected_categories"]
+    if "expected_categories_containing" in case:
+        return case["expected_categories_containing"].issubset(set(classification.categories))
+    return True
+
+
+def measure_layer2_multi_intent(model, cases: list[dict], trials: int) -> list[dict]:
+    """Same shape as measure_layer2, but for LAYER2_MULTI_INTENT_CASES --
+    checks `categories` against expected_categories/expected_categories_containing
+    (see _categories_correct), not a single value."""
+    results = []
+    for case in cases:
+        trial_results = []
+        for _ in range(trials):
+            classification = guardrails.classify_message(model, case["text"])
+            correct = (
+                classification.on_topic == case["on_topic"]
+                and _categories_correct(case, classification)
+                and _argument_extraction_correct(case, classification)
+            )
+            trial_results.append(
+                {
+                    "on_topic": classification.on_topic,
+                    "category": classification.categories,
+                    "topic": classification.topic,
+                    "push_interval_hours": classification.push_interval_hours,
+                    "language": classification.language,
+                    "correct": correct,
                 }
             )
         correct_count = sum(t["correct"] for t in trial_results)
@@ -307,6 +453,14 @@ def print_layer2_report(results: list[dict], title: str = "Layer 2 (classify_mes
     _print_ntrial_report(title, results, lambda r: f"{r['on_topic']}/{r['category']}")
 
 
+def print_layer2_multi_intent_report(results: list[dict]) -> None:
+    _print_ntrial_report(
+        "Layer 2 multi-intent (classify_message, categories list)",
+        results,
+        lambda r: f"{r['on_topic']}/{r.get('expected_categories') or sorted(r['expected_categories_containing'])}",
+    )
+
+
 def print_layer4_report(results: list[dict]) -> None:
     _print_ntrial_report(
         "Layer 4 (is_output_on_topic, the output check)", results, lambda r: f"on_topic={r['expected_on_topic']}"
@@ -351,6 +505,9 @@ def main():
         model = ChatDeepSeek(model="deepseek-chat")
         if args.layer in ("2", "all"):
             print_layer2_report(measure_layer2(model, filtered(LAYER2_CASES), args.trials))
+            print_layer2_multi_intent_report(
+                measure_layer2_multi_intent(model, filtered(LAYER2_MULTI_INTENT_CASES), args.trials)
+            )
         if args.layer in ("4", "all"):
             print_layer4_report(measure_layer4(model, filtered(LAYER4_CASES), args.trials))
 

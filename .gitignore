@@ -4,6 +4,7 @@ notes.jsonl
 subscribers.db
 .claude/settings.local.json
 .pytest_cache/
+.coverage
 *.out.log
 *.err.log
 *.pid.txt

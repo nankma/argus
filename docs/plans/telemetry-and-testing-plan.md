@@ -15,7 +15,7 @@ they're constructed, rather than hardcoded.
 | 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
 | 5 | Test cases (actual scenarios) | Done — 16 tests, see below for what's covered vs. not |
-| 6 | LLM-judged end-to-end evaluation | Not started — design captured below |
+| 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
 
@@ -379,8 +379,9 @@ item 3).
 
 ## 6. LLM-judged end-to-end evaluation
 
-Not started — this is a fundamentally different kind of test than items 2/5
-above, so it gets its own item rather than folding into "more test cases."
+**Built 2026-08-16** — `tools/run_eval.py`. A fundamentally different kind
+of test than items 2/5 above, so it got its own item rather than folding
+into "more test cases."
 
 **The problem it solves:** items 2/5 test the agent's *mechanics* (does the
 tool-calling loop work, does error isolation work) using a fake LLM with
@@ -391,35 +392,43 @@ real end-to-end system (real LLM, real tools, real sources) produces
 reasonable output — only the manual spot-checks done throughout this
 project's history (see `CLAUDE.md`).
 
-**Proposed design:**
-- A fixed set of representative test questions, run against the *real*
-  agent (real `ChatDeepSeek`, real tools/sources) — not the fakes.
-- `PHOENIX_ENABLED` on during the run, so the full trace (tool calls, LLM
-  calls, latency) is captured in Phoenix for every eval run — useful for
-  debugging a bad result, not just for the pass/fail verdict itself.
-- Verification is **not** exact-match (impossible for open-ended generated
-  text) — instead, an LLM judge (Claude, or another model) evaluates
-  whether the response reasonably satisfies what `SYSTEM_PROMPT` actually
-  asks for. This needs the judge's rubric to be derived from
-  `SYSTEM_PROMPT`'s stated goals, not a generic "is this good" prompt.
+**What got built.** `tools/run_eval.py` runs 11 representative questions
+(4 `news_query`, 6 settings categories, 1 multi-intent) through the REAL
+pipeline (`bot.process_message`, real `ChatDeepSeek` models built via
+`agent.build_model` — automatically evaluating whatever
+`LLM_MODEL`/`LLM_MODEL_CLASSIFIER` are currently configured to, per
+`docs/plans/model-portability-plan.md`), against an isolated
+`SUBSCRIBERS_DB_FILE` so it never touches production subscriber data.
+Judge is DeepSeek itself, reusing the classifier-tier model (no second
+provider key available — same call as `docs/plans/model-portability-plan.md`'s
+Level 2 plumbing), via structured output with a `reasoning`-before-
+`meets_criteria` field order (same fix that raised
+`guardrails.OutputCheck`'s reliability). The rubric is derived from
+`agent.LAYER1_IDENTITY`/`TREND_REPORT_STRUCTURE`'s actual stated rules —
+three separate rubrics (news_query / settings / multi), not one generic
+"is this good" prompt.
 
-**Additional deterministic sub-checks** (don't need an LLM judge, cheaper
-and more reliable where they apply) — none of these are built, and two of
-them require `SYSTEM_PROMPT` changes before they'd even make sense to check:
+**First real run, 2026-08-16: 11/11 passed** (4/4 news_query, 6/6
+settings, 1/1 multi-intent) — a genuine first confirmation that the real
+end-to-end pipeline (real DeepSeek, real news sources, real router,
+real Route A/B dispatch) produces reasonable output across every category
+this project supports, not just the mechanics tests items 2/5 already
+covered with fakes.
 
-- **Source links present.** Every article/claim the agent cites should
-  include its original URL, not just an outlet name. `SYSTEM_PROMPT`
-  currently only says "cites the source outlets" — doesn't explicitly
-  require a link. Needs a prompt change *and* a check (e.g. regex for URLs
-  correlated with cited titles) before this is meaningful.
-- **Output format compliance.** Not yet defined what "compliant" means
-  (heading structure? required sections? something else?) — needs
-  definition before it can be built.
-- **Writing pattern/style consistency.** Also not yet defined. Once
-  decided, likely needs `SYSTEM_PROMPT` tuned to actually enforce it
-  consistently — a check without a prompt that aims for that pattern would
-  just measure how often the model happens to comply by chance.
+**Deterministic sub-checks built** (cheaper and more reliable than the
+judge where they apply), reusing `bot.py`'s own existing safety-net
+helpers rather than reimplementing them:
+- **Source links present** — every 🔗 line in a trend report must carry a
+  real `<a href="...">`. Built without needing a `TREND_REPORT_STRUCTURE`
+  change after all: it already requires "only include sources actually
+  provided... never invent a URL", which is a meaningful check as-is.
+- **Output format compliance** — defined concretely as: HTML tags balanced
+  (reuses `bot._is_html_balanced`), no stray Markdown bold leaked through
+  (reuses `bot._MARKDOWN_BOLD_RE`), and `news_query` replies start with
+  the 📰 report marker (reuses `bot._TREND_REPORT_MARKER`) — the same three
+  safety nets `bot.py` already applies to real traffic, now also checked
+  against real model output in this harness.
 
-None of this is built yet. Revisit once there's a concrete list of eval
-questions and a decision on what "format" and "writing pattern" actually
-mean for this agent.
+**Deliberately still not built: writing pattern/style consistency.** No
+rubric exists for what "style" means here — that's a product decision,
+not something to invent while building the harness. Stays an open item.

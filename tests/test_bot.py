@@ -223,15 +223,19 @@ def _make_context(admin_chat_id=999):
     return context
 
 
-def _bypass_guardrails(monkeypatch, category="news_query"):
+def _bypass_guardrails(monkeypatch, category="news_query", **classification_kwargs):
     """Used by tests that aren't about guardrail behavior itself (message
     formatting, the BadRequest fallback, etc.) so those stay focused on
-    what they're actually testing."""
+    what they're actually testing. classification_kwargs lets a caller set
+    a Route B argument field (topic/push_interval_hours/language) as the
+    real router would."""
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
     monkeypatch.setattr(
         bot.guardrails,
         "classify_message",
-        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category=category)),
+        MagicMock(
+            return_value=guardrails.MessageClassification(on_topic=True, categories=[category], **classification_kwargs)
+        ),
     )
     monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=True))
 
@@ -361,17 +365,20 @@ def test_handle_message_falls_back_to_plain_text_on_bad_request(isolated_subscri
 
 
 def test_handle_message_normalizes_stray_markdown_before_sending(isolated_subscribers_db, monkeypatch):
-    # Real incident, 2026-08-08: the model emitted **AI** instead of
-    # <b>AI</b> for a set_interest confirmation, despite the prompt saying
-    # not to -- handle_message must sanitize this before it reaches
-    # reply_text, not just rely on the prompt.
-    _bypass_guardrails(monkeypatch, category="set_interest")
+    # Real incident, 2026-08-08: a set_interest confirmation came back with
+    # **AI** instead of <b>AI</b> despite the prompt saying not to --
+    # handle_message must sanitize this before it reaches reply_text, not
+    # just rely on the prompt. Under Route B (docs/plans/context-management-plan.md's
+    # settings-dispatch refactor) the only model-generated text on this
+    # path is the translated confirmation, so this test exercises that --
+    # a plain (untranslated) template is our own fixed string and can't
+    # contain stray markdown in the first place.
+    _bypass_guardrails(monkeypatch, category="set_interest", topic="AI")
+    users_db.set_language(999, "Traditional Chinese")
+    monkeypatch.setattr(bot, "_translate_confirmation", MagicMock(return_value="已將 **AI** 加入你的興趣清單"))
     update = _make_update(chat_id=999, text="Add AI to my interests")
     context = _make_context(admin_chat_id=999)
     context.bot_data["agent"] = "fake-agent"
-    monkeypatch.setattr(
-        bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="已將 **AI** 加入你的興趣清單")])
-    )
 
     asyncio.run(bot.handle_message(update, context))
 
@@ -425,7 +432,7 @@ def test_handle_message_blocked_by_router_off_topic(isolated_subscribers_db, mon
     monkeypatch.setattr(
         bot.guardrails,
         "classify_message",
-        MagicMock(return_value=guardrails.MessageClassification(on_topic=False, category="off_topic")),
+        MagicMock(return_value=guardrails.MessageClassification(on_topic=False, categories=["off_topic"])),
     )
     run_agent_mock = MagicMock()
     monkeypatch.setattr(bot, "run_agent", run_agent_mock)
@@ -442,16 +449,13 @@ def test_handle_message_blocked_by_router_off_topic(isolated_subscribers_db, mon
 
 
 def test_handle_message_passes_chat_id_and_category_to_run_agent(isolated_subscribers_db, monkeypatch):
-    monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
-    monkeypatch.setattr(
-        bot.guardrails,
-        "classify_message",
-        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category="set_interest")),
-    )
-    monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=True))
-    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="Added it.")])
+    # news_query is the only category still dispatched through run_agent
+    # (Route A) -- see docs/plans/context-management-plan.md's
+    # settings-dispatch refactor.
+    _bypass_guardrails(monkeypatch, category="news_query")
+    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="Report.")])
     monkeypatch.setattr(bot, "run_agent", run_agent_mock)
-    update = _make_update(chat_id=999, text="Add robotics to my interests")
+    update = _make_update(chat_id=999, text="What's new with robotics?")
     context = _make_context(admin_chat_id=999)
     context.bot_data["agent"] = "fake-agent"
 
@@ -459,21 +463,45 @@ def test_handle_message_passes_chat_id_and_category_to_run_agent(isolated_subscr
 
     run_agent_mock.assert_called_once()
     _, kwargs = run_agent_mock.call_args
-    assert kwargs["context"] == {"chat_id": 999, "category": "set_interest"}
+    assert kwargs["context"] == {"chat_id": 999, "category": "news_query"}
 
 
-def test_handle_message_passes_category_to_output_guardrail(isolated_subscribers_db, monkeypatch):
-    monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
-    monkeypatch.setattr(
-        bot.guardrails,
-        "classify_message",
-        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category="set_language")),
-    )
+def test_handle_message_dispatches_route_b_without_calling_run_agent(isolated_subscribers_db, monkeypatch):
+    # Route B categories (set_interest/remove_interest/start_push/
+    # stop_push/set_language) bypass the agent loop entirely -- see
+    # docs/plans/context-management-plan.md's settings-dispatch refactor.
+    _bypass_guardrails(monkeypatch, category="set_interest", topic="robotics")
+    run_agent_mock = MagicMock()
+    monkeypatch.setattr(bot, "run_agent", run_agent_mock)
+    translate_mock = MagicMock()
+    monkeypatch.setattr(bot, "_translate_confirmation", translate_mock)
+    is_output_on_topic_mock = bot.guardrails.is_output_on_topic  # already a MagicMock via _bypass_guardrails
+    update = _make_update(chat_id=999, text="Add robotics to my interests")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+
+    asyncio.run(bot.handle_message(update, context))
+
+    run_agent_mock.assert_not_called()
+    # No language preference set -- nothing to translate, and a plain
+    # template isn't model output, so layer 4 has nothing to check either.
+    translate_mock.assert_not_called()
+    is_output_on_topic_mock.assert_not_called()
+    assert users_db.get_interests(999) == ["robotics"]
+    args, _kwargs = update.message.reply_text.call_args
+    assert "robotics" in args[0]
+
+
+def test_handle_message_checks_output_guardrail_on_translated_route_b_reply(isolated_subscribers_db, monkeypatch):
+    # Layer 4 only runs on Route B when the confirmation was actually
+    # translated (real model output) -- here a fresh set_language change
+    # means users_db.get_language reflects the new value right after
+    # dispatch_settings runs, so translation (and therefore the check)
+    # happens even though there was no prior preference.
+    _bypass_guardrails(monkeypatch, category="set_language", language="French")
     is_output_on_topic_mock = MagicMock(return_value=True)
     monkeypatch.setattr(bot.guardrails, "is_output_on_topic", is_output_on_topic_mock)
-    monkeypatch.setattr(
-        bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="D'accord, je répondrai en français.")])
-    )
+    monkeypatch.setattr(bot, "_translate_confirmation", MagicMock(return_value="D'accord, je répondrai en français."))
     update = _make_update(chat_id=999, text="Reply to me in French from now on")
     context = _make_context(admin_chat_id=999)
     context.bot_data["agent"] = "fake-agent"
@@ -485,12 +513,109 @@ def test_handle_message_passes_category_to_output_guardrail(isolated_subscribers
     )
 
 
+def test_translate_confirmation_sends_text_and_language_returns_content():
+    # Direct unit test of the function itself -- every handle_message-level
+    # test exercises this path with bot._translate_confirmation mocked
+    # out, so nothing was actually calling the real body (prompt
+    # construction, model.invoke, .content extraction) until this test.
+    model = MagicMock()
+    model.invoke.return_value = SimpleNamespace(content="Listo -- te responderé en español a partir de ahora.")
+
+    result = bot._translate_confirmation(model, "Done -- I'll reply to you in Spanish from now on.", "Spanish")
+
+    assert result == "Listo -- te responderé en español a partir de ahora."
+    messages = model.invoke.call_args[0][0]
+    assert "Spanish" in messages[0]["content"]
+    assert messages[1]["content"] == "Done -- I'll reply to you in Spanish from now on."
+
+
+def test_handle_message_route_b_blocked_by_output_guardrail_on_translated_reply(isolated_subscribers_db, monkeypatch):
+    # Route B's own layer-4 block (bot._route_b_reply returning
+    # "layer4_output_check"), distinct from
+    # test_handle_message_multi_category_blocks_whole_reply_if_any_segment_blocked
+    # below, which blocks via the Route A/news_query segment instead --
+    # that test's Route B segment (set_interest, no language preference)
+    # never reaches a layer-4 check at all. This one sets a language
+    # preference so translation (and therefore the check) actually runs
+    # on the Route B path itself.
+    _bypass_guardrails(monkeypatch, category="set_interest", topic="robotics")
+    users_db.set_language(999, "French")
+    monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=False))
+    monkeypatch.setattr(bot, "_translate_confirmation", MagicMock(return_value="Ajouté robotics à vos intérêts."))
+    update = _make_update(chat_id=999, text="Add robotics to my interests")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+
+    asyncio.run(bot.handle_message(update, context))
+
+    assert users_db.get_interests(999) == ["robotics"]  # dispatch_settings' write already committed
+    update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML)
+
+
+def test_handle_message_multi_category_dispatches_both_and_joins_replies(isolated_subscribers_db, monkeypatch):
+    # A message with two distinct intents -- see
+    # docs/plans/context-management-plan.md's multi-category routing.
+    monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
+    monkeypatch.setattr(
+        bot.guardrails,
+        "classify_message",
+        MagicMock(
+            return_value=guardrails.MessageClassification(
+                on_topic=True, categories=["set_interest", "news_query"], topic="robotics"
+            )
+        ),
+    )
+    monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=True))
+    run_agent_mock = MagicMock(return_value=[SimpleNamespace(content="📰 <b>Robotics Trend Report</b>")])
+    monkeypatch.setattr(bot, "run_agent", run_agent_mock)
+    update = _make_update(chat_id=999, text="Add robotics to my interests and tell me what's new with it")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+
+    asyncio.run(bot.handle_message(update, context))
+
+    assert users_db.get_interests(999) == ["robotics"]
+    run_agent_mock.assert_called_once()
+    args, _kwargs = update.message.reply_text.call_args
+    assert "Added robotics" in args[0]
+    assert "Robotics Trend Report" in args[0]
+    # Both segments joined into one message, in category order.
+    assert args[0].index("Added robotics") < args[0].index("Robotics Trend Report")
+
+
+def test_handle_message_multi_category_blocks_whole_reply_if_any_segment_blocked(isolated_subscribers_db, monkeypatch):
+    # All-or-nothing: one blocked segment redirects the whole reply rather
+    # than sending a partial result -- even though the Route B state
+    # change (adding the interest) already happened by the time the
+    # later news_query segment gets blocked.
+    monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
+    monkeypatch.setattr(
+        bot.guardrails,
+        "classify_message",
+        MagicMock(
+            return_value=guardrails.MessageClassification(
+                on_topic=True, categories=["set_interest", "news_query"], topic="robotics"
+            )
+        ),
+    )
+    monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=False))
+    monkeypatch.setattr(bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="off-topic drift")]))
+    update = _make_update(chat_id=999, text="Add robotics to my interests and tell me what's new with it")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+
+    asyncio.run(bot.handle_message(update, context))
+
+    assert users_db.get_interests(999) == ["robotics"]  # Route B's write already committed
+    update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML)
+
+
 def test_handle_message_blocked_by_output_classifier(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
     monkeypatch.setattr(
         bot.guardrails,
         "classify_message",
-        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, category="news_query")),
+        MagicMock(return_value=guardrails.MessageClassification(on_topic=True, categories=["news_query"])),
     )
     monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=False))
     monkeypatch.setattr(

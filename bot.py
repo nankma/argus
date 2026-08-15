@@ -27,12 +27,12 @@ import asyncio
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from langchain_core.messages import AIMessage, HumanMessage
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from langchain_deepseek import ChatDeepSeek
-from agent import MODEL, build_agent, run_agent, setup_telemetry
+from agent import ROUTE_B_CATEGORIES, build_agent, build_model, dispatch_settings, run_agent, setup_telemetry
 import guardrails
 import healthcheck
 import news_ingest
@@ -338,6 +338,152 @@ async def handle_language_command(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(f"Reply language set to: {text_after_command}")
 
 
+def _translate_confirmation(model, text: str, language: str) -> str:
+    """The one model call Route B ever makes -- only when the user has a
+    reply-language preference set, translating a Route B template
+    confirmation into it (see docs/plans/context-management-plan.md's
+    settings-dispatch refactor). Plain text in/out; Route B's templates
+    never contain HTML, so there's nothing to escape."""
+    prompt = (
+        f"Translate the following short message into {language}, keeping "
+        "its friendly, concise tone. Reply with ONLY the translated text "
+        "-- no quotes, no explanation, nothing else."
+    )
+    result = model.invoke([{"role": "system", "content": prompt}, {"role": "user", "content": text}])
+    return result.content
+
+
+async def _route_b_reply(chat_id: int, classification, guard_model, category: str) -> tuple[str | None, str]:
+    """Runs one Route B category (interests/push/language) and returns
+    (blocked_at, reply) -- no history side effects, since a multi-category
+    turn (see _process_multi_category) needs to combine several of these
+    into one history entry, not one each. See
+    docs/plans/context-management-plan.md's settings-dispatch refactor and
+    agent.dispatch_settings's own docstring for why this is model-free
+    except for the one translation call below."""
+    reply = dispatch_settings(category, chat_id, classification)
+
+    # A language preference governs every reply, not just news_query --
+    # checked *after* dispatch_settings, so a set_language turn's own
+    # confirmation is written in the language it just set. Layer 4 only
+    # runs on this path: a plain English template isn't model output, so
+    # there's nothing to check when no translation happened.
+    language = users_db.get_language(chat_id)
+    if language:
+        reply = await asyncio.to_thread(_translate_confirmation, guard_model, reply, language)
+        # Same safety nets Route A applies to its own model-generated text
+        # -- this is real LLM output too, not the fixed template above.
+        reply = _strip_report_preamble(_normalize_markdown_bold(reply))
+        output_on_topic = await asyncio.to_thread(guardrails.is_output_on_topic, guard_model, reply, category)
+        if not output_on_topic:
+            return "layer4_output_check", guardrails.REDIRECT_MESSAGE
+
+    return None, reply
+
+
+async def _route_a_reply(agent, working_messages: list, chat_id: int, category: str, guard_model) -> tuple[str | None, str, list | None]:
+    """Runs the news_query agent loop and returns (blocked_at, reply,
+    result_messages) -- result_messages is the full LangChain message list
+    (including any ToolMessages) for history, or None if blocked/errored,
+    since there's nothing worth persisting in that case."""
+    try:
+        result_messages = await asyncio.to_thread(
+            run_agent, agent, working_messages, context={"chat_id": chat_id, "category": category}
+        )
+    except Exception as exc:
+        return "agent_error", f"Something went wrong: {exc}", None
+
+    final_content = _strip_report_preamble(_normalize_markdown_bold(result_messages[-1].content))
+
+    # Guardrail layer 4: re-checks the agent's actual output before it's
+    # sent -- the layer that catches drift layers 1-3 missed, since the
+    # failure is only visible in what the model wrote, not the input.
+    output_on_topic = await asyncio.to_thread(guardrails.is_output_on_topic, guard_model, final_content, category)
+    if not output_on_topic:
+        return "layer4_output_check", guardrails.REDIRECT_MESSAGE, None
+
+    return None, final_content, result_messages
+
+
+def _persist_turn(chat_id: int, all_messages: list, history_timestamps: list[datetime], new_messages: list) -> None:
+    """Stores `all_messages` (the full list to keep, including everything
+    already in history) as this chat's new history, with a fresh shared
+    timestamp for `new_messages` -- the portion actually added this turn.
+    Only ever called once a turn is accepted -- a rejected exchange
+    doesn't pollute the conversation history the next turn sees."""
+    now = datetime.now(timezone.utc)
+    chat_histories[chat_id] = (all_messages, history_timestamps + [now] * len(new_messages))
+
+
+async def _process_single_category(
+    chat_id: int, user_text: str, category: str, classification, agent, guard_model, history: list, history_timestamps: list[datetime]
+) -> dict:
+    """The ordinary case -- classification.categories has exactly one
+    entry, the overwhelmingly common shape. Kept as its own path (rather
+    than always going through the general multi-category loop) so it can
+    preserve today's exact behavior: Route A stores the agent's full
+    message list (including ToolMessages) in history, not just a
+    flattened reply string. See docs/plans/context-management-plan.md's
+    multi-category routing section."""
+    if category in ROUTE_B_CATEGORIES:
+        blocked_at, reply = await _route_b_reply(chat_id, classification, guard_model, category)
+        if blocked_at is not None:
+            return {"blocked_at": blocked_at, "category": category, "reply": reply}
+        new_messages = [HumanMessage(content=user_text), AIMessage(content=reply)]
+        _persist_turn(chat_id, history + new_messages, history_timestamps, new_messages)
+        return {"blocked_at": None, "category": category, "reply": reply}
+
+    # Route A: news_query, the only category that still needs multi-step
+    # tool use and open-ended synthesis -- chat_id feeds agent.py's
+    # dynamic-prompt middleware (layer 3, the user's stored interests/
+    # language) and search_news's restricted-source gate.
+    working_messages = history + [{"role": "user", "content": user_text}]
+    blocked_at, reply, result_messages = await _route_a_reply(agent, working_messages, chat_id, category, guard_model)
+    if blocked_at is not None:
+        return {"blocked_at": blocked_at, "category": category, "reply": reply}
+
+    # new_messages is everything run_agent appended beyond the trimmed
+    # history it was given -- the new user message plus whatever AI/tool
+    # messages resulted from it.
+    new_messages = result_messages[len(history):]
+    _persist_turn(chat_id, result_messages, history_timestamps, new_messages)
+    return {"blocked_at": None, "category": category, "reply": reply}
+
+
+async def _process_multi_category(
+    chat_id: int, user_text: str, classification, agent, guard_model, history: list, history_timestamps: list[datetime]
+) -> dict:
+    """A message carrying more than one intent (e.g. "add robotics to my
+    interests and tell me what's new with it") -- each category in
+    classification.categories is dispatched in order and the replies are
+    joined into one message. All-or-nothing: if any segment is blocked,
+    the whole reply becomes REDIRECT_MESSAGE rather than sending a partial
+    result -- simplest and safest, matching the single-category behavior
+    this generalizes. See docs/plans/context-management-plan.md's
+    multi-category routing section for the design and its open points.
+
+    Each category sees the same original `history` and `user_text` --
+    not each other's replies from this same turn -- and the whole turn is
+    persisted as a single (Human, AI) pair with the joined final text, not
+    one pair per category, so history stays one entry per real user turn."""
+    reply_parts = []
+    for category in classification.categories:
+        if category in ROUTE_B_CATEGORIES:
+            blocked_at, reply = await _route_b_reply(chat_id, classification, guard_model, category)
+        else:
+            working_messages = history + [{"role": "user", "content": user_text}]
+            blocked_at, reply, _result_messages = await _route_a_reply(agent, working_messages, chat_id, category, guard_model)
+        if blocked_at is not None:
+            return {"blocked_at": blocked_at, "category": category, "reply": guardrails.REDIRECT_MESSAGE}
+        reply_parts.append(reply)
+
+    final_content = "\n\n".join(reply_parts)
+    new_messages = [HumanMessage(content=user_text), AIMessage(content=final_content)]
+    _persist_turn(chat_id, history + new_messages, history_timestamps, new_messages)
+
+    return {"blocked_at": None, "category": classification.categories[0], "reply": final_content}
+
+
 async def process_message(chat_id: int, user_text: str, agent, guard_model) -> dict:
     """The actual guardrail/agent/formatting pipeline, independent of
     Telegram's Update/Context objects -- extracted so test_api.py's local
@@ -349,64 +495,30 @@ async def process_message(chat_id: int, user_text: str, agent, guard_model) -> d
     Returns {"blocked_at": str|None, "category": str|None, "reply": str}.
     blocked_at names which layer stopped the message (None if it went all
     the way through) -- useful for a test caller to assert on without
-    parsing the reply text or cross-referencing docker logs/Phoenix."""
+    parsing the reply text or cross-referencing docker logs/Phoenix.
+    `category` is the first (or only) category classified for this turn --
+    see _process_multi_category for how more than one is handled."""
     # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
     # docs/plans/guardrails-plan.md for the incident this design responds to.
     if guardrails.fails_local_prefilter(user_text):
         return {"blocked_at": "layer1_prefilter", "category": None, "reply": guardrails.REDIRECT_MESSAGE}
 
-    # Guardrail layer 2 -- now the router (docs/plans/context-management-plan.md):
-    # one structured-output call answers both "is this on-topic" and "what
-    # kind of request is this", gating the expensive agent call and telling
-    # it which layer-2 instructions/tool to reach for in the same pass.
+    # Guardrail layer 2 -- the router (docs/plans/context-management-plan.md):
+    # one structured-output call answers "is this on-topic", "what kind of
+    # request(s) is this", and (for Route B categories) the arguments each
+    # one needs -- gating the expensive agent call and, for settings
+    # categories, replacing it entirely.
     classification = await asyncio.to_thread(guardrails.classify_message, guard_model, user_text)
     if not classification.on_topic:
-        return {"blocked_at": "layer2_router", "category": classification.category, "reply": guardrails.REDIRECT_MESSAGE}
+        return {"blocked_at": "layer2_router", "category": classification.categories[0], "reply": guardrails.REDIRECT_MESSAGE}
 
     history, history_timestamps = _get_trimmed_history(chat_id)
-    working_messages = history + [{"role": "user", "content": user_text}]
 
-    # chat_id and category feed agent.py's dynamic-prompt middleware
-    # (layers 2/3) and the update_interests/set_push_enabled tools (which
-    # need to know *which* user's row to write) -- see
-    # docs/plans/context-management-plan.md's router design.
-    try:
-        result_messages = await asyncio.to_thread(
-            run_agent,
-            agent,
-            working_messages,
-            context={"chat_id": chat_id, "category": classification.category},
+    if len(classification.categories) == 1:
+        return await _process_single_category(
+            chat_id, user_text, classification.categories[0], classification, agent, guard_model, history, history_timestamps
         )
-    except Exception as exc:
-        return {
-            "blocked_at": "agent_error",
-            "category": classification.category,
-            "reply": f"Something went wrong: {exc}",
-        }
-
-    final_content = _strip_report_preamble(_normalize_markdown_bold(result_messages[-1].content))
-
-    # Guardrail layer 4: re-checks the agent's actual output before it's
-    # sent -- the layer that catches drift layers 1-3 missed, since the
-    # failure is only visible in what the model wrote, not the input.
-    output_on_topic = await asyncio.to_thread(
-        guardrails.is_output_on_topic, guard_model, final_content, classification.category
-    )
-    if not output_on_topic:
-        return {"blocked_at": "layer4_output_check", "category": classification.category, "reply": guardrails.REDIRECT_MESSAGE}
-
-    # Only persisted once accepted -- a rejected exchange doesn't pollute
-    # the conversation history the next turn sees. The trimmed base
-    # (_get_trimmed_history, above) was already stored regardless of this
-    # turn's outcome; here we just add this turn's new messages with a
-    # fresh timestamp. new_messages is everything run_agent appended
-    # beyond the trimmed history it was given -- the new user message
-    # plus whatever AI/tool messages resulted from it.
-    new_messages = result_messages[len(history):]
-    now = datetime.now(timezone.utc)
-    chat_histories[chat_id] = (result_messages, history_timestamps + [now] * len(new_messages))
-
-    return {"blocked_at": None, "category": classification.category, "reply": final_content}
+    return await _process_multi_category(chat_id, user_text, classification, agent, guard_model, history, history_timestamps)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -529,14 +641,17 @@ def main():
     setup_telemetry()
     users_db.init_db()
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    model = ChatDeepSeek(model=MODEL)
+    # Two independently-configured models -- see docs/plans/model-portability-plan.md
+    # Level 2. Both default to the same underlying model today (no second
+    # provider is set up yet), so this is plumbing, not a behavior change,
+    # until LLM_MODEL/LLM_MODEL_CLASSIFIER are actually set to different values.
+    model = build_model("LLM_MODEL")
+    guard_model = build_model("LLM_MODEL_CLASSIFIER")
     agent = build_agent(model)
 
     app = Application.builder().token(token).post_init(_start_test_api).post_shutdown(_stop_test_api).build()
     app.bot_data["agent"] = agent
-    # Reuses the same model instance for guardrail classification calls
-    # (guardrails.py) -- no separate model/infra, see docs/plans/guardrails-plan.md.
-    app.bot_data["guard_model"] = model
+    app.bot_data["guard_model"] = guard_model
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
     # Idempotent -- safe to run every startup. Only the admin gets

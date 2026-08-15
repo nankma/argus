@@ -11,8 +11,8 @@ in docs/reference/local-testing-api-plan.md's "Resolved issue" section: -4,
 ServerAlive*, ExitOnForwardFailure, always a fresh tunnel, never reused
 from an earlier session) rather than assuming one is already open.
 
-Covers checklist cases 1, 2, 3, 4, 5, 7, 8, 9, 12 -- everything that's a
-plain message through process_message's pipeline. Cases 6, 10, 11, 13
+Covers checklist cases 1, 2, 3, 4, 5, 7, 8, 9, 12, 14 -- everything that's
+a plain message through process_message's pipeline. Cases 6, 10, 11, 13
 (/interests, /language, /start) are command handlers that don't route
 through test_api.py at all (see docs/reference/local-testing-api-plan.md's "What it
 does and doesn't cover") -- listed explicitly as NOT COVERED in the
@@ -190,6 +190,24 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
             "12 redirect mentions memory limit",
             r["blocked_at"] == "layer1_prefilter" and ("last hour" in reply or "20 messages" in reply),
             f"blocked_at={r['blocked_at']} mentions_limit={'last hour' in reply or '20 messages' in reply}",
+        )
+    )
+
+    # Case 14 -- multi-category: one message, two distinct asks (a settings
+    # change and a news question) -- see
+    # docs/plans/context-management-plan.md's multi-category routing.
+    # `category` in the response is only the first of the (possibly
+    # several) categories the router found (see bot.process_message's
+    # docstring), so this checks the reply text for evidence both segments
+    # actually ran rather than relying on `category` alone.
+    r = send(chat_id, "Add quantum computing to my interests and tell me what's new with it", timeout)
+    reply = r["reply"]
+    has_report_marker = "\U0001f4f0" in reply
+    results.append(
+        _check(
+            "14 multi-category (settings + news_query in one message)",
+            r["blocked_at"] is None and "quantum computing" in reply.lower() and has_report_marker,
+            f"blocked_at={r['blocked_at']} category={r['category']} has_report_marker={has_report_marker}",
         )
     )
 

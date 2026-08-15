@@ -38,9 +38,8 @@ import os
 import signal
 from urllib.parse import urlparse
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
-from langchain_deepseek import ChatDeepSeek
 import agent as agent_module
-from agent import MODEL, build_agent, run_agent, setup_telemetry
+from agent import build_agent, build_model, run_agent, setup_telemetry
 import bot as info_bot
 import admin_bot
 import telemetry_monitor
@@ -65,8 +64,9 @@ import users_db
 def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None) -> Application:
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.bot_data["agent"] = agent
-    # Reuses the same model instance for guardrail classification calls
-    # (guardrails.py) -- no separate model/infra, see docs/plans/guardrails-plan.md.
+    # guard_model is independently configurable from agent's own model via
+    # LLM_MODEL_CLASSIFIER -- see agent.build_model and
+    # docs/plans/model-portability-plan.md's Level 2 per-stage routing.
     app.bot_data["guard_model"] = guard_model
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["admin_bot_token"] = admin_bot_token
@@ -151,10 +151,15 @@ def main():
     admin_bot_token = os.environ["ADMIN_BOT_TOKEN"]
     info_bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
 
-    model = ChatDeepSeek(model=MODEL)
+    # Two independently-configured models -- see docs/plans/model-portability-plan.md
+    # Level 2. Both default to the same underlying model today (no second
+    # provider is set up yet), so this is plumbing, not a behavior change,
+    # until LLM_MODEL/LLM_MODEL_CLASSIFIER are actually set to different values.
+    model = build_model("LLM_MODEL")
+    guard_model = build_model("LLM_MODEL_CLASSIFIER")
     agent = build_agent(model)
 
-    info_app = build_info_app(agent, admin_chat_id, admin_bot_token, guard_model=model)
+    info_app = build_info_app(agent, admin_chat_id, admin_bot_token, guard_model=guard_model)
     admin_app = build_admin_app(admin_chat_id, info_bot_token)
 
     asyncio.run(run_both(info_app, admin_app, admin_bot_token, admin_chat_id))

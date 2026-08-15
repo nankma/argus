@@ -9,6 +9,7 @@ dependencies:
   - feedparser
   - pyyaml
   - pytest
+  - pytest-cov
   - requests-mock
   - arize-phoenix-otel
   - openinference-instrumentation-langchain

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, ToolMessage
 
 import agent
+import guardrails
 import news_sources
 import users_db
 from tests.fakes import FakeToolCallingModel, RecordingCallbackHandler
@@ -14,6 +15,38 @@ def _fake_request(context):
     LangChain ModelRequest is unnecessary machinery for testing the
     prompt-composition logic in isolation."""
     return SimpleNamespace(runtime=SimpleNamespace(context=context))
+
+
+def _record_init_chat_model(monkeypatch):
+    """build_model calls the module-level init_chat_model name, so
+    monkeypatching it on the agent module (not the real langchain function)
+    lets these tests assert what string was requested without constructing
+    a real chat model or making any network call."""
+    calls = []
+    monkeypatch.setattr(agent, "init_chat_model", lambda s: calls.append(s) or "fake-model")
+    return calls
+
+
+def test_build_model_reads_env_var(monkeypatch):
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL_TEST", "deepseek:deepseek-chat")
+    result = agent.build_model("LLM_MODEL_TEST")
+    assert calls == ["deepseek:deepseek-chat"]
+    assert result == "fake-model"
+
+
+def test_build_model_falls_back_to_default_when_env_unset(monkeypatch):
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.delenv("LLM_MODEL_TEST_UNSET", raising=False)
+    agent.build_model("LLM_MODEL_TEST_UNSET")
+    assert calls == [agent.DEFAULT_MODEL]
+
+
+def test_build_model_honors_a_custom_default(monkeypatch):
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.delenv("LLM_MODEL_TEST_CUSTOM_DEFAULT", raising=False)
+    agent.build_model("LLM_MODEL_TEST_CUSTOM_DEFAULT", default="openai:gpt-4o-mini")
+    assert calls == ["openai:gpt-4o-mini"]
 
 
 def test_compose_prompt_defaults_to_news_query_when_no_category():
@@ -27,18 +60,15 @@ def test_compose_prompt_defaults_to_news_query_when_context_is_none():
     assert agent._NEWS_QUERY_INSTRUCTIONS in prompt
 
 
-def test_compose_prompt_selects_instructions_per_category():
-    by_category = {
-        "news_query": agent._NEWS_QUERY_INSTRUCTIONS,
-        "set_interest": agent._SET_INTEREST_INSTRUCTIONS,
-        "remove_interest": agent._REMOVE_INTEREST_INSTRUCTIONS,
-        "start_push": agent._START_PUSH_INSTRUCTIONS,
-        "stop_push": agent._STOP_PUSH_INSTRUCTIONS,
-        "set_language": agent._SET_LANGUAGE_INSTRUCTIONS,
-    }
-    for category, expected in by_category.items():
+def test_compose_prompt_always_uses_news_query_instructions():
+    # Route B (set_interest/remove_interest/start_push/stop_push/
+    # set_language) is dispatched directly by agent.dispatch_settings now
+    # -- the agent loop, and therefore this prompt, only ever runs for
+    # news_query. The `category` context key no longer selects anything
+    # here; this just confirms that stays true regardless of what's passed.
+    for category in (None, "news_query", "set_interest", "start_push"):
         prompt = agent._compose_prompt(_fake_request({"category": category}))
-        assert expected in prompt
+        assert agent._NEWS_QUERY_INSTRUCTIONS in prompt
 
 
 def test_compose_prompt_includes_interests_when_set(isolated_subscribers_db):
@@ -77,6 +107,88 @@ def test_compose_prompt_language_applies_regardless_of_category(isolated_subscri
     for category in ("news_query", "set_interest", "start_push", "set_language"):
         prompt = agent._compose_prompt(_fake_request({"chat_id": 105, "category": category}))
         assert "French" in prompt
+
+
+def _classification(category, **kwargs):
+    return guardrails.MessageClassification(on_topic=True, categories=[category], **kwargs)
+
+
+def test_dispatch_settings_set_interest_adds_new_topic(isolated_subscribers_db):
+    result = agent.dispatch_settings("set_interest", 201, _classification("set_interest", topic="robotics"))
+    assert "Added robotics" in result
+    assert users_db.get_interests(201) == ["robotics"]
+
+
+def test_dispatch_settings_set_interest_already_covered(isolated_subscribers_db):
+    users_db.set_interests(202, ["robotics"])
+    result = agent.dispatch_settings("set_interest", 202, _classification("set_interest", topic="robotics"))
+    assert "already have robotics" in result
+    assert users_db.get_interests(202) == ["robotics"]
+
+
+def test_dispatch_settings_remove_interest_removes_existing(isolated_subscribers_db):
+    users_db.set_interests(203, ["robotics", "AI"])
+    result = agent.dispatch_settings("remove_interest", 203, _classification("remove_interest", topic="robotics"))
+    assert "Removed robotics" in result
+    assert users_db.get_interests(203) == ["AI"]
+
+
+def test_dispatch_settings_remove_interest_not_present(isolated_subscribers_db):
+    result = agent.dispatch_settings("remove_interest", 204, _classification("remove_interest", topic="robotics"))
+    assert "wasn't in your interests" in result
+
+
+def test_dispatch_settings_start_push_enables_and_sets_interval(isolated_subscribers_db):
+    result = agent.dispatch_settings("start_push", 205, _classification("start_push", push_interval_hours=6))
+    assert "every 6 hour(s)" in result
+    assert users_db.get_push_enabled(205) is True
+    assert users_db.get_push_interval_hours(205) == 6
+
+
+def test_dispatch_settings_start_push_no_interval_leaves_existing(isolated_subscribers_db):
+    users_db.set_push_interval_hours(206, 12)
+    result = agent.dispatch_settings("start_push", 206, _classification("start_push"))
+    assert "every 12 hour(s)" in result
+    assert users_db.get_push_interval_hours(206) == 12
+
+
+def test_dispatch_settings_start_push_invalid_interval_reports_error(isolated_subscribers_db):
+    result = agent.dispatch_settings("start_push", 207, _classification("start_push", push_interval_hours=0))
+    assert "couldn't set that interval" in result
+    assert users_db.get_push_enabled(207) is True  # the enable itself still succeeded
+
+
+def test_dispatch_settings_stop_push_disables(isolated_subscribers_db):
+    users_db.set_push_enabled(208, True)
+    result = agent.dispatch_settings("stop_push", 208, _classification("stop_push"))
+    assert "Turned off" in result
+    assert users_db.get_push_enabled(208) is False
+
+
+def test_dispatch_settings_set_language_sets_new_language(isolated_subscribers_db):
+    result = agent.dispatch_settings("set_language", 209, _classification("set_language", language="Spanish"))
+    assert "Spanish" in result
+    assert users_db.get_language(209) == "Spanish"
+
+
+def test_dispatch_settings_set_language_reports_current_when_none_named(isolated_subscribers_db):
+    users_db.set_language(210, "French")
+    result = agent.dispatch_settings("set_language", 210, _classification("set_language"))
+    assert "currently set to French" in result
+    assert users_db.get_language(210) == "French"  # unchanged
+
+
+def test_dispatch_settings_set_language_reports_unset_when_none_named_and_unset(isolated_subscribers_db):
+    result = agent.dispatch_settings("set_language", 211, _classification("set_language"))
+    assert "No reply language is set" in result
+
+
+def test_dispatch_settings_rejects_non_route_b_category():
+    try:
+        agent.dispatch_settings("news_query", 1, _classification("news_query"))
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
 
 
 def test_save_note_writes_isolated_file(isolated_notes_file):

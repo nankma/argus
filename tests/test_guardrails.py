@@ -31,36 +31,47 @@ def _fake_structured_model(return_value) -> MagicMock:
 
 
 def test_classify_message_news_query():
-    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, category="news_query"))
+    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, categories=["news_query"]))
     result = guardrails.classify_message(model, "What's new with Anthropic?")
     assert result.on_topic is True
-    assert result.category == "news_query"
+    assert result.categories == ["news_query"]
     model.with_structured_output.assert_called_once_with(guardrails.MessageClassification)
 
 
 def test_classify_message_off_topic():
-    model = _fake_structured_model(guardrails.MessageClassification(on_topic=False, category="off_topic"))
+    model = _fake_structured_model(guardrails.MessageClassification(on_topic=False, categories=["off_topic"]))
     result = guardrails.classify_message(model, "How do I use Claude Code sessions?")
     assert result.on_topic is False
-    assert result.category == "off_topic"
+    assert result.categories == ["off_topic"]
 
 
 def test_classify_message_set_interest():
-    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, category="set_interest"))
+    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, categories=["set_interest"]))
     result = guardrails.classify_message(model, "Add robotics to my interests")
-    assert result.category == "set_interest"
+    assert result.categories == ["set_interest"]
 
 
 def test_classify_message_start_push():
-    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, category="start_push"))
+    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, categories=["start_push"]))
     result = guardrails.classify_message(model, "Start sending me news updates")
-    assert result.category == "start_push"
+    assert result.categories == ["start_push"]
 
 
 def test_classify_message_set_language():
-    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, category="set_language"))
+    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, categories=["set_language"]))
     result = guardrails.classify_message(model, "Always reply to me in Spanish from now on")
-    assert result.category == "set_language"
+    assert result.categories == ["set_language"]
+
+
+def test_classify_message_multiple_categories():
+    # A message with more than one distinct intent -- see
+    # docs/plans/context-management-plan.md's multi-category routing.
+    model = _fake_structured_model(
+        guardrails.MessageClassification(on_topic=True, categories=["set_interest", "news_query"], topic="robotics")
+    )
+    result = guardrails.classify_message(model, "Add robotics to my interests and tell me what's new with it")
+    assert result.categories == ["set_interest", "news_query"]
+    assert result.topic == "robotics"
 
 
 def test_classify_message_fails_open_on_exception():
@@ -68,7 +79,26 @@ def test_classify_message_fails_open_on_exception():
     model.with_structured_output.side_effect = RuntimeError("boom")
     result = guardrails.classify_message(model, "some message")
     assert result.on_topic is True
-    assert result.category == "news_query"
+    assert result.categories == ["news_query"]
+
+
+def test_classify_message_fails_open_on_none_result():
+    # Hit live 2026-08-16: invoke() returning None instead of raising isn't
+    # caught by an except-only guard -- see guardrails.classify_message's
+    # docstring.
+    model = _fake_structured_model(None)
+    result = guardrails.classify_message(model, "some message")
+    assert result.on_topic is True
+    assert result.categories == ["news_query"]
+
+
+def test_classify_message_fails_open_on_empty_categories():
+    # Shouldn't happen per the prompt, but bot.py indexes categories[0]
+    # unconditionally -- see guardrails.classify_message's docstring.
+    model = _fake_structured_model(guardrails.MessageClassification(on_topic=True, categories=[]))
+    result = guardrails.classify_message(model, "some message")
+    assert result.on_topic is True
+    assert result.categories == ["news_query"]
 
 
 def test_is_output_on_topic_false_when_discloses_own_configuration():
@@ -95,6 +125,12 @@ def test_is_output_on_topic_false_for_inappropriate_content():
 def test_is_output_on_topic_fails_open_on_exception():
     model = MagicMock()
     model.with_structured_output.side_effect = RuntimeError("boom")
+    assert guardrails.is_output_on_topic(model, "some message") is True
+
+
+def test_is_output_on_topic_fails_open_on_none_result():
+    # Same fix as classify_message's None-result guard -- see its docstring.
+    model = _fake_structured_model(None)
     assert guardrails.is_output_on_topic(model, "some message") is True
 
 

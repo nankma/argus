@@ -112,11 +112,13 @@ specifically before ever running with `ENABLE_TEST_API=true`.
 
 ## What it does and doesn't cover
 
-Covers the smoke-test checklist's conversational cases (1–2, 4–5, 8–12 —
-anything that's a message through `handle_message`'s pipeline). **Does
-not** cover `/start`'s access-control flow (case 13) or the `/interests`,
-`/language` command handlers (cases 6, 7, 10, 11's slash-command variants)
-— those don't route through `process_message` at all (see `bot.py`:
+Covers the smoke-test checklist's conversational cases (1, 2, 3, 4, 5, 7,
+8, 9, 12, 14 — anything that's a message through `handle_message`'s
+pipeline; see `tools/run_smoke_tests.py`'s own docstring for the current
+list). **Does not** cover `/start`'s access-control flow (case 13) or the
+`/interests`, `/language` command handlers (cases 6, 10, 11's
+slash-command variants) — those don't route through `process_message` at
+all (see `bot.py`:
 `CommandHandler`s call their own dedicated functions). Those are already
 covered by existing unit tests (`tests/test_bot.py`); real Telegram
 testing remains the way to exercise them end-to-end if that's ever

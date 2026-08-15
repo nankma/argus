@@ -35,6 +35,7 @@ limiting** (finding 3) — worth fixing, not an active exploit today.
 | 16 | No audit logging on secret access | Low | Comes largely free once a real vault is adopted (finding 2) |
 | 17 | Phoenix telemetry access control | Resolved | **Done and verified live** — native auth, network isolation, Vault-stored API key, see below |
 | 18 | Docs written under a private-repo assumption, published unreviewed | Resolved | **Caught before the public push** — VM IPs and key paths redacted, see below |
+| 19 | Assistant tool-call leaked `DEEPSEEK_API_KEY` into session output | Resolved | **Rotated same-day** — new key, new OCI Vault secret version, verified live, old key revoked — see below |
 
 ## Findings
 
@@ -540,6 +541,56 @@ re-running before the visibility change — not after.
 Codified as the `audit-before-going-public` skill so the check happens by
 default rather than by luck. It was luck this time: the scan happened only
 because a push to a newly-public repo prompted a second look.
+
+### 19. Assistant tool-call leaked `DEEPSEEK_API_KEY` into session output
+
+**Caught 2026-08-16, during an unrelated planning session** (model-portability/
+context-management work, not this finding's subject). A malformed shell
+env-var presence check — `${DEEPSEEK_API_KEY:+yes}${DEEPSEEK_API_KEY:-no}`,
+intended as a yes/no check — actually printed the key's real value: `:+yes`
+substitutes when the var *is* set, but `:-no` only substitutes when it's
+*unset*, so with the var set, the second half expands to the variable's
+own value, not "no". The mistake concatenated a literal "yes" with the
+plaintext key and put both in tool output, which is captured in this
+session's transcript.
+
+**Treated as a real leak, not dismissed as harmless**, per finding 18's
+generalized lesson: whether something is safe to have exposed is a
+judgement about the audience, and a tool-output transcript isn't a
+controlled audience the way, say, an admin-only OCI Vault version history
+is (see finding 2's design) — same reasoning, applied to a different
+exposure channel than finding 18's public-repo case.
+
+**Rotated same-day**, following finding 2's already-documented
+zero-downtime procedure exactly:
+
+1. New DeepSeek key created via the web console (platform.deepseek.com) —
+   old key left active, DeepSeek allows multiple simultaneously-valid keys.
+2. New secret version created for `deepseek-api-key` in OCI Vault, via the
+   console UI specifically — deliberately not through this machine's
+   tooling, since neither this dev machine nor either VM has the OCI CLI
+   installed (confirmed this session; VM access to Vault is Instance
+   Principal-only, scoped to `docker-entrypoint.sh`'s own fetch call, not a
+   general CLI session). Keeping the new key out of any command this
+   assistant runs was a deliberate choice, not an oversight — the same
+   channel that caused the leak shouldn't be trusted to fix it.
+3. Bot container restarted (`docker restart myfirstagent-bot`) so
+   `docker-entrypoint.sh` re-fetched the secret bundle — it only fetches at
+   startup, not on a schedule, so the running container wouldn't otherwise
+   pick up the new version.
+4. Verified live with a real message round-trip before touching the old
+   key at all.
+5. Old key revoked from the DeepSeek console only after step 4 succeeded —
+   no window where the service held a key the provider no longer accepted.
+
+The OCI Vault secret's OCID is unchanged (same secret, new current
+version) — recorded in `local-infra/infrastructure.yaml`'s changelog, no
+actual key value stored in either that file or here.
+
+**Takeaway for future env-var presence checks**: never combine
+`${VAR:+...}${VAR:-...}` to test "is this set" — use `test -n "$VAR"` (or
+PowerShell's `if ($env:VAR)`), which reports presence without ever
+expanding to the value itself.
 
 ## Remaining work
 
