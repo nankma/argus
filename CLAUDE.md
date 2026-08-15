@@ -139,42 +139,12 @@ $env:ADMIN_CHAT_ID = "<your-telegram-numeric-user-id>"
 python combined_bot.py
 ```
 
-### Running it in Docker
+### Docker & deployment
 
-```powershell
-docker build -t myfirstagent-bot .
-docker run -d --name myfirstagent-bot --restart unless-stopped `
-  -e DEEPSEEK_API_KEY=$env:DEEPSEEK_API_KEY `
-  -e TELEGRAM_BOT_TOKEN=$env:TELEGRAM_BOT_TOKEN `
-  -e ADMIN_CHAT_ID=$env:ADMIN_CHAT_ID `
-  -e ADMIN_BOT_TOKEN=$env:ADMIN_BOT_TOKEN `
-  -e SUBSCRIBERS_DB_FILE=/data/subscribers.db `
-  -v myfirstagent-data:/data `
-  myfirstagent-bot
-```
+Building, deploying, and verifying a deploy is the **`deploy-engineer`**
+subagent's job, not the main thread's — dispatch it via the `Agent`
+tool. It reports back done, or a diagnosis if something's wrong.
 
-`Dockerfile` uses `mambaorg/micromamba` and installs straight from `environment.yml` — same dependency source as local dev and CI, no separate pip requirements file. `CMD` runs `combined_bot.py` by default (both bots, one process/container — see above); override the command (`docker run ... myfirstagent-bot python bot.py`) to run either bot standalone in its own container instead. Image is ~900MB — a deliberate tradeoff for conda-forge consistency over a smaller `pip`+slim image; see `docs/deployment-plan.md` if that needs revisiting. `PHOENIX_ENDPOINT` is configurable via env var for this reason — `localhost` only resolves correctly for local dev, not once Phoenix runs as a separate container/service.
-- Verified end-to-end against the real Telegram API, not just "the code runs": confirmed the token via `getMe`, then had a human message the live bot and confirmed a real reply came back.
-
-### Deploying to the live Oracle VM
-
-The above `docker build`/`docker run` is for local testing. The actual
-deployment target is a real Oracle Cloud VM (see `docs/deployment-plan.md`
-for the full setup). **Always build the image locally and transfer it —
-never run `docker build` on the VM itself** — see the
-`build-locally-deploy-remotely` skill for why (the VM is a tiny free-tier
-shape; building there is slow and was once left in a corrupted state by
-an unrelated interrupted SSH session):
-
-```bash
-docker build -t myfirstagent-bot .
-docker save myfirstagent-bot:latest | ssh -i "<path-to-key>" ubuntu@<vm-ip> "sudo docker load"
-```
-
-Then on the VM, stop/remove the old container and `docker run` the new
-image with the same flags as before. Secrets are fetched from OCI Vault
-at container startup rather than passed as plain env vars — see
-`docker-entrypoint.sh` and `docs/security-plan.md` finding 2 for how.
 - Four further requested features (translation, DB-backed per-user preferences, per-user search-source selection, proactive push) are planned but not built — see `docs/bot-features-plan.md`. Access control (the fifth, and the urgent one) is done — see **Access control** above.
 
 ## Testing
@@ -197,3 +167,5 @@ No `DEEPSEEK_API_KEY` or network access needed — the whole suite runs in ~1.5s
 - HTTP mocking via the `requests_mock` pytest fixture (auto-registered by the `requests-mock` package).
 
 See `docs/telemetry-and-testing-plan.md` for what's covered, what's explicitly not, and what's still planned (CI/CD, LLM-judged end-to-end evaluation). See `docs/deployment-plan.md` for the plan to containerize `agent.py` itself and deploy to Kubernetes/cloud (separate from, but related to, the Docker usage here). See `docs/observability-and-debugging.md` for how to diagnose issues on the *live* deployed bot — querying Phoenix traces directly via its GraphQL API, hot-patching a running container for fast iteration, and the `PYTHONUNBUFFERED` incident (`docker logs` returned nothing at all for an entire session before that fix).
+
+**After finishing any code change** (feature, fix, refactor — not doc-only edits), dispatch the **`qa-engineer`** subagent to review it before considering it done or handing off to `deploy-engineer`. It reports back pass (with numbers) or a diagnosis (with what's needed to fix it).
