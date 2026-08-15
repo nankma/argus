@@ -17,9 +17,22 @@ the network per request.
 | 1 | Periodic ingestion job (pull all sources on a schedule) | **Built** — `news_ingest.py`, per-source interval + daily budget respected, wired into both `bot.py` and `combined_bot.py`'s scheduler |
 | 2 | Local cache (one file per article, 2-day TTL, auto-cleanup) | **Built** — `news_cache.py`, verified live: real fetch → real classification → real YAML file, contents match this doc's spec exactly |
 | 3 | Article classification (rough category tags) | **Built** — `news_classify.py`, one batched structured-output call per cycle, verified live against the real DeepSeek model (not just mocked) |
-| 4 | Two-stage query filtering (category, then content) | Not built |
+| 4 | Two-stage query filtering (category, then content) | **Built for the push path (item 6), not yet for `search_news` (item 5).** |
 | 5 | `search_news` rewritten to read the cache instead of live sources | **Not built — deliberately deferred.** Changes live, user-facing agent behavior (`agent.py`'s tool, and `guardrails.classify_message`'s output schema); items 1–3 are additive and don't touch anything currently running, so they shipped first. See "Next step" below. |
-| 6 | `news_push.py` converging onto the same cache | Not built, optional — see Open Questions |
+| 6 | `news_push.py` converging onto the same cache | **Built 2026-08-15** — see "Interaction with `news_push.py`" below, rewritten in place rather than left as a follow-on. |
+
+**Why item 6 moved from "optional" to "built" ahead of item 5:** a real
+incident forced it. `news_push.py` calling live, query-blind RSS sources
+directly (Nikkei Asia's general top-stories feed, in this case) put an
+Indonesia earthquake and a Japan-society piece into a subscriber's tech
+digest — nothing in the old push pipeline could catch that, since no
+relevance filter existed before the digest-writing prompt at all. This
+was exactly the gap items 4/6 were meant to close; deferring it further
+once it was visibly causing incorrect output wasn't defensible the way
+deferring it pre-emptively was. `search_news` (item 5) keeps its original
+deferral reasoning — it's synchronous and user-facing, needs the harness
+(`tools/measure_guardrails.py`) extended to cover it before changing,
+and doesn't have an equivalent live incident forcing the same urgency.
 
 **Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
 
@@ -318,16 +331,57 @@ rather than calling these sources live at all. GNews remains unrestricted
 by design — its 100/day budget has real headroom beyond what
 `news_ingest.py` alone uses.
 
-## Interaction with `news_push.py`
+## Interaction with `news_push.py` — built 2026-08-15
 
-`news_push.py` currently calls `news_sources.enabled_sources()` directly
-(deliberately, to avoid the agent's own tool-calling loop — see its module
-docstring). Once a cache exists, it's a natural fit for `news_push.py` to
-read from it too, rather than maintaining two separate paths to the same
-underlying sources. **Flagged as optional / a follow-on, not required for
-the first version** — the push path's own dedup (`pushed_links`) already
-solves its correctness requirement independent of this change, so
-converging it can happen once the cache path is proven for `search_news`.
+`news_push.py` now reads `news_cache.read_all()` once per push cycle
+(shared across every due subscriber in that tick, not re-read per
+subscriber) instead of calling `news_sources.enabled_sources()` live.
+Two-stage filtering, per the architecture above:
+
+- **Stage 1 (category filter, in code)** —
+  `news_push.select_candidate_articles`. Each subscriber's `interests`
+  are mapped to categories via `news_push.resolve_interest_categories`,
+  which reads/writes a new `users_db.interest_categories` table (global,
+  not per-subscriber — the same interest text means the same categories
+  for anyone) and only calls `news_classify.classify_interests` for
+  interests not already cached. An interest with NO cached category
+  (classifier miss) is treated as unrestricted, matching any article,
+  rather than matching nothing — the alternative would silently starve a
+  subscriber over a classification gap on their own stated interest. An
+  article with no categories IS excluded whenever the topic has real
+  categories to match against — this is the exact mechanism that keeps a
+  general-news RSS item (no tech angle at all) out of a digest.
+- **Stage 2 (content filter)** — folded into the existing single
+  `write_push_digest` model call rather than a separate LLM call:
+  `_PUSH_DIGEST_PROMPT` now explicitly tells the model the category
+  filter is coarse and to omit any candidate that survived it but isn't
+  genuinely relevant, up to writing nothing at all if none qualify
+  (`run_push_cycle` treats an empty/whitespace-only digest the same as
+  "no new articles" — advances dedup state, doesn't send).
+
+**Real incident that forced this**, not a speculative improvement: a
+subscriber's push digest included an Indonesia earthquake and a Japan-
+society piece, sourced from Nikkei Asia's general top-stories RSS feed
+(query-blind, like 16 of the 21 registered sources — see "Why this is
+worth doing" above). The old push pipeline had zero relevance filtering
+between "source returned it" and "model was told to report on it" —
+exactly the gap this section's two-stage design was meant to close, just
+not yet wired up for the push path specifically. Diagnosed by pulling the
+feed directly (`curl https://asia.nikkei.com/rss/feed/nar`) and confirming
+it's the site's whole front page, not a tech-scoped vertical.
+
+**Restricted-source gating (NewsAPI/Perigon) is unchanged in spirit,
+adapted to the cache**: `select_candidate_articles` checks each cached
+article's `source_key` against `news_sources.RESTRICTED_SOURCES` and
+excludes it unless the subscriber's own `restricted_sources_enabled` flag
+is set — same gate as the short-lived live-fetch version shipped one day
+earlier (2026-08-14), now applied to cache reads instead of live calls.
+
+**What stayed the same**: `pushed_links` dedup (the fallback for articles
+whose `published_dt` didn't parse), the `since`/`last_push_at` recency
+check, and per-subscriber isolation (one subscriber's exception doesn't
+stop the cycle) are all unchanged from the live-fetch version — only
+*where* the candidate articles come from changed.
 
 ## Open questions — all resolved, implementation cleared to start
 

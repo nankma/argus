@@ -96,6 +96,14 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interest_categories (
+                interest TEXT PRIMARY KEY,
+                categories TEXT NOT NULL
+            )
+            """
+        )
 
 
 def try_consume_api_budget(source: str, daily_cap: int, today: str) -> bool:
@@ -121,6 +129,39 @@ def try_consume_api_budget(source: str, daily_cap: int, today: str) -> bool:
             return False
         conn.execute("UPDATE api_budget SET count = count + 1 WHERE source = ?", (source,))
         return True
+
+
+def get_cached_interest_categories(interests: list[str]) -> dict[str, list[str]]:
+    """Returns {interest: categories} for whichever of `interests` already
+    have a cached classification -- an interest with no cached mapping is
+    simply absent from the result, not present with an empty list (that
+    distinction matters to the caller: "not yet classified" and
+    "classified as belonging to no category" need different handling, see
+    news_push.py's resolve_interest_categories). Global, not per-user --
+    the same interest text (e.g. "AI") means the same categories no
+    matter which subscriber set it, so this is shared cache, not scoped
+    to a chat_id, the same reasoning as api_budget/source_pull_state
+    above."""
+    if not interests:
+        return {}
+    with _connect() as conn:
+        placeholders = ",".join("?" * len(interests))
+        rows = conn.execute(
+            f"SELECT interest, categories FROM interest_categories WHERE interest IN ({placeholders})",
+            interests,
+        ).fetchall()
+    return {interest: json.loads(categories_json) for interest, categories_json in rows}
+
+
+def set_interest_categories(interest: str, categories: list[str]) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO interest_categories (interest, categories) VALUES (?, ?)
+            ON CONFLICT(interest) DO UPDATE SET categories = excluded.categories
+            """,
+            (interest, json.dumps(categories)),
+        )
 
 
 def get_source_last_pulled_at(source: str) -> datetime | None:

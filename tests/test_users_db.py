@@ -322,6 +322,39 @@ def test_list_all_interests_deduplicates_across_subscribers(isolated_subscribers
     assert users_db.list_all_interests() == ["bitcoin", "AI", "robotics"]
 
 
+def test_get_cached_interest_categories_empty_when_nothing_cached(isolated_subscribers_db):
+    assert users_db.get_cached_interest_categories(["AI"]) == {}
+
+
+def test_get_cached_interest_categories_empty_input_returns_empty(isolated_subscribers_db):
+    assert users_db.get_cached_interest_categories([]) == {}
+
+
+def test_set_and_get_cached_interest_categories(isolated_subscribers_db):
+    users_db.set_interest_categories("AI", ["AI", "Research"])
+    assert users_db.get_cached_interest_categories(["AI"]) == {"AI": ["AI", "Research"]}
+
+
+def test_get_cached_interest_categories_only_returns_known_interests(isolated_subscribers_db):
+    users_db.set_interest_categories("AI", ["AI"])
+    result = users_db.get_cached_interest_categories(["AI", "AAOI"])
+    assert result == {"AI": ["AI"]}
+    assert "AAOI" not in result
+
+
+def test_set_interest_categories_can_store_empty_list(isolated_subscribers_db):
+    # A classifier miss (interest doesn't map to any category) is a real,
+    # cacheable result -- distinct from "not yet classified at all".
+    users_db.set_interest_categories("some obscure ticker", [])
+    assert users_db.get_cached_interest_categories(["some obscure ticker"]) == {"some obscure ticker": []}
+
+
+def test_set_interest_categories_upserts(isolated_subscribers_db):
+    users_db.set_interest_categories("AI", ["AI"])
+    users_db.set_interest_categories("AI", ["AI", "Research"])
+    assert users_db.get_cached_interest_categories(["AI"]) == {"AI": ["AI", "Research"]}
+
+
 def test_get_restricted_sources_enabled_defaults_false(isolated_subscribers_db):
     assert users_db.get_restricted_sources_enabled(1) is False
 

@@ -61,3 +61,32 @@ def test_categories_list_matches_the_literal_type():
     assert "Stock" in news_classify.CATEGORIES
     assert "Robotics" in news_classify.CATEGORIES
     assert len(news_classify.CATEGORIES) == 13
+
+
+def test_classify_interests_maps_interest_text_to_categories():
+    model = _fake_structured_model(
+        news_classify.ClassificationBatch(
+            items=[
+                news_classify.ArticleCategories(index=0, categories=["Robotics"]),
+                news_classify.ArticleCategories(index=1, categories=["Stock", "Hardware"]),
+            ]
+        )
+    )
+
+    result = news_classify.classify_interests(model, ["機器人科技", "AAOI"])
+
+    assert result == {"機器人科技": ["Robotics"], "AAOI": ["Stock", "Hardware"]}
+
+
+def test_classify_interests_missing_index_defaults_to_empty_list():
+    model = _fake_structured_model(news_classify.ClassificationBatch(items=[]))
+
+    result = news_classify.classify_interests(model, ["some obscure ticker"])
+
+    assert result == {"some obscure ticker": []}
+
+
+def test_classify_interests_empty_input_returns_empty_without_calling_model():
+    model = MagicMock()
+    assert news_classify.classify_interests(model, []) == {}
+    model.with_structured_output.assert_not_called()

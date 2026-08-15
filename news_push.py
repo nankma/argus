@@ -1,18 +1,37 @@
 """
-Periodic news-push digest: fetch, filter-to-new, write, send. See
-docs/bot-features-plan.md item 5.
+Periodic news-push digest: read the shared local cache, filter to new +
+relevant, write, send. See docs/bot-features-plan.md item 5 and
+docs/local-news-cache-plan.md's "Interaction with news_push.py" section.
 
-Deliberately does NOT go through agent.py's tool-calling agent
-(build_agent/run_agent) to gather articles: if it did, the model would
-decide on its own how to call search_news, with no guarantee it wouldn't
-just re-fetch and re-report the same top-N-by-recency articles every push
--- exactly the "always returns similar news" complaint that also motivated
-news_sources.py's published_dt work. Instead this module fetches
-deterministically via news_sources directly, filters to only genuinely-new
-articles, and only then asks the model to write a report from that
-pre-filtered list (a single plain model.invoke, not the full agent loop --
-there's nothing left for tools to do once the articles are already in
-hand) -- guaranteeing no repeats instead of hoping the model avoids them.
+Reads from news_cache.py (populated on a schedule by news_ingest.py)
+rather than calling news_sources.py live -- converged onto the cache
+2026-08-15, per docs/local-news-cache-plan.md's item 6. Before this, every
+push cycle called every enabled source live for every subscriber's every
+interest, with no relevance filter beyond "does the source's own query
+support happen to work" -- most sources are query-blind RSS feeds that
+return their latest N items regardless of query (see news_sources.py),
+so a subscriber's digest could and did include whatever a broad
+mainstream-press feed's front page happened to be that day (a real
+incident: Nikkei Asia's general top-stories feed put an Indonesia
+earthquake and a Japan-society piece into a push digest -- nothing tech-
+related about either, and nothing in the old pipeline could have caught
+it, since no relevance check existed before the digest-writing prompt).
+
+Two-stage filtering, per docs/local-news-cache-plan.md:
+  Stage 1 (category filter, in code) -- select_candidate_articles narrows
+  the shared cache to articles whose classifier-assigned categories
+  overlap with a subscriber's own classified interests, before the model
+  ever sees anything.
+  Stage 2 (content filter) -- folded into the existing single
+  write_push_digest call rather than a separate LLM call: the prompt now
+  explicitly tells the model to still exercise judgment and omit
+  candidates that survived the category filter but aren't genuinely
+  about the topic, instead of forcing everything given into the report.
+
+Deliberately still does NOT go through agent.py's tool-calling agent
+(build_agent/run_agent): a single plain model.invoke (no tool loop) is
+enough once the candidate list is already assembled in code -- there's
+nothing left for tools to do.
 
 "New" is judged two ways, per user request: primarily by published_dt
 (skip anything published at or before the user's last push), and as a
@@ -24,71 +43,134 @@ from datetime import datetime, timezone
 
 import agent
 import guardrails
+import news_cache
+import news_classify
 import news_sources
 import users_db
 
-MAX_RESULTS_PER_SOURCE = 5
+MAX_ARTICLES_PER_TOPIC = 5
 
 _PUSH_DIGEST_PROMPT = (
     "You are a technology industry analyst writing a periodic news digest "
     "for a Telegram subscriber, covering AI and the broader tech industry. "
-    "Below is a list of articles that are new since their last digest, "
-    "grouped by the topic they matched. Write a short trend report "
-    "covering ONLY these articles -- do not invent or reference anything "
-    "else, and do not mention that this is an automated or periodic "
-    "message.\n\n" + agent.HTML_FORMATTING_RULES + "\n\n" + agent.TREND_REPORT_STRUCTURE
+    "Below is a list of candidate articles that are new since their last "
+    "digest, grouped by the topic they matched during a coarse category "
+    "filter. That filter is not perfect -- some candidates may not "
+    "actually be about the subscriber's topic, or may not be genuinely "
+    "tech-industry content at all (e.g. general news that happened to "
+    "come from a source that also covers tech). Use your own judgment: "
+    "write a short trend report covering ONLY the candidates that are "
+    "genuinely relevant, silently omitting any that aren't -- do not "
+    "force an irrelevant candidate into the report just because it was "
+    "in the list, and do not invent or reference anything not in the "
+    "list either. If NONE of the candidates are genuinely relevant, "
+    "write nothing (an empty reply) rather than reporting on off-topic "
+    "content. Do not mention that this is an automated or periodic "
+    "message, and do not mention the filtering process itself.\n\n"
+    + agent.HTML_FORMATTING_RULES
+    + "\n\n"
+    + agent.TREND_REPORT_STRUCTURE
 )
 
 
-def fetch_new_articles(
+def resolve_interest_categories(model, interests: list[str]) -> dict[str, list[str]]:
+    """Stage-1 setup: maps each interest to its category tags, using
+    users_db's persistent cache and classifying only what's missing --
+    interest text is stable vocabulary (unlike article content), so this
+    should be a cache hit for any interest that's been pushed before."""
+    resolved = users_db.get_cached_interest_categories(interests)
+    missing = [i for i in interests if i not in resolved]
+    if missing:
+        newly_classified = news_classify.classify_interests(model, missing)
+        for interest in missing:
+            categories = newly_classified.get(interest, [])
+            users_db.set_interest_categories(interest, categories)
+            resolved[interest] = categories
+    return resolved
+
+
+def select_candidate_articles(
+    cached_articles: list[dict],
     topics: list[str],
+    topic_categories: dict[str, list[str]],
     since: datetime | None,
     already_pushed_links: set[str],
-    max_results_per_source: int = MAX_RESULTS_PER_SOURCE,
     include_restricted: bool = False,
+    max_per_topic: int = MAX_ARTICLES_PER_TOPIC,
 ) -> list[dict]:
-    """Fetches across all enabled sources for each topic, returns only
-    articles judged "new": published after `since` when published_dt
-    parsed successfully, otherwise not in `already_pushed_links`.
-    Deduplicated by link across topics/sources within this call too.
+    """Stage 1 (category filter): narrows the shared cache to one
+    subscriber's candidate articles, before the digest-writing model
+    (stage 2, in write_push_digest's prompt) ever sees anything.
 
-    `include_restricted` defaults to False (unlike news_sources.
-    enabled_sources itself) because a push cycle has no per-request
-    caller to gate the way agent.py's search_news tool does -- the
-    subscriber's own restricted_sources_enabled flag must be passed
-    explicitly by the caller (see run_push_cycle) or this silently
-    reverts to including NewsAPI/Perigon for every subscriber, not just
-    admin-approved ones. Real incident, 2026-08-14: this defaulted to
-    True (via enabled_sources' own default) for every push cycle before
-    this parameter existed, so restricted sources were live in every
-    subscriber's push digest regardless of their DB flag."""
+    An article is a candidate for `topic` when its own categories (set at
+    ingestion time by news_classify.py) overlap with that topic's mapped
+    categories from `topic_categories`. A topic that mapped to NO
+    categories at all (a classifier miss) is treated as unrestricted --
+    matches any article -- rather than matching nothing: a subscriber's
+    own stated interest is presumably tech/industry-relevant by
+    construction (they set it on a tech-industry bot), and a
+    classification miss on the INTEREST shouldn't silently starve them.
+    An article with no categories (the classifier found nothing that
+    plausibly applies, e.g. a general-news piece with no tech angle at
+    all) is excluded whenever the topic itself has real categories to
+    match against -- this is the exact mechanism that would have kept
+    the Nikkei Asia earthquake/society articles out of a digest, since
+    neither classifies into any of the 13 tech-industry categories.
+    Known, accepted overlap with a separate case this can't distinguish:
+    an article left uncategorized because news_classify.classify_articles
+    failed for its whole ingestion batch (fails open, see that
+    function's docstring) looks identical to a genuine "nothing applies"
+    result here -- both get excluded. Not solved here; a batch
+    classification failure already means that cycle's articles are
+    "harder to find... until the next cycle re-fetches and reclassifies
+    it," per that function's own docstring, so this is consistent with
+    an existing accepted limitation, not a new one.
+
+    "New" and restricted-source gating are unchanged from the previous
+    live-fetch version of this function: published after `since` when
+    published_dt parsed, else not already in `already_pushed_links`;
+    NewsAPI/Perigon articles are skipped entirely unless
+    `include_restricted`. Cached articles are considered newest-first so
+    `max_per_topic` keeps the most recent candidates, not an arbitrary
+    filesystem-glob order."""
+    ordered = sorted(
+        cached_articles,
+        key=lambda a: a.get("published_dt") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
     seen_links = set()
-    new_articles = []
+    candidates = []
     for topic in topics:
-        for _name, fetch in news_sources.enabled_sources(include_restricted=include_restricted):
-            try:
-                articles = fetch(topic, max_results_per_source)
-            except Exception:
+        topic_cats = set(topic_categories.get(topic, []))
+        count_for_topic = 0
+        for article in ordered:
+            if count_for_topic >= max_per_topic:
+                break
+            link = article.get("link")
+            if not link or link in seen_links:
                 continue
-            for article in articles:
-                link = article.get("link")
-                if not link or link in seen_links:
+            if not include_restricted and article.get("source_key") in news_sources.RESTRICTED_SOURCES:
+                continue
+            article_cats = set(article.get("categories") or [])
+            if topic_cats and not (article_cats & topic_cats):
+                continue
+            published_dt = article.get("published_dt")
+            if published_dt is not None:
+                if since is not None and published_dt <= since:
                     continue
-                published_dt = article.get("published_dt")
-                if published_dt is not None:
-                    if since is not None and published_dt <= since:
-                        continue
-                elif link in already_pushed_links:
-                    continue
-                seen_links.add(link)
-                new_articles.append({**article, "topic": topic})
-    return new_articles
+            elif link in already_pushed_links:
+                continue
+            seen_links.add(link)
+            candidates.append({**article, "topic": topic})
+            count_for_topic += 1
+    return candidates
 
 
 def write_push_digest(model, articles: list[dict], language: str | None = None) -> str:
     """A single direct model call (no tool loop -- see module docstring)
-    that turns a pre-filtered article list into a Telegram HTML digest.
-    `language`, when set, is the subscriber's stored reply-language
+    that turns a stage-1-filtered candidate list into a Telegram HTML
+    digest, applying stage-2 (content) filtering itself per the prompt
+    above. `language`, when set, is the subscriber's stored reply-language
     preference (users_db.get_language) -- pushes go through this module's
     own prompt rather than agent.py's dynamic_prompt middleware, so the
     preference has to be threaded in here too, not just in _compose_prompt."""
@@ -124,16 +206,22 @@ def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: d
 
 async def run_push_cycle(model, send: "callable", now: datetime | None = None) -> None:
     """One scheduler tick: for every push-enabled, due subscriber with at
-    least one interest, fetch new articles, and if there are any, write
-    and send a digest. `send` is `async def send(chat_id, html_text)`
-    (bound to the real bot's send_message in production, faked in tests)
-    -- kept generic so this module doesn't need a live Bot/Application to
-    be tested. One subscriber's failure (a bad fetch, a blocked send)
-    doesn't stop the others, same isolation pattern as search_news's
-    per-source error handling -- but unlike that isolation, every outcome
-    here is printed (docker logs captures stdout) rather than swallowed
-    silently, including ticks where nobody was due -- not just when
-    something actually sends.
+    least one interest, select candidate articles from the shared cache,
+    and if there are any, write and send a digest. `send` is
+    `async def send(chat_id, html_text)` (bound to the real bot's
+    send_message in production, faked in tests) -- kept generic so this
+    module doesn't need a live Bot/Application to be tested. One
+    subscriber's failure doesn't stop the others, same isolation pattern
+    as search_news's per-source error handling -- but unlike that
+    isolation, every outcome here is printed (docker logs captures
+    stdout) rather than swallowed silently, including ticks where nobody
+    was due -- not just when something actually sends.
+
+    The cache is read ONCE per cycle and reused across every subscriber
+    -- matches docs/local-news-cache-plan.md's stated efficiency argument
+    for a shared cache ("one Perigon call can satisfy every subscriber
+    whose interests match it"), and avoids N redundant directory scans
+    for N due subscribers in the same tick.
 
     Real incident, 2026-08-09, two parts: (1) a subscriber reported never
     receiving a push despite users_db showing a completed cycle -- there
@@ -152,6 +240,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     now = now or datetime.now(timezone.utc)
     subscribers = users_db.list_push_enabled_subscribers()
     print(f"[news_push] tick at {now.isoformat()}: {len(subscribers)} push-enabled subscriber(s)")
+    cached_articles = news_cache.read_all()
     for subscriber in subscribers:
         chat_id = subscriber["chat_id"]
         interests = subscriber["interests"]
@@ -170,8 +259,11 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
         print(f"[news_push] chat_id={chat_id}: due -- checking for new articles")
 
         try:
-            new_articles = fetch_new_articles(
+            topic_categories = resolve_interest_categories(model, interests)
+            new_articles = select_candidate_articles(
+                cached_articles,
                 interests,
+                topic_categories,
                 subscriber["last_push_at"],
                 set(subscriber["pushed_links"]),
                 include_restricted=subscriber["restricted_sources_enabled"],
@@ -185,6 +277,17 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                 continue
 
             digest = write_push_digest(model, new_articles, subscriber["language"])
+
+            if not digest or not digest.strip():
+                # Stage 2 (the model's own content judgment) decided none
+                # of the stage-1 candidates were genuinely relevant --
+                # see _PUSH_DIGEST_PROMPT's explicit "write nothing"
+                # instruction. Not an error, but still advance
+                # last_push_at/pushed_links the same as the no-candidates
+                # case above, for the same reason.
+                print(f"[news_push] chat_id={chat_id}: candidates found but none judged relevant -- not sending")
+                users_db.record_push(chat_id, [a["link"] for a in new_articles], now)
+                continue
 
             # A stored interest is user-supplied, unsanitized text (see
             # agent.py's update_interests) that ends up embedded in the

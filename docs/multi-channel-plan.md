@@ -58,7 +58,7 @@ The good news: `agent.py`, `guardrails.py`, and `news_push.py` already don't
 know anything about Telegram specifically — `bot.py` is the only
 Telegram-specific glue calling into a platform-agnostic core
 (`build_agent`/`run_agent`, `classify_message`, `is_output_on_topic`,
-`fetch_new_articles`/`write_push_digest`). That separation already paid off
+`select_candidate_articles`/`write_push_digest`). That separation already paid off
 once this session (see `combined_bot.py`'s docstring: "no changes were
 needed to `agent.py`'s core logic to add this second entry point"). Adding
 LINE is a new adapter plus the two items below, not a rewrite of the core.

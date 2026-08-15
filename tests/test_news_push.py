@@ -4,63 +4,157 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage
 
+import news_cache
 import news_push
 import news_sources
 import users_db
 from tests.fakes import FakeToolCallingModel
 
 
-def _article(link, published_dt=None, title="Some title", source="TestSource"):
-    return {"title": title, "link": link, "source": source, "summary": None, "published_dt": published_dt}
+def _article(link, published_dt=None, title="Some title", source="TestSource", categories=None, source_key="test"):
+    return {
+        "title": title,
+        "link": link,
+        "source": source,
+        "source_key": source_key,
+        "summary": None,
+        "published_dt": published_dt,
+        "categories": categories or [],
+    }
 
 
-def test_fetch_new_articles_filters_by_published_dt(monkeypatch):
+# --- select_candidate_articles (stage 1: category filter) -----------------
+
+
+def test_select_candidate_articles_filters_by_published_dt():
     since = datetime(2026, 8, 1, tzinfo=timezone.utc)
     old = _article("https://example.com/old", published_dt=datetime(2026, 7, 1, tzinfo=timezone.utc))
     new = _article("https://example.com/new", published_dt=datetime(2026, 8, 5, tzinfo=timezone.utc))
-    monkeypatch.setattr(
-        news_sources, "enabled_sources", lambda include_restricted=True: [("test", lambda query, n: [old, new])]
-    )
 
-    result = news_push.fetch_new_articles(["AI"], since, set())
+    result = news_push.select_candidate_articles([old, new], ["AI"], {}, since, set())
 
     assert [a["link"] for a in result] == ["https://example.com/new"]
 
 
-def test_fetch_new_articles_falls_back_to_pushed_links_for_unparsed_dates(monkeypatch):
-    unparsed_seen = _article("https://example.com/seen", published_dt=None)
-    unparsed_unseen = _article("https://example.com/unseen", published_dt=None)
-    monkeypatch.setattr(
-        news_sources,
-        "enabled_sources",
-        lambda include_restricted=True: [("test", lambda query, n: [unparsed_seen, unparsed_unseen])],
-    )
+def test_select_candidate_articles_falls_back_to_pushed_links_for_unparsed_dates():
+    seen = _article("https://example.com/seen", published_dt=None)
+    unseen = _article("https://example.com/unseen", published_dt=None)
 
-    result = news_push.fetch_new_articles(["AI"], None, {"https://example.com/seen"})
+    result = news_push.select_candidate_articles(
+        [seen, unseen], ["AI"], {}, None, {"https://example.com/seen"}
+    )
 
     assert [a["link"] for a in result] == ["https://example.com/unseen"]
 
 
-def test_fetch_new_articles_dedupes_across_topics(monkeypatch):
+def test_select_candidate_articles_dedupes_across_topics():
     article = _article("https://example.com/shared", published_dt=datetime(2026, 8, 5, tzinfo=timezone.utc))
-    monkeypatch.setattr(
-        news_sources, "enabled_sources", lambda include_restricted=True: [("test", lambda query, n: [article])]
-    )
 
-    result = news_push.fetch_new_articles(["AI", "robotics"], None, set())
+    result = news_push.select_candidate_articles([article], ["AI", "robotics"], {}, None, set())
 
     assert len(result) == 1
 
 
-def test_fetch_new_articles_isolates_source_errors(monkeypatch):
-    def failing_source(query, n):
-        raise RuntimeError("boom")
+def test_select_candidate_articles_unrestricted_topic_matches_any_category():
+    # A topic with no cached category mapping (classifier miss) shouldn't
+    # be starved -- it matches an article regardless of that article's
+    # own categories.
+    article = _article("https://example.com/a", categories=["Policy"])
 
-    monkeypatch.setattr(news_sources, "enabled_sources", lambda include_restricted=True: [("broken", failing_source)])
+    result = news_push.select_candidate_articles([article], ["AAOI"], {}, None, set())
 
-    result = news_push.fetch_new_articles(["AI"], None, set())
+    assert len(result) == 1
+
+
+def test_select_candidate_articles_excludes_off_category_article():
+    # The Nikkei Asia incident this was built to fix: an uncategorized
+    # (or off-category) article shouldn't reach a subscriber whose topic
+    # DID classify into real categories.
+    earthquake = _article("https://example.com/earthquake", categories=[])
+    ai_topic_categories = {"AI": ["AI", "Research"]}
+
+    result = news_push.select_candidate_articles([earthquake], ["AI"], ai_topic_categories, None, set())
 
     assert result == []
+
+
+def test_select_candidate_articles_includes_overlapping_category_article():
+    article = _article("https://example.com/a", categories=["AI", "Startups"])
+    topic_categories = {"AI": ["AI", "Research"]}
+
+    result = news_push.select_candidate_articles([article], ["AI"], topic_categories, None, set())
+
+    assert len(result) == 1
+
+
+def test_select_candidate_articles_excludes_restricted_sources_by_default():
+    article = _article("https://example.com/a", source_key="perigon")
+
+    result = news_push.select_candidate_articles([article], ["AI"], {}, None, set())
+
+    assert result == []
+
+
+def test_select_candidate_articles_includes_restricted_sources_when_enabled():
+    article = _article("https://example.com/a", source_key="perigon")
+
+    result = news_push.select_candidate_articles([article], ["AI"], {}, None, set(), include_restricted=True)
+
+    assert len(result) == 1
+
+
+def test_select_candidate_articles_caps_per_topic():
+    articles = [
+        _article(f"https://example.com/{i}", published_dt=datetime(2026, 8, i + 1, tzinfo=timezone.utc))
+        for i in range(1, 8)
+    ]
+
+    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), max_per_topic=3)
+
+    assert len(result) == 3
+    # newest-first
+    assert result[0]["link"] == "https://example.com/7"
+
+
+# --- resolve_interest_categories -------------------------------------------
+
+
+def test_resolve_interest_categories_uses_cache_when_available(monkeypatch):
+    monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {"AI": ["AI"]})
+    classify = MagicMock()
+    monkeypatch.setattr(news_push.news_classify, "classify_interests", classify)
+
+    result = news_push.resolve_interest_categories("fake-model", ["AI"])
+
+    assert result == {"AI": ["AI"]}
+    classify.assert_not_called()
+
+
+def test_resolve_interest_categories_classifies_and_caches_misses(monkeypatch):
+    monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
+    monkeypatch.setattr(news_push.news_classify, "classify_interests", lambda model, interests: {"AAOI": ["Stock"]})
+    set_categories = MagicMock()
+    monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
+
+    result = news_push.resolve_interest_categories("fake-model", ["AAOI"])
+
+    assert result == {"AAOI": ["Stock"]}
+    set_categories.assert_called_once_with("AAOI", ["Stock"])
+
+
+def test_resolve_interest_categories_caches_empty_result_too(monkeypatch):
+    monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
+    monkeypatch.setattr(news_push.news_classify, "classify_interests", lambda model, interests: {})
+    set_categories = MagicMock()
+    monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
+
+    result = news_push.resolve_interest_categories("fake-model", ["Some obscure ticker"])
+
+    assert result == {"Some obscure ticker": []}
+    set_categories.assert_called_once_with("Some obscure ticker", [])
+
+
+# --- write_push_digest ------------------------------------------------------
 
 
 def test_write_push_digest_returns_model_output():
@@ -140,6 +234,13 @@ def _subscriber(
     }
 
 
+def _stub_cache_and_categories(monkeypatch, cached_articles=(), topic_categories=None):
+    monkeypatch.setattr(news_cache, "read_all", lambda: list(cached_articles))
+    monkeypatch.setattr(
+        news_push, "resolve_interest_categories", lambda model, interests: topic_categories or {}
+    )
+
+
 def test_run_push_cycle_skips_subscriber_with_no_interests(monkeypatch):
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(1, interests=[])])
     record_push = MagicMock()
@@ -158,13 +259,13 @@ def test_run_push_cycle_skips_subscriber_not_due(monkeypatch):
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [recently_pushed])
     record_push = MagicMock()
     monkeypatch.setattr(users_db, "record_push", record_push)
-    fetch = MagicMock()
-    monkeypatch.setattr(news_push, "fetch_new_articles", fetch)
+    select = MagicMock()
+    monkeypatch.setattr(news_push, "select_candidate_articles", select)
     send = AsyncMock()
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
 
-    fetch.assert_not_called()
+    select.assert_not_called()
     send.assert_not_called()
     record_push.assert_not_called()
 
@@ -175,7 +276,8 @@ def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch):
     record_push = MagicMock()
     monkeypatch.setattr(users_db, "record_push", record_push)
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
-    monkeypatch.setattr(news_push, "fetch_new_articles", MagicMock(return_value=new_articles))
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
     monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="<b>Digest</b>"))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
     send = AsyncMock()
@@ -193,7 +295,8 @@ def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch):
     )
     monkeypatch.setattr(users_db, "record_push", MagicMock())
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
-    monkeypatch.setattr(news_push, "fetch_new_articles", MagicMock(return_value=new_articles))
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
     write_digest = MagicMock(return_value="<b>Digest</b>")
     monkeypatch.setattr(news_push, "write_push_digest", write_digest)
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
@@ -211,27 +314,30 @@ def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypat
         lambda: [_subscriber(9, restricted_sources_enabled=True), _subscriber(10, restricted_sources_enabled=False)],
     )
     monkeypatch.setattr(users_db, "record_push", MagicMock())
-    fetch = MagicMock(return_value=[])
-    monkeypatch.setattr(news_push, "fetch_new_articles", fetch)
+    _stub_cache_and_categories(monkeypatch)
+    select = MagicMock(return_value=[])
+    monkeypatch.setattr(news_push, "select_candidate_articles", select)
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
 
-    assert fetch.call_args_list[0].kwargs["include_restricted"] is True
-    assert fetch.call_args_list[1].kwargs["include_restricted"] is False
+    assert select.call_args_list[0].kwargs["include_restricted"] is True
+    assert select.call_args_list[1].kwargs["include_restricted"] is False
 
 
-def test_fetch_new_articles_defaults_to_excluding_restricted_sources(monkeypatch):
-    called_with = {}
+def test_run_push_cycle_reads_cache_once_and_reuses_across_subscribers(monkeypatch):
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        users_db, "list_push_enabled_subscribers", lambda: [_subscriber(11), _subscriber(12)]
+    )
+    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    read_all = MagicMock(return_value=[])
+    monkeypatch.setattr(news_cache, "read_all", read_all)
+    monkeypatch.setattr(news_push, "resolve_interest_categories", lambda model, interests: {})
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
 
-    def fake_enabled_sources(include_restricted=True):
-        called_with["include_restricted"] = include_restricted
-        return []
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
 
-    monkeypatch.setattr(news_sources, "enabled_sources", fake_enabled_sources)
-
-    news_push.fetch_new_articles(["AI"], None, set())
-
-    assert called_with["include_restricted"] is False
+    read_all.assert_called_once()
 
 
 def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch):
@@ -239,7 +345,8 @@ def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch):
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(4)])
     record_push = MagicMock()
     monkeypatch.setattr(users_db, "record_push", record_push)
-    monkeypatch.setattr(news_push, "fetch_new_articles", MagicMock(return_value=[]))
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
     send = AsyncMock()
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
@@ -248,13 +355,33 @@ def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch):
     record_push.assert_called_once_with(4, [], now)
 
 
+def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch):
+    # Stage 2 (the model's own judgment inside write_push_digest) decided
+    # none of the stage-1 candidates were genuinely relevant.
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(13)])
+    record_push = MagicMock()
+    monkeypatch.setattr(users_db, "record_push", record_push)
+    new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
+    monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="   "))
+    send = AsyncMock()
+
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+
+    send.assert_not_called()
+    record_push.assert_called_once_with(13, ["https://example.com/new"], now)
+
+
 def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(5)])
     record_push = MagicMock()
     monkeypatch.setattr(users_db, "record_push", record_push)
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
-    monkeypatch.setattr(news_push, "fetch_new_articles", MagicMock(return_value=new_articles))
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
     monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="off-topic drift"))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=False))
     send = AsyncMock()
@@ -272,16 +399,17 @@ def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch):
     )
     record_push = MagicMock()
     monkeypatch.setattr(users_db, "record_push", record_push)
+    _stub_cache_and_categories(monkeypatch)
 
     call_count = {"n": 0}
 
-    def fetch_side_effect(topics, since, pushed_links, include_restricted=False):
+    def select_side_effect(cached_articles, topics, topic_categories, since, pushed_links, include_restricted=False):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("boom")
         return [{**_article("https://example.com/ok"), "topic": "AI"}]
 
-    monkeypatch.setattr(news_push, "fetch_new_articles", MagicMock(side_effect=fetch_side_effect))
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(side_effect=select_side_effect))
     monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="<b>Digest</b>"))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
     send = AsyncMock()

@@ -236,11 +236,15 @@ separate, unrelated `TypeError` in `_parse_iso_published` was the actual
 crash — see that function's docstring — but this gap meant restricted
 sources were live in every subscriber's push path either way). Fixed by
 adding `list_push_enabled_subscribers`' `restricted_sources_enabled`
-field and threading it through `run_push_cycle` →
-`fetch_new_articles(..., include_restricted=...)`, whose own default
-was also flipped to `False` (unlike `enabled_sources` itself) so a
-future caller that forgets to pass it explicitly fails closed, not
-open.
+field and threading it through `run_push_cycle`, whose own default was
+flipped to `False` (unlike `enabled_sources` itself) so a future caller
+that forgets to pass it explicitly fails closed, not open. **Superseded
+the next day (2026-08-15)** when `news_push.py` stopped calling
+`news_sources` live at all and converged onto the local cache (see
+`docs/local-news-cache-plan.md`'s "Interaction with `news_push.py`") —
+the same gating now lives in `news_push.select_candidate_articles`,
+checking each cached article's `source_key` against `RESTRICTED_SOURCES`
+instead of gating a live source list, same effect.
 
 ## Considered, tested live, and rejected
 

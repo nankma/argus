@@ -86,6 +86,23 @@ def _format_batch(articles: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def classify_interests(model, interests: list[str]) -> dict[str, list[str]]:
+    """Classifies subscriber-stated interest strings (e.g. "機器人科技",
+    "AAOI") into the same category taxonomy as articles -- the stage-1
+    filter news_push.py uses to narrow the shared cache to a subscriber's
+    topics before the digest-writing model ever sees anything. Thin
+    wrapper around classify_articles: each interest is treated as a
+    single-line pseudo-article (title=interest text, no summary). Callers
+    are expected to cache the result (see users_db.get_cached_interest_categories/
+    set_interest_categories) rather than re-classifying on every push
+    cycle -- interest text is stable vocabulary, not fresh content."""
+    if not interests:
+        return {}
+    articles = [{"title": interest, "summary": None} for interest in interests]
+    result = classify_articles(model, articles)
+    return {interest: result.get(i, []) for i, interest in enumerate(interests)}
+
+
 def classify_articles(model, articles: list[dict]) -> dict[int, list[str]]:
     """Returns {index: categories} for every article in `articles` that
     the model actually returned an entry for. Fails open on any error
