@@ -36,13 +36,18 @@ Usage:
         --phoenix-vm ubuntu@<phoenix-vm-ip> --phoenix-key <path-to-phoenix-vm-key> \
         [--phoenix-project-id UHJvamVjdDoy] [--timeout 30] [--poll-interval 3]
 
-Not yet live-verified end-to-end -- the Phoenix VM was unreachable at the
-time this was written (see the finding above), so there was nothing to
-verify against. The GraphQL query shape is copied directly from
-docs/observability-and-debugging.md's already-confirmed-working example,
-not guessed, but this script's own control flow (SSH orchestration,
-polling, exit codes) needs a real run against a live Phoenix once that's
-restored before being trusted blindly.
+Verified live end-to-end 2026-08-16, after PHOENIX_ENABLED/PHOENIX_ENDPOINT
+were restored on the bot's docker run: 35 spans confirmed landed in
+Phoenix within 90s of a real test message. Two real bugs were caught and
+fixed by that first live run, not found by inspection: (1) the default
+test message ("What's new with OpenAI?") has an apostrophe, which broke
+out of the single-quoted `-d '...'` shell string on the remote host --
+fixed by POSIX-escaping the payload (`'` -> `'\''`) rather than assuming
+future messages won't contain one; (2) curl's own `-m` was hardcoded to
+20s regardless of --timeout, which was too short for a real news_query
+call once Phoenix's SimpleSpanProcessor started adding synchronous
+per-span export latency to every LLM/tool call on this project's tiny
+(1/8 OCPU) VM -- fixed to derive curl's timeout from --timeout instead.
 """
 
 import argparse
@@ -73,9 +78,23 @@ def send_test_message(bot_vm: str, bot_key: str, chat_id: int, text: str, timeou
     (`-p 127.0.0.1:8765:8765`, see docs/local-testing-api-plan.md's
     security model), so 127.0.0.1 is correct from the VM's own shell."""
     payload = json.dumps({"chat_id": chat_id, "text": text})
+    # Real bug, caught live: the default test message ("What's new with
+    # OpenAI?") has an apostrophe, which breaks out of the single-quoted
+    # `-d '...'` shell string once it reaches the remote bash -- POSIX
+    # single-quote escaping needs '\'' for a literal quote inside a
+    # single-quoted string, not just "hope the text never contains one."
+    escaped_payload = payload.replace("'", "'\\''")
+    # curl's own -m must actually use `timeout`, not a hardcoded value --
+    # a real bug caught live: this was hardcoded to 20s regardless of
+    # --timeout, so a real news_query call (search_news across ~20
+    # sources, then an LLM synthesis call, each span now synchronously
+    # exported to Phoenix via SimpleSpanProcessor -- see the collector's
+    # own startup banner -- adds real per-call latency on a 1/8-OCPU VM)
+    # timed out well before the script's own --timeout ever kicked in.
+    curl_timeout = max(timeout - 5, 10)
     remote_command = (
-        f"curl -sS -m 20 -X POST http://127.0.0.1:{TEST_API_PORT}/test_message "
-        f"-H 'Content-Type: application/json' -d '{payload}'"
+        f"curl -sS -m {curl_timeout} -X POST http://127.0.0.1:{TEST_API_PORT}/test_message "
+        f"-H 'Content-Type: application/json' -d '{escaped_payload}'"
     )
     result = _ssh_run(bot_vm, bot_key, remote_command, timeout)
     if result.returncode != 0:
@@ -154,7 +173,15 @@ def main() -> int:
     parser.add_argument("--phoenix-key", required=True, help="path to the Phoenix VM's SSH key")
     parser.add_argument("--phoenix-project-id", default=DEFAULT_PHOENIX_PROJECT_ID)
     parser.add_argument("--chat-id", type=int, default=999, help="test_api.py chat_id to use")
-    parser.add_argument("--timeout", type=int, default=30, help="total seconds to wait for a span to land")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=90,
+        help="total seconds to wait for a span to land (also bounds the test message's own curl call -- "
+        "a real news_query call needs real time: search_news across ~20 sources plus an LLM synthesis "
+        "call, each now paying synchronous per-span Phoenix export latency on top, confirmed live to "
+        "need close to 90s on this project's 1/8-OCPU VM, not the 20-30s that might look sufficient)",
+    )
     parser.add_argument("--poll-interval", type=int, default=5, help="seconds between Phoenix polls")
     args = parser.parse_args()
 

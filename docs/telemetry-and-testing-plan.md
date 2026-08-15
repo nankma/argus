@@ -142,7 +142,40 @@ set) — deliberately not testing whether tracing "works," since that needs
 the real Docker container and would break the test suite's zero-real-calls
 guarantee. See item 6 below for how actual trace *content* gets verified.
 
-### Currently NOT connected on the live deployment — found 2026-08-16
+### RESOLVED 2026-08-16 — restored and verified live
+
+**Fixed the same day.** `docker run` redeployed with `PHOENIX_ENABLED=true`
+and `PHOENIX_ENDPOINT=http://10.0.0.234:4317` restored. Verified for
+real, not just "the container started without error" — `tools/
+check_telemetry.py` (built the same day, see below) ran end-to-end and
+confirmed **35 spans landed in Phoenix** within 90s of a real test
+message through the live bot. `docker logs` also now shows the OTel
+registration banner on startup, confirming the registered endpoint and
+gRPC transport match what was intended.
+
+Diagnosing this also surfaced that the Phoenix VM was never the
+problem — see the section below, corrected in place: it turned out to
+be a native systemd + venv install (not Docker, contrary to older docs),
+confirmed healthy and reachable on port 4317 the whole time. The actual
+defect really was just the two missing env vars on the bot's `docker
+run`, exactly as suspected before the fix.
+
+**A real, separate finding while verifying this**: Phoenix's own startup
+banner shows `Span Processor: SimpleSpanProcessor`, with its own
+explicit warning — *"strongly advised to use a BatchSpanProcessor in
+production environments"*. `SimpleSpanProcessor` exports every span
+synchronously the moment it ends, meaning every LLM call / tool call now
+blocks on a network round-trip to the Phoenix collector before
+continuing -- real latency added to every agent step, on a
+`VM.Standard.E2.1.Micro` (1/8 OCPU) shape where that's not free. Not
+fixed as part of this pass -- flagged here as a worthwhile follow-up
+(switch to a `BatchSpanProcessor` via `register()`'s options) rather than
+guessed at and changed without measuring the actual latency impact
+first, same discipline as everything else in this doc.
+
+**Original finding, retained below for the investigation trail:**
+
+### Currently NOT connected on the live deployment — found 2026-08-16 (historical)
 
 **The deployed `myfirstagent-bot` container is missing `PHOENIX_ENABLED`
 and `PHOENIX_ENDPOINT` entirely.** `docker inspect`ing the running
@@ -163,12 +196,10 @@ isn't lost; restoring it means (a) confirming/reviving the Phoenix VM, (b)
 re-adding both env vars to the bot's `docker run` command in
 `docs/deployment-plan.md` and using them on the next actual redeploy.
 
-**Practical consequence while this stays broken**: zero traces are
-reaching Phoenix right now — not just the source-fetch spans below, but
-every LLM call, router classification, and guardrail check too. Anything
-in this doc or `docs/observability-and-debugging.md` that assumes a live
-Phoenix trace exists to query doesn't currently apply to the deployed bot
-until this is restored.
+**Practical consequence while this stayed broken**: zero traces reached
+Phoenix — not just the source-fetch spans below, but every LLM call,
+router classification, and guardrail check too. **Resolved above** — see
+the "RESOLVED 2026-08-16" section at the top of this finding.
 
 ### Why didn't anything alert on this? — the precise answer, found 2026-08-16
 
