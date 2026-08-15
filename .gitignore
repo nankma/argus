@@ -10,3 +10,9 @@ subscribers.db
 
 # generated showcase output (build with tools/build_showcase.py)
 showcase.html
+
+# Local-only infrastructure notes (real IPs, OCIDs, SSH key paths, live
+# secret values) -- must NEVER be committed or pushed. See
+# local-infra/infrastructure.md's own warning banner for why this exists
+# and the rules around it.
+local-infra/
