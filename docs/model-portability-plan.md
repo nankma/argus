@@ -230,12 +230,16 @@ what caught its own trigger case as a false positive** — the concrete
 proof that ad-hoc manual trials (what every guardrail measurement in
 this project was, before this) aren't good enough to trust on their own,
 independent of whatever the specific finding turns out to be. Layers 1
-(`fails_local_prefilter`) and 2 (`classify_message`) are now scoreable
-standalone — hundreds of prompts fed directly at just that function, no
-agent run, no output check, no Telegram round-trip anywhere in the loop.
-Layer 4 isn't covered yet; that's the concrete next extension, motivated
-by the one finding from this incident that *did* survive
-re-verification (see below).
+(`fails_local_prefilter`), 2 (`classify_message`), and now 4
+(`is_output_on_topic`, extended 2026-08-14, motivated by the one finding
+from this incident that *did* survive re-verification — see below) are
+all scoreable standalone — hundreds of prompts fed directly at just that
+function, no agent run, no Telegram round-trip anywhere in the loop. The
+harness has since caught and fixed a real layer-4 issue this way (the
+`set_language` reasoning-before-conclusion fix, `docs/guardrails-plan.md`)
+and also caught its own false positive a second time (the retracted
+"Chinese-language crypto" incident, same doc) — proof this extension
+pulled its weight, not just a planned-but-unused capability.
 
 **Fourth implication.** Discussing this incident surfaced a related
 design point, recorded in `docs/context-management-plan.md`'s "Planned

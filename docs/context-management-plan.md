@@ -165,6 +165,17 @@ wrapper around `wrap_model_call` specifically for this use case).
 
 ## The router design: one classifier call feeds both the guardrail and layer 2
 
+**Built and live.** This section was written as a proposal; everything
+described below has since shipped as `guardrails.classify_message` /
+`MessageClassification` (`category: Literal["news_query", "set_interest",
+"remove_interest", "start_push", "stop_push", "set_language",
+"off_topic"]` — `set_language` was added after this section was
+originally written, for `docs/bot-features-plan.md` item 2). Left in the
+original future-tense wording below since the design rationale is still
+the accurate explanation of *why* it's built this way, not because it's
+still pending — see `docs/guardrails-plan.md`'s own Status table for the
+authoritative current state.
+
 This is the piece that ties this doc together with `docs/guardrails-plan.md`
 and the newly-requested natural-language subscription management
 (subscribe/unsubscribe to topics, start/stop periodic push — all via plain
@@ -202,11 +213,12 @@ and which tool the agent should reach for this turn.
   the agent (`update_interests(action: "add"|"remove", topic: str)` calling
   `users_db`'s existing `set_interests()`/`get_interests()`).
 - `category in ("start_push", "stop_push")` → layer 2 = "the user wants to
-  toggle periodic push; use the `set_push_enabled` tool." Needs a **new
-  tool** + a **new `users_db` column** (`push_enabled`) — this turn only
-  covers recognizing the intent and flipping the flag; the actual
-  scheduled sending is out of scope for now (`docs/bot-features-plan.md`
-  item 5, still deferred — explicitly agreed when scoping this work).
+  toggle periodic push; use the `set_push_enabled` tool." Originally
+  scoped to only recognize the intent and flip a `push_enabled` flag,
+  with actual scheduled sending deferred (`docs/bot-features-plan.md`
+  item 5) — that deferral is now resolved too: item 5 shipped in full
+  (`news_push.py`, the scheduler, the cache convergence), not just the
+  flag.
 - `category == "off_topic"` → same as today: skip the second call
   entirely, send the redirect message.
 
@@ -214,11 +226,10 @@ and which tool the agent should reach for this turn.
 a future capability (translation, per-user source selection) means adding
 one more `category` value, one more tool, and one more `dynamic_prompt`
 branch — not touching the classifier's core shape or the agent's
-construction. `guardrails.py`'s `is_input_on_topic`/`is_output_on_topic`
-evolve into this richer classifier rather than staying a separate,
-narrower check — `docs/guardrails-plan.md` needs a corresponding update
-once this is built, since its four-layer design currently assumes a plain
-boolean gate, not a router.
+construction. `guardrails.py`'s `is_input_on_topic` did evolve into this
+richer classifier rather than staying a separate, narrower check, exactly
+as anticipated — `docs/guardrails-plan.md`'s own Status table reflects
+this current shape already, no further doc update pending here.
 
 **Tools stay a single fixed list, not swapped per category.** `create_agent`
 takes `tools=` once at construction time; making the actual tool list
@@ -400,19 +411,24 @@ above, and should be measured the same way before committing.
   distinct intent (interests, push); content that's relevant regardless
   of category (Telegram formatting) just stays unconditional. No separate
   relevance-classifier call needed beyond the one router call itself.
-- Exact tool signatures for `update_interests`/`set_push_enabled`, and the
-  `users_db` schema addition (`push_enabled` column) — not finalized, a
-  real design step at implementation time, not this doc.
-- How `docs/guardrails-plan.md` needs to change once `is_input_on_topic`
-  becomes this router — it currently documents a boolean layer 2; needs a
-  follow-up pass once this is built, not before.
+- ~~Exact tool signatures for `update_interests`/`set_push_enabled`, and
+  the `users_db` schema addition~~ — **resolved by building it**:
+  `update_interests`/`set_push_enabled`/`set_push_interval` all live in
+  `agent.py`, `push_enabled`/`push_interval_hours` are real `users_db`
+  columns.
+- ~~How `docs/guardrails-plan.md` needs to change once `is_input_on_topic`
+  becomes this router~~ — **resolved**: that doc's own Status table
+  already reflects the router as built.
 - Whether to formally adopt LangGraph's `Store` API later if per-user
   memory grows more complex, or keep extending `users_db.py` directly —
   leaning toward the latter unless a concrete need for `Store`-specific
-  features (e.g. built-in semantic search over memories) shows up.
-- Net call count per turn once this ships: **one router call (replacing
-  guardrails' old input check) + the agent's own 1-2 calls + the existing
-  output check (layer 4 in `docs/guardrails-plan.md`)** — likely a wash or
-  slight improvement over today's count, not an addition, since the router
-  absorbs what used to be a separate guardrail call. Worth confirming with
-  real latency numbers once built, not assumed.
+  features (e.g. built-in semantic search over memories) shows up. Still
+  genuinely undecided, not resolved by anything built since.
+- **Net call count per turn — built, but never actually measured.** One
+  router call (replacing guardrails' old input check) + the agent's own
+  1-2 calls + the existing output check (layer 4 in
+  `docs/guardrails-plan.md`) is the theoretical shape; whether that's
+  actually a wash or slight improvement over the pre-router call count is
+  still an assumption, not a measured latency number. Same open item as
+  `docs/guardrails-plan.md`'s own "actual token/latency numbers still not
+  measured" note — one measurement would answer both.

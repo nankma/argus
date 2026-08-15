@@ -129,9 +129,11 @@ still in-memory only — lost on every restart. The subscriber/approval
 side of this item shipped as part of #1: **`users_db.py`'s SQLite
 `subscribers` table already exists**, tracking `chat_id`, `username`,
 `first_name`, `status`, `requested_at`, `decided_at`. **Per-user
-interests are now built too** (see below) — extended the same table
-rather than a new one, as planned. Still missing: #2's language
-preference, #4's source selection, and persisted conversation history.
+interests are now built too** (see below), and so is **#2's language
+preference** (own section below, done 2026-08-08) — both extended this
+same table rather than a new one, as planned. Still missing: #4's
+per-user source selection and persisted conversation history — those are
+the only two real gaps left in this item.
 
 - **Store: SQLite**, not a separate database server — already the choice
   made for #1's `subscribers` table, for the same reasons: a single file,
