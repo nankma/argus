@@ -294,6 +294,69 @@ def test_try_consume_api_budget_tracks_sources_independently(isolated_subscriber
     assert users_db.try_consume_api_budget("perigon", 3, "2026-08-14") is True
 
 
+def test_try_consume_api_budget_preserves_history_across_days(isolated_subscribers_db):
+    # Real gap the (source, date) migration fixed: the old schema
+    # overwrote a source's single row on every new day, losing yesterday's
+    # count entirely.
+    for _ in range(3):
+        users_db.try_consume_api_budget("perigon", 3, "2026-08-14")
+    users_db.try_consume_api_budget("perigon", 3, "2026-08-15")
+
+    history = users_db.get_api_budget_history("perigon")
+
+    assert {"date": "2026-08-14", "count": 3} in history
+    assert {"date": "2026-08-15", "count": 1} in history
+
+
+def test_get_total_api_calls_sums_across_all_recorded_days(isolated_subscribers_db):
+    for _ in range(3):
+        users_db.try_consume_api_budget("perigon", 3, "2026-08-14")
+    users_db.try_consume_api_budget("perigon", 3, "2026-08-15")
+
+    assert users_db.get_total_api_calls("perigon") == 4
+
+
+def test_get_total_api_calls_zero_for_unknown_source(isolated_subscribers_db):
+    assert users_db.get_total_api_calls("perigon") == 0
+
+
+def test_record_api_call_does_not_enforce_a_cap(isolated_subscribers_db):
+    # Unlike try_consume_api_budget, record_api_call never returns False --
+    # it's for visibility (agent.py's search_news), not gating.
+    for _ in range(5):
+        users_db.record_api_call("perigon", "2026-08-14")
+
+    assert users_db.get_api_budget_history("perigon") == [{"date": "2026-08-14", "count": 5}]
+
+
+def test_record_api_call_and_try_consume_api_budget_share_the_same_count(isolated_subscribers_db):
+    users_db.try_consume_api_budget("perigon", 10, "2026-08-14")
+    users_db.record_api_call("perigon", "2026-08-14")
+
+    assert users_db.get_total_api_calls("perigon") == 2
+
+
+def test_api_budget_migration_preserves_existing_rows_from_the_old_schema(isolated_subscribers_db):
+    import sqlite3
+
+    # Simulate a database still on the pre-2026-08-16 schema (one row per
+    # source, no date in the primary key) to confirm init_db's migration
+    # carries the existing row forward instead of dropping it.
+    conn = sqlite3.connect(users_db.DB_FILE)
+    conn.execute("DROP TABLE IF EXISTS api_budget")
+    conn.execute("CREATE TABLE api_budget (source TEXT PRIMARY KEY, date TEXT NOT NULL, count INTEGER NOT NULL)")
+    conn.execute("INSERT INTO api_budget (source, date, count) VALUES ('perigon', '2026-08-10', 2)")
+    conn.commit()
+    conn.close()
+
+    users_db.init_db()
+
+    assert users_db.get_api_budget_history("perigon") == [{"date": "2026-08-10", "count": 2}]
+    # the new schema allows a second day's row to coexist
+    users_db.try_consume_api_budget("perigon", 3, "2026-08-11")
+    assert len(users_db.get_api_budget_history("perigon")) == 2
+
+
 def test_get_source_last_pulled_at_unknown_source_returns_none(isolated_subscribers_db):
     assert users_db.get_source_last_pulled_at("perigon") is None
 

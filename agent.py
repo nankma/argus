@@ -25,7 +25,7 @@ Run:
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from langchain_core.tools import tool
 from langchain_deepseek import ChatDeepSeek
 from langchain.agents import create_agent
@@ -261,14 +261,27 @@ def search_news(query: str, runtime: ToolRuntime, max_results_per_source: int = 
     # users_db.get_restricted_sources_enabled.
     include_restricted = users_db.get_restricted_sources_enabled(chat_id)
     sources = news_sources.enabled_sources(include_restricted=include_restricted)
+    today = datetime.now(timezone.utc).date().isoformat()
     lines = []
     total = 0
     for name, fetch in sources:
         try:
-            articles = fetch(query, max_results_per_source)
+            articles = news_sources.traced_fetch(name, fetch, query, max_results_per_source)
         except Exception as exc:
             lines.append(f"- [{name}] ERROR: {exc}")
             continue
+        if name in news_sources.RESTRICTED_SOURCES:
+            # This was a real blind spot until 2026-08-16: news_ingest.py's
+            # own scheduled pulls consume/enforce a daily budget
+            # (try_consume_api_budget), but this on-demand path never
+            # recorded anything at all -- an admin's chat queries against
+            # Perigon/NewsAPI were completely invisible to
+            # users_db.api_budget. record_api_call is deliberately
+            # non-enforcing (unlike try_consume_api_budget): this path
+            # isn't subject to news_ingest.py's cap, only counted
+            # alongside it for combined visibility (users_db.
+            # get_api_budget_history/get_total_api_calls).
+            users_db.record_api_call(name, today)
         total += len(articles)
         for a in articles:
             published = a.get("published") or "date unknown"

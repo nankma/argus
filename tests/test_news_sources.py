@@ -188,3 +188,36 @@ def test_enabled_sources_excludes_restricted_when_false(monkeypatch):
     # unrestricted, always-on sources are unaffected
     assert "hackernews" in names
     assert "bbc_business" in names
+
+
+def test_traced_fetch_returns_the_underlying_fetch_result():
+    def fake_fetch(query, max_results):
+        return [{"title": "a"}, {"title": "b"}]
+
+    result = news_sources.traced_fetch("hackernews", fake_fetch, "AI", 5)
+
+    assert result == [{"title": "a"}, {"title": "b"}]
+
+
+def test_traced_fetch_reraises_on_error():
+    def failing_fetch(query, max_results):
+        raise RuntimeError("boom")
+
+    try:
+        news_sources.traced_fetch("hackernews", failing_fetch, "AI", 5)
+        assert False, "expected RuntimeError to propagate"
+    except RuntimeError as exc:
+        assert str(exc) == "boom"
+
+
+def test_traced_fetch_passes_query_and_max_results_through():
+    captured = {}
+
+    def fake_fetch(query, max_results):
+        captured["query"] = query
+        captured["max_results"] = max_results
+        return []
+
+    news_sources.traced_fetch("hackernews", fake_fetch, "robotics", 7)
+
+    assert captured == {"query": "robotics", "max_results": 7}

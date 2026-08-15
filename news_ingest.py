@@ -126,7 +126,7 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
                 # documented up front.
                 time.sleep(REQUEST_DELAY_SECONDS)
             try:
-                articles = fetch(query, MAX_RESULTS_PER_SOURCE)
+                articles = news_sources.traced_fetch(source_key, fetch, query, MAX_RESULTS_PER_SOURCE)
             except Exception as exc:
                 print(f"[news_ingest] {source_key}: fetch({query!r}) failed with {exc!r}")
                 continue

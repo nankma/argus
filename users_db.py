@@ -52,6 +52,40 @@ def _ensure_column(conn, column: str, sql_type: str) -> None:
         conn.execute(f"ALTER TABLE subscribers ADD COLUMN {column} {sql_type}")
 
 
+def _migrate_api_budget_table(conn) -> None:
+    """The original api_budget schema kept exactly one row per source
+    (today's count only, silently overwritten whenever the date rolled
+    over) -- there was no way to answer "how many calls have we made in
+    total" or "what did we use yesterday," only "what have we used
+    today." Migrated 2026-08-16 to one row per (source, date), so usage
+    has real queryable history (see get_api_budget_history/
+    get_total_api_calls) instead of losing every prior day's count.
+    Detects the old single-column-PK schema via PRAGMA and carries
+    forward whatever row already existed (that source's most recently
+    recorded day) rather than silently dropping it. A no-op on a fresh
+    database (table doesn't exist yet -- CREATE TABLE IF NOT EXISTS
+    below creates the new schema directly) or one already migrated."""
+    columns = conn.execute("PRAGMA table_info(api_budget)").fetchall()
+    if not columns:
+        return
+    pk_columns = [row[1] for row in columns if row[5] > 0]
+    if pk_columns != ["source"]:
+        return
+    conn.execute("ALTER TABLE api_budget RENAME TO api_budget_old")
+    conn.execute(
+        """
+        CREATE TABLE api_budget (
+            source TEXT NOT NULL,
+            date TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (source, date)
+        )
+        """
+    )
+    conn.execute("INSERT INTO api_budget (source, date, count) SELECT source, date, count FROM api_budget_old")
+    conn.execute("DROP TABLE api_budget_old")
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(
@@ -79,12 +113,14 @@ def init_db() -> None:
         _ensure_column(conn, "pushed_links", "TEXT")
         _ensure_column(conn, "language", "TEXT")
         _ensure_column(conn, "restricted_sources_enabled", "INTEGER")
+        _migrate_api_budget_table(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS api_budget (
-                source TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
                 date TEXT NOT NULL,
-                count INTEGER NOT NULL
+                count INTEGER NOT NULL,
+                PRIMARY KEY (source, date)
             )
             """
         )
@@ -115,20 +151,57 @@ def try_consume_api_budget(source: str, daily_cap: int, today: str) -> bool:
     callers/tests control the date deterministically, same reasoning as
     news_push.py's `now` parameter."""
     with _connect() as conn:
-        row = conn.execute("SELECT date, count FROM api_budget WHERE source = ?", (source,)).fetchone()
-        if row is None or row[0] != today:
-            conn.execute(
-                """
-                INSERT INTO api_budget (source, date, count) VALUES (?, ?, 1)
-                ON CONFLICT(source) DO UPDATE SET date = excluded.date, count = 1
-                """,
-                (source, today),
-            )
+        row = conn.execute("SELECT count FROM api_budget WHERE source = ? AND date = ?", (source, today)).fetchone()
+        if row is None:
+            conn.execute("INSERT INTO api_budget (source, date, count) VALUES (?, ?, 1)", (source, today))
             return True
-        if row[1] >= daily_cap:
+        if row[0] >= daily_cap:
             return False
-        conn.execute("UPDATE api_budget SET count = count + 1 WHERE source = ?", (source,))
+        conn.execute(
+            "UPDATE api_budget SET count = count + 1 WHERE source = ? AND date = ?", (source, today)
+        )
         return True
+
+
+def record_api_call(source: str, today: str) -> None:
+    """Records one API call against `source` for `today` WITHOUT checking
+    or enforcing any cap -- for callers that want usage visibility but
+    aren't subject to news_ingest.py's own scheduled-pull budget (e.g.
+    agent.py's search_news, an on-demand admin path that was previously
+    invisible to this table entirely -- see docs/ai-news-sources.md's
+    "Restricted sources" section). Shares the same api_budget table/rows
+    as try_consume_api_budget, so get_api_budget_history/
+    get_total_api_calls reflect combined usage from both call sites."""
+    with _connect() as conn:
+        row = conn.execute("SELECT count FROM api_budget WHERE source = ? AND date = ?", (source, today)).fetchone()
+        if row is None:
+            conn.execute("INSERT INTO api_budget (source, date, count) VALUES (?, ?, 1)", (source, today))
+        else:
+            conn.execute(
+                "UPDATE api_budget SET count = count + 1 WHERE source = ? AND date = ?", (source, today)
+            )
+
+
+def get_api_budget_history(source: str, limit: int = 30) -> list[dict]:
+    """Most recent `limit` days' recorded call counts for `source`,
+    newest first -- the queryable history the old single-row-per-source
+    schema couldn't provide."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT date, count FROM api_budget WHERE source = ? ORDER BY date DESC LIMIT ?",
+            (source, limit),
+        ).fetchall()
+    return [{"date": date, "count": count} for date, count in rows]
+
+
+def get_total_api_calls(source: str) -> int:
+    """Sum of every recorded call for `source` across all days retained
+    in the table -- combines news_ingest.py's budget-enforced calls and
+    agent.py's search_news' merely-recorded calls, since both write into
+    the same table."""
+    with _connect() as conn:
+        row = conn.execute("SELECT SUM(count) FROM api_budget WHERE source = ?", (source,)).fetchone()
+    return row[0] or 0
 
 
 def get_cached_interest_categories(interests: list[str]) -> dict[str, list[str]]:

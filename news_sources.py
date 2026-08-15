@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 
 import feedparser
 import requests
+from opentelemetry import trace
 
 # Self-identifying, not a fake browser -- some feeds (TechRadar, confirmed
 # live) return 403 to the bare `python-requests/x.x` default User-Agent but
@@ -395,12 +396,52 @@ def enabled_sources(include_restricted: bool = True) -> list[tuple[str, callable
     key-gated ones whose required env var is set. `include_restricted`
     additionally excludes RESTRICTED_SOURCES when False -- see
     agent.py's search_news, the only caller that ever passes False; every
-    other caller (news_ingest.py, news_push.py) keeps the default so
-    they're unaffected. Same 2-tuple shape as before source_class was
-    added -- callers and tests all unpack exactly (name, fn)."""
+    other caller (news_ingest.py) keeps the default so it's unaffected.
+    Same 2-tuple shape as before source_class was added -- callers and
+    tests all unpack exactly (name, fn)."""
     return [
         (name, fn)
         for name, fn, required_env, _source_class in SOURCE_REGISTRY
         if (required_env is None or os.environ.get(required_env))
         and (include_restricted or name not in RESTRICTED_SOURCES)
     ]
+
+
+_tracer = trace.get_tracer(__name__)
+
+
+def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int) -> list[dict]:
+    """Wraps one source's fetch call in an OpenTelemetry span, so it shows
+    up in Phoenix's unified trace view alongside LLM calls -- this is the
+    layer openinference-instrumentation-langchain's auto-instrumentation
+    can't reach on its own. A plain fetch() here is a bare requests.get()
+    invoked from news_ingest.py's scheduled pull loop or agent.py's
+    search_news, entirely outside LangChain's tool-calling loop; auto-
+    instrumentation only sees LangChain-mediated calls (LLM invocations,
+    @tool-decorated tool calls), so without this wrapper these fetches are
+    invisible to Phoenix regardless of whether tracing is enabled. See
+    docs/local-news-cache-plan.md's "API call visibility" section.
+
+    trace.get_tracer() returns a real tracer once agent.py's
+    setup_telemetry() has called phoenix.otel.register(), or a safe no-op
+    tracer if it hasn't (PHOENIX_ENABLED unset, or register() never
+    called at all, e.g. in tests) -- this call has no effect either way
+    when tracing isn't configured, same "no-op by default" shape as
+    everywhere else telemetry touches this project.
+
+    Re-raises on fetch failure after recording it on the span -- callers
+    already have their own per-source try/except (news_ingest.py,
+    search_news), so error isolation is unchanged; this only adds
+    visibility, it doesn't change control flow."""
+    with _tracer.start_as_current_span("fetch_source") as span:
+        span.set_attribute("source_key", source_key)
+        span.set_attribute("query", query)
+        span.set_attribute("restricted", source_key in RESTRICTED_SOURCES)
+        try:
+            articles = fetch(query, max_results)
+        except Exception as exc:
+            span.set_attribute("error", str(exc))
+            span.set_attribute("article_count", 0)
+            raise
+        span.set_attribute("article_count", len(articles))
+        return articles

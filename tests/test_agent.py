@@ -140,6 +140,41 @@ def test_search_news_aggregates_and_isolates_errors(monkeypatch, isolated_subscr
     assert result[-1].content == "Here's what I found."
 
 
+def test_search_news_records_api_call_for_restricted_sources_only(monkeypatch, isolated_subscribers_db):
+    def perigon_source(query, max_results):
+        return [{"title": "Perigon Article", "link": "https://example.com/p", "source": "Perigon"}]
+
+    def free_source(query, max_results):
+        return [{"title": "Free Article", "link": "https://example.com/f", "source": "Free"}]
+
+    monkeypatch.setattr(
+        news_sources,
+        "enabled_sources",
+        lambda include_restricted=True: [("perigon", perigon_source), ("hackernews", free_source)],
+    )
+    monkeypatch.setattr(users_db, "get_restricted_sources_enabled", lambda chat_id: True)
+    record_api_call = SimpleNamespace(calls=[])
+    monkeypatch.setattr(
+        users_db, "record_api_call", lambda source, today: record_api_call.calls.append((source, today))
+    )
+
+    fake_model = FakeToolCallingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_news", "args": {"query": "test"}, "id": "call_1"}],
+            ),
+            AIMessage(content="Here's what I found."),
+        ]
+    )
+    built = agent.build_agent(fake_model)
+
+    agent.run_agent(built, [{"role": "user", "content": "what's trending?"}], context={"chat_id": 1})
+
+    assert len(record_api_call.calls) == 1
+    assert record_api_call.calls[0][0] == "perigon"
+
+
 def test_run_agent_no_tool_call_direct_answer():
     fake_model = FakeToolCallingModel(responses=[AIMessage(content="Hi there!")])
     built = agent.build_agent(fake_model)

@@ -142,6 +142,86 @@ set) — deliberately not testing whether tracing "works," since that needs
 the real Docker container and would break the test suite's zero-real-calls
 guarantee. See item 6 below for how actual trace *content* gets verified.
 
+### Currently NOT connected on the live deployment — found 2026-08-16
+
+**The deployed `myfirstagent-bot` container is missing `PHOENIX_ENABLED`
+and `PHOENIX_ENDPOINT` entirely.** `docker inspect`ing the running
+container's env shows only `PHOENIX_API_KEY_SECRET_OCID` — fetching the
+API key secret happens in `docker-entrypoint.sh` regardless, but that
+alone doesn't turn tracing on; `setup_telemetry()` checks `PHOENIX_ENABLED`
+specifically. This is a regression from the state `docs/deployment-plan.md`
+records as "verified end-to-end" (`PHOENIX_ENABLED=true`,
+`PHOENIX_ENDPOINT=http://10.0.0.234:4317`, a real trace confirmed in
+Phoenix's UI) — somewhere between that verification and the current
+deployment, a `docker run` stopped including those two flags and nobody
+re-added them on a later redeploy. **Also found**: the Phoenix collector
+VM itself (private IP `10.0.0.234`) didn't respond to a `curl` from the
+bot VM at all (connection timeout) — separate from the missing env vars,
+worth checking whether that VM is still running before just restoring the
+flags. **Not fixed as part of this session's work** — flagged here so it
+isn't lost; restoring it means (a) confirming/reviving the Phoenix VM, (b)
+re-adding both env vars to the bot's `docker run` command in
+`docs/deployment-plan.md` and using them on the next actual redeploy.
+
+**Practical consequence while this stays broken**: zero traces are
+reaching Phoenix right now — not just the source-fetch spans below, but
+every LLM call, router classification, and guardrail check too. Anything
+in this doc or `docs/observability-and-debugging.md` that assumes a live
+Phoenix trace exists to query doesn't currently apply to the deployed bot
+until this is restored.
+
+### Raw source fetches — a gap auto-instrumentation can't close, added 2026-08-16
+
+`auto_instrument=True` only wires up `openinference-instrumentation-
+langchain` (the only OpenInference instrumentor in `environment.yml`) —
+it traces LangChain-mediated calls (LLM invocations, `@tool`-decorated
+tool calls made through `create_agent`'s loop) automatically, but has no
+visibility at all into a plain `requests.get()` called from outside that
+framework. `news_ingest.py`'s scheduled per-source pulls and `agent.py`'s
+`search_news` both call `news_sources.py`'s fetch functions directly —
+neither goes through anything LangChain instruments, so even with Phoenix
+fully connected, these calls would never appear as spans.
+
+Prompted by a real gap: diagnosing how many calls had been made against
+NewsAPI/Perigon (the two budget-constrained restricted sources, see
+`docs/ai-news-sources.md`) turned up that `search_news`'s on-demand usage
+of them was invisible everywhere — not logged, not counted against any
+budget, and (per the section above) not even reaching Phoenix since it
+was disconnected.
+
+**Fixed with two independent, complementary mechanisms** — deliberately
+not just one, since Phoenix availability and the local DB are different
+failure domains:
+
+1. **`news_sources.traced_fetch(source_key, fetch, query, max_results)`**
+   wraps every source fetch call (from both `news_ingest.py` and
+   `search_news`) in a manual OpenTelemetry span (`trace.get_tracer(...)`),
+   tagged with `source_key`, `query`, `restricted`, `article_count`, and
+   `error` on failure. This is real OpenTelemetry API usage, not
+   LangChain-specific — it works the moment Phoenix is connected again,
+   with no further code change, and is a safe no-op right now (and in
+   tests) since `get_tracer()` returns a no-op tracer when no provider is
+   registered.
+2. **`users_db.api_budget`** (used independently of whether Phoenix is
+   up): migrated from one row per source (today's count only, overwritten
+   on every date rollover — no history at all) to one row per
+   `(source, date)`, so `get_api_budget_history`/`get_total_api_calls`
+   give a real, persistent, queryable count regardless of tracing
+   infrastructure. `search_news` now calls the new non-enforcing
+   `users_db.record_api_call` for any restricted source it actually hits
+   — recorded in the same table `news_ingest.py`'s budget-enforced
+   `try_consume_api_budget` writes to, so a query against either source
+   reflects combined usage from both call paths, not just the scheduled
+   ingestion job's.
+
+**Why both, not just Phoenix once it's reconnected**: the DB-backed count
+is what `try_consume_api_budget` already needs for cap enforcement
+regardless of tracing state — extending it to also serve as a queryable
+log was cheap and doesn't depend on the Phoenix VM being reachable, which
+it currently isn't. Phoenix (once reconnected) adds richer per-call
+detail (timing, the actual query string, error text) that a plain counter
+can't — the two are complementary, not redundant.
+
 ## 4. CI (test automation)
 
 **Done — GitHub Actions.** `.github/workflows/ci.yml` runs on every push to
