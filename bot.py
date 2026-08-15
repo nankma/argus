@@ -87,9 +87,24 @@ MAX_HISTORY_MESSAGES = 20
 def _trim_history(messages: list, timestamps: list[datetime], now: datetime) -> tuple[list, list[datetime]]:
     """Drops messages older than MAX_HISTORY_AGE, then caps to the most
     recent MAX_HISTORY_MESSAGES -- both constraints apply together, so
-    the result is always within both."""
+    the result is always within both. Also drops any leading ToolMessage(s)
+    left with no preceding tool-calling AIMessage in the kept window.
+
+    Real incident, 2026-08-16 (docs/guardrails-plan.md): a pure position/
+    age cut can land the trim boundary in the middle of a tool-call/
+    tool-response pair -- a stored history like [..., AIMessage(tool_calls=
+    [...]), ToolMessage, ToolMessage, AIMessage(final answer)] gets cut to
+    just [ToolMessage, ToolMessage, AIMessage(final answer)] if the count
+    cap falls right after the tool-calling AIMessage. DeepSeek's API
+    rejects that outright (400: "Messages with role 'tool' must be a
+    response to a preceding message with 'tool_calls'") -- not a rare
+    edge case, since every news_query/set_interest/start_push/etc. turn
+    involves at least one tool call, so any chat with enough such turns
+    within the trim window is at risk."""
     kept = [(m, t) for m, t in zip(messages, timestamps) if now - t <= MAX_HISTORY_AGE]
     kept = kept[-MAX_HISTORY_MESSAGES:]
+    while kept and getattr(kept[0][0], "type", None) == "tool":
+        kept = kept[1:]
     if not kept:
         return [], []
     trimmed_messages, trimmed_timestamps = zip(*kept)

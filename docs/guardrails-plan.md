@@ -568,14 +568,21 @@ functional defect**: the identical `"Start pushing me news"` /
 `"Stop pushing me news"` pair against a fresh `chat_id` (no accumulated
 history to trim awkwardly) succeeded cleanly both times.
 
-**Not fixed yet** — the fix needs to make `_trim_history` cut on a
-tool-call-pair-aware boundary (e.g., never cut immediately after an
-`AIMessage` that has `tool_calls`, always keep or drop the whole
-call+response group together) rather than a blind positional slice.
-Flagging here rather than guessing at the exact trim-boundary logic and
-shipping it unmeasured — this needs a unit test reproducing the exact
-orphaned-`ToolMessage` shape before/after the fix, same discipline as
-everything else in this doc.
+**Fixed 2026-08-16.** `_trim_history` now drops any leading `ToolMessage`
+left with no preceding tool-calling `AIMessage` in the kept window, after
+the existing age/count cut:
+
+```python
+while kept and getattr(kept[0][0], "type", None) == "tool":
+    kept = kept[1:]
+```
+
+Simpler than reasoning about where the boundary "should" fall — instead
+of trying to cut exactly on a pair boundary, let the normal cut happen
+and then clean up any orphan it left behind. Covered by two new tests in
+`tests/test_bot.py` reproducing the exact shape: one forcing the cap to
+land mid-pair and asserting the orphaned `ToolMessage` is dropped, one
+confirming a pair that's fully inside the window is left untouched.
 
 ## Unrun experiment: what actually made the output check reliable
 

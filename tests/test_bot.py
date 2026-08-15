@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from telegram.error import BadRequest
 
 import bot
@@ -142,6 +143,43 @@ def test_trim_history_keeps_recent_within_both_limits():
     now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
     messages = ["a", "b", "c"]
     timestamps = [now - timedelta(minutes=30), now - timedelta(minutes=10), now]
+
+    trimmed_messages, trimmed_timestamps = _trim_history(messages, timestamps, now)
+
+    assert trimmed_messages == messages
+    assert trimmed_timestamps == timestamps
+
+
+def test_trim_history_drops_orphaned_leading_tool_message(monkeypatch):
+    # Real incident, 2026-08-16: a count-based cap landing between a
+    # tool-calling AIMessage and its ToolMessage response produced a
+    # message list DeepSeek's API rejected outright (400: "Messages with
+    # role 'tool' must be a response to a preceding message with
+    # 'tool_calls'"). Reproduces that exact shape.
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    ai_with_tool_call = AIMessage(content="", tool_calls=[{"name": "search_news", "args": {}, "id": "call_1"}])
+    tool_response = ToolMessage(content="results", tool_call_id="call_1")
+    final_answer = AIMessage(content="Here's what I found.")
+    messages = [ai_with_tool_call, tool_response, final_answer]
+    timestamps = [now, now, now]
+
+    # Forces the count cap to land right between the AIMessage(tool_calls)
+    # and its ToolMessage -- bot.MAX_HISTORY_MESSAGES is 20 in practice,
+    # too large for a fixture this size to hit naturally.
+    monkeypatch.setattr(bot, "MAX_HISTORY_MESSAGES", 2)
+
+    trimmed_messages, trimmed_timestamps = _trim_history(messages, timestamps, now)
+
+    assert trimmed_messages == [final_answer]
+    assert trimmed_timestamps == [now]
+
+
+def test_trim_history_keeps_paired_tool_call_and_response_together():
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    ai_with_tool_call = AIMessage(content="", tool_calls=[{"name": "search_news", "args": {}, "id": "call_1"}])
+    tool_response = ToolMessage(content="results", tool_call_id="call_1")
+    messages = [HumanMessage(content="hi"), ai_with_tool_call, tool_response]
+    timestamps = [now, now, now]
 
     trimmed_messages, trimmed_timestamps = _trim_history(messages, timestamps, now)
 
