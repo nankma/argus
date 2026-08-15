@@ -3,7 +3,7 @@
 Goal: run the final version of this agent in Docker, orchestrated via
 Kubernetes, deployed to a cloud service. Nothing here is built yet — this
 doc exists to capture the goal and the open questions before implementation
-starts, same pattern as `docs/telemetry-and-testing-plan.md`.
+starts, same pattern as `docs/plans/telemetry-and-testing-plan.md`.
 
 ## Status
 
@@ -13,9 +13,9 @@ starts, same pattern as `docs/telemetry-and-testing-plan.md`.
 | 2 | Kubernetes manifests (Deployment, Service, Secret, etc.) | Not started |
 | 3 | Cloud provider / hosting target | **Decided and live: Oracle Cloud Always Free** — see below |
 | 4 | Refactor `main()` from interactive CLI to a headless service | Done — Telegram bot, polling mode |
-| 5 | Security review + hardening | Reviewed — see `docs/security-plan.md`. Secrets management (finding 2) done: OCI Vault + Instance Principals, live and verified |
+| 5 | Security review + hardening | Reviewed — see `docs/plans/security-plan.md`. Secrets management (finding 2) done: OCI Vault + Instance Principals, live and verified |
 | 6 | CD (continuous deployment) | **Design decided, not built** — GitHub Actions self-hosted runner on the user's home machine, see "Open questions" below. Next infrastructure item, queued after a few pending features |
-| 7 | LINE as a second client, alongside Telegram | **On hold** — see `docs/multi-channel-plan.md`. Researched (webhook/TLS approach, registrar pricing, account setup), but LINE's free tier caps push messages at 200/month account-wide, which would gut the periodic-push feature. Parked pending a business model decision |
+| 7 | LINE as a second client, alongside Telegram | **On hold** — see `docs/plans/multi-channel-plan.md`. Researched (webhook/TLS approach, registrar pricing, account setup), but LINE's free tier caps push messages at 200/month account-wide, which would gut the periodic-push feature. Parked pending a business model decision |
 
 ## Live deployment: Oracle Cloud Always Free
 
@@ -29,7 +29,7 @@ Always Free A1 eligibility is home-region-only — creating it in a
 different region would have meant real charges). E2.1.Micro has no such
 capacity problem and is reliably available.
 
-What's running: `combined_bot.py` (see `docs/bot-features-plan.md` item 1
+What's running: `combined_bot.py` (see `docs/plans/bot-features-plan.md` item 1
 and `CLAUDE.md`) in a single Docker container, `--restart unless-stopped`,
 using the shared `myfirstagent-data` volume for `subscribers.db` — the
 same setup verified locally, rebuilt and redeployed on the VM. **Verified
@@ -57,7 +57,7 @@ Setup notes for whoever revisits this:
   needing to set up git credentials on the VM for a private repo clone.
 - Same Docker-volume-ownership gotcha as local testing: a fresh named
   volume is root-owned by default, and the non-root `mambauser` in the
-  container can't write to it until `chown`'d — see `docs/security-plan.md`
+  container can't write to it until `chown`'d — see `docs/plans/security-plan.md`
   finding 13's spirit, fixed the same way as the local Docker setup was.
 
 **Revisit later if Ampere A1 capacity frees up**: 2 OCPU/12GB is a lot more
@@ -150,7 +150,7 @@ local development, not replaced.
 ## How telemetry fits into this
 
 The lightweight-client decision forced by the Smart App Control / pandas
-issue (see `docs/telemetry-and-testing-plan.md` item 3) turns out to line up
+issue (see `docs/plans/telemetry-and-testing-plan.md` item 3) turns out to line up
 well with the Kubernetes case anyway: you would never want to bundle the
 full `arize-phoenix` package (with its pandas-dependent local UI/server)
 into every agent pod's image. The right shape for Kubernetes is the same
@@ -183,7 +183,7 @@ a Phoenix memory spike can't take the bot down with it.
 is a deliberate exception, not a lapse in the conda-forge/Docker
 convention. The original reason `arize-phoenix` (the full package, not
 `-otel`) was avoided was Windows Smart App Control blocking pandas'
-compiled DLL (`docs/telemetry-and-testing-plan.md` item 3) — a
+compiled DLL (`docs/plans/telemetry-and-testing-plan.md` item 3) — a
 Windows-only problem that doesn't exist on this Linux VM. Also,
 conda-forge's `arize-phoenix` package turned out to be badly stale
 (version 0.1.0, vs. the real current ~19.x on PyPI) — so this one host
@@ -251,7 +251,7 @@ this up automatically from the environment if not passed explicitly, so
 no `agent.py` code change was needed. The key itself is stored as another
 OCI Vault secret (`phoenix-api-key`) and fetched by
 `docker-entrypoint.sh` exactly like the other four — see finding 2 in
-`docs/security-plan.md`. Verified for real: a live message through the
+`docs/plans/security-plan.md`. Verified for real: a live message through the
 bot produced a full LangGraph trace (tool calls, token usage, model name)
 visible in Phoenix's `myfirstagent` project.
 
@@ -301,7 +301,7 @@ that scheme inside it).
   two. `bot.py`/`admin_bot.py` can still run standalone
   (`docker run ... myfirstagent-bot python bot.py`) if a future
   higher-RAM shape makes splitting them back into two containers
-  preferable for isolation. See `docs/bot-features-plan.md` item 1 and
+  preferable for isolation. See `docs/plans/bot-features-plan.md` item 1 and
   `CLAUDE.md`'s "Running both bots in one process" section.
 - `DEEPSEEK_API_KEY` / `TELEGRAM_BOT_TOKEN` / `ADMIN_CHAT_ID` /
   `ADMIN_BOT_TOKEN` / `PHOENIX_ENABLED` / `PHOENIX_ENDPOINT` /
@@ -335,11 +335,11 @@ that scheme inside it).
   OCI Vault via Instance Principal auth at container startup
   (`docker-entrypoint.sh`) — the container only ever receives
   `*_SECRET_OCID` values now, no plaintext secrets in `docker run -e` or
-  `docker inspect`. See `docs/security-plan.md` finding 2 for the full
+  `docker inspect`. See `docs/plans/security-plan.md` finding 2 for the full
   setup and a real policy-naming bug hit and fixed along the way. Telemetry
   credentials aren't in Vault yet since Phoenix isn't deployed to the cloud
   yet — revisit when it is.
-- **CI/CD overlap** — `docs/telemetry-and-testing-plan.md` item 4 (test
+- **CI/CD overlap** — `docs/plans/telemetry-and-testing-plan.md` item 4 (test
   CI) and this deployment work are related but distinct: one runs `pytest`
   on every push, the other builds/pushes a container image and deploys it.
   The existing `.github/workflows/ci.yml` doesn't build/push the Docker
@@ -347,7 +347,7 @@ that scheme inside it).
   is decided.
 - **CD (continuous deployment) — decided (option C below), not built yet.
   Queued as the next infrastructure item, after a few pending features are
-  built first (see `docs/bot-features-plan.md`).** Deployment today is
+  built first (see `docs/plans/bot-features-plan.md`).** Deployment today is
   entirely manual: build locally, `docker save | ssh ... docker load` onto
   the VM (see the `build-locally-deploy-remotely` skill), stop/restart the
   container by hand.

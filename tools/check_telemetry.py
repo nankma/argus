@@ -1,7 +1,7 @@
 """
 Post-deployment check: confirms Phoenix is actually RECEIVING traces from
 the deployed bot -- not just that the bot process started without error.
-See docs/telemetry-and-testing-plan.md's "Currently NOT connected on the
+See docs/plans/telemetry-and-testing-plan.md's "Currently NOT connected on the
 live deployment" finding: PHOENIX_ENABLED/PHOENIX_ENDPOINT silently
 dropped off a `docker run` at some point between a previously-verified-
 working deploy and now, and nothing caught it until someone went looking
@@ -10,18 +10,18 @@ that regression on the very next deploy instead.
 
 Runs entirely via SSH `curl` on each VM, not a local SSH tunnel --
 deliberately avoids the tunnel-reliability issue documented in
-docs/local-testing-api-plan.md's "Resolved issue" section (accumulated
+docs/reference/local-testing-api-plan.md's "Resolved issue" section (accumulated
 session state, dual-stack ambiguity). This check only needs two one-shot
 request/response round trips, not a sustained tunnel, so there's no
 reason to take on that failure mode here.
 
 Two steps:
   1. SSH to the bot VM, POST a message to test_api.py's /test_message
-     endpoint (see docs/local-testing-api-plan.md -- requires
+     endpoint (see docs/reference/local-testing-api-plan.md -- requires
      ENABLE_TEST_API=true on that deploy). Records the timestamp right
      before sending.
   2. SSH to the Phoenix VM, query its GraphQL API (System API Key auth,
-     see docs/observability-and-debugging.md) for spans in the
+     see docs/reference/observability-and-debugging.md) for spans in the
      myfirstagent project with startTime after that timestamp.
 
 Exits 0 and prints "OK" with the span count if at least one matching
@@ -57,7 +57,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-DEFAULT_PHOENIX_PROJECT_ID = "UHJvamVjdDoy"  # base64 of "Project:2" -- see docs/observability-and-debugging.md
+DEFAULT_PHOENIX_PROJECT_ID = "UHJvamVjdDoy"  # base64 of "Project:2" -- see docs/reference/observability-and-debugging.md
 TEST_API_PORT = 8765
 PHOENIX_PORT = 6006
 
@@ -75,7 +75,7 @@ def send_test_message(bot_vm: str, bot_key: str, chat_id: int, text: str, timeou
     """Runs curl ON the bot VM (not through a local tunnel) against its
     own loopback -- test_api.py binds 0.0.0.0 inside the container, and
     the container publishes to the VM's own loopback only
-    (`-p 127.0.0.1:8765:8765`, see docs/local-testing-api-plan.md's
+    (`-p 127.0.0.1:8765:8765`, see docs/reference/local-testing-api-plan.md's
     security model), so 127.0.0.1 is correct from the VM's own shell."""
     payload = json.dumps({"chat_id": chat_id, "text": text})
     # Real bug, caught live: the default test message ("What's new with
@@ -109,7 +109,7 @@ def fetch_phoenix_api_key(bot_vm: str, bot_key: str, timeout: int) -> str | None
     credential the CLIENT (the bot) needs to push traces, resolved from
     Vault into the bot container's own PHOENIX_API_KEY env var by
     docker-entrypoint.sh. Reads it back out via the exact technique
-    docs/observability-and-debugging.md already documents: run the
+    docs/reference/observability-and-debugging.md already documents: run the
     entrypoint script with `printenv` substituted for the real command,
     so secrets get fetched and resolved but nothing else starts."""
     remote_command = "sudo docker exec myfirstagent-bot bash -c 'cd /app && ./docker-entrypoint.sh printenv PHOENIX_API_KEY'"
@@ -130,7 +130,7 @@ def count_recent_spans(
     legitimately found zero spans. Runs the query FROM the Phoenix VM
     itself: the GraphQL endpoint (port 6006, same as the human web UI)
     is not opened to the private subnet the way the OTLP ingestion port
-    (4317) is -- see docs/security-plan.md finding 17 -- so this can't
+    (4317) is -- see docs/plans/security-plan.md finding 17 -- so this can't
     be curled directly from the bot VM or a local machine, only via SSH
     onto the Phoenix VM."""
     query = {

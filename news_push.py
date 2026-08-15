@@ -1,11 +1,11 @@
 """
 Periodic news-push digest: read the shared local cache, filter to new +
-relevant, write, send. See docs/bot-features-plan.md item 5 and
-docs/local-news-cache-plan.md's "Interaction with news_push.py" section.
+relevant, write, send. See docs/plans/bot-features-plan.md item 5 and
+docs/plans/local-news-cache-plan.md's "Interaction with news_push.py" section.
 
 Reads from news_cache.py (populated on a schedule by news_ingest.py)
 rather than calling news_sources.py live -- converged onto the cache
-2026-08-15, per docs/local-news-cache-plan.md's item 6. Before this, every
+2026-08-15, per docs/plans/local-news-cache-plan.md's item 6. Before this, every
 push cycle called every enabled source live for every subscriber's every
 interest, with no relevance filter beyond "does the source's own query
 support happen to work" -- most sources are query-blind RSS feeds that
@@ -17,7 +17,7 @@ earthquake and a Japan-society piece into a push digest -- nothing tech-
 related about either, and nothing in the old pipeline could have caught
 it, since no relevance check existed before the digest-writing prompt).
 
-Two-stage filtering, per docs/local-news-cache-plan.md:
+Two-stage filtering, per docs/plans/local-news-cache-plan.md:
   Stage 1 (category filter, in code) -- select_candidate_articles narrows
   the shared cache to articles whose classifier-assigned categories
   overlap with a subscriber's own classified interests, before the model
@@ -219,7 +219,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     was due -- not just when something actually sends.
 
     The cache is read ONCE per cycle and reused across every subscriber
-    -- matches docs/local-news-cache-plan.md's stated efficiency argument
+    -- matches docs/plans/local-news-cache-plan.md's stated efficiency argument
     for a shared cache ("one Perigon call can satisfy every subscriber
     whose interests match it"), and avoids N redundant directory scans
     for N due subscribers in the same tick.

@@ -106,7 +106,7 @@ grow unwieldy.
 ### 2. Cheap secondary classifier — the "gateway" (item 2 from the ask)
 
 **Planned evolution, not built yet**: `is_input_on_topic`'s plain boolean
-is becoming a richer router — see `docs/context-management-plan.md`'s
+is becoming a richer router — see `docs/plans/context-management-plan.md`'s
 "router design" section. The same classification call that decides
 on-topic/off-topic will also return a `category` (news query vs. setting
 an interest vs. toggling proactive push, etc.), feeding directly into
@@ -140,7 +140,7 @@ problem. Not adopted now for a concrete infrastructure reason: the model
 itself is small (e.g. `sentence-transformers`' `all-MiniLM-L6-v2` is
 ~80MB), but the inference library it needs (PyTorch) is not — installing
 it would meaningfully strain VMs that are already carefully managed down
-to individual hundreds-of-MB of headroom (see `docs/deployment-plan.md`'s
+to individual hundreds-of-MB of headroom (see `docs/plans/deployment-plan.md`'s
 Oracle Always Free setup). Revisit once there's a host with room for it,
 or a case for calling a hosted embeddings API instead of running one
 locally. Also worth being honest about a real limitation even if this
@@ -246,7 +246,7 @@ it from the input.
 ## Incident: a testing artifact briefly looked like a Chinese-language classification bug, plus one real finding underneath it
 
 **Found 2026-08-14**, running the smoke-test checklist against the new
-local curl API (`docs/local-testing-api-plan.md`) via an SSH tunnel. The
+local curl API (`docs/reference/local-testing-api-plan.md`) via an SSH tunnel. The
 original write-up here reported two findings. **One of them was wrong —
 corrected the same day, once the harness (`tools/measure_guardrails.py`)
 existed to actually check it.** Left both the original claim and the
@@ -445,7 +445,7 @@ didn't survive re-measurement — if anything, the retraction makes the
 case harder to argue against, not weaker:
 
 1. **The harness needs to test every layer standalone, not only bundled
-   into an end-to-end run.** `docs/model-portability-plan.md`'s "The
+   into an end-to-end run.** `docs/plans/model-portability-plan.md`'s "The
    harness" section already proposed a repeatable N-trial scorer, but
    scoped primarily around the output check (layer 4).
    `tools/measure_guardrails.py` now covers layers 1, 2, *and* 4 — built
@@ -463,7 +463,7 @@ case harder to argue against, not weaker:
    a separate agent from the research/news agent**, specifically *so*
    they can be tested in isolation without the research agent's behavior
    being a confound. This directly reinforces
-   `docs/context-management-plan.md`'s already-documented "Planned
+   `docs/plans/context-management-plan.md`'s already-documented "Planned
    refactor: dispatch settings routes out of the agent" section — that
    refactor was previously justified only by efficiency (Route B pays
    for an agent loop it doesn't need); Finding 2, which survived
@@ -587,7 +587,7 @@ confirming a pair that's fully inside the window is left untouched.
 ## Unrun experiment: what actually made the output check reliable
 
 **Status: not run.** Identified 2026-08-09 while writing up the layer-4
-measurements for `docs/system-overview.md` Appendix B.1.
+measurements for `docs/current/system-overview.md` Appendix B.1.
 
 **Background.** Four versions of the layer-4 output check were measured
 against the real model. Scores on "does it catch a self-disclosure leak":
@@ -643,7 +643,7 @@ real mechanism was something else — both outcomes are more useful than
 the current state.
 
 **Prerequisite:** the measurement harness described in
-`docs/model-portability-plan.md`. That plan needs a repeatable N-trial
+`docs/plans/model-portability-plan.md`. That plan needs a repeatable N-trial
 scorer anyway, because guardrail reliability figures are properties of a
 prompt/model *pair* and must be re-measured on any model swap. Once that
 harness exists, this experiment is a matter of running it over four

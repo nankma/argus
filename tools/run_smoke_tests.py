@@ -7,14 +7,14 @@ in them -- see the use-python-not-curl-for-live-tests skill, born from
 exactly that mistake twice in this project's history).
 
 Manages its own SSH tunnel to the bot VM (matching the reliability fix
-in docs/local-testing-api-plan.md's "Resolved issue" section: -4,
+in docs/reference/local-testing-api-plan.md's "Resolved issue" section: -4,
 ServerAlive*, ExitOnForwardFailure, always a fresh tunnel, never reused
 from an earlier session) rather than assuming one is already open.
 
 Covers checklist cases 1, 2, 3, 4, 5, 7, 8, 9, 12 -- everything that's a
 plain message through process_message's pipeline. Cases 6, 10, 11, 13
 (/interests, /language, /start) are command handlers that don't route
-through test_api.py at all (see docs/local-testing-api-plan.md's "What it
+through test_api.py at all (see docs/reference/local-testing-api-plan.md's "What it
 does and doesn't cover") -- listed explicitly as NOT COVERED in the
 report rather than silently omitted, so a human knows to check those
 against real Telegram separately.
@@ -133,7 +133,7 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
             "4  start/stop push",
             started_ok and stopped_ok,
             f"start_ok={started_ok} stop_ok={stopped_ok} (stop failing with agent_error while start "
-            "succeeds is the exact orphaned-ToolMessage signature -- see docs/guardrails-plan.md)",
+            "succeeds is the exact orphaned-ToolMessage signature -- see docs/plans/guardrails-plan.md)",
         )
     )
 

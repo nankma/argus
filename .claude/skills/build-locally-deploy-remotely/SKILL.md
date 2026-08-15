@@ -42,7 +42,7 @@ image.
 
 3. Recreate/restart the container on the VM to pick up the new image
    (`docker stop`/`docker rm` the old one, `docker run` again with the
-   same flags — see `docs/deployment-plan.md` for the current `docker run`
+   same flags — see `docs/plans/deployment-plan.md` for the current `docker run`
    command). `docker load` replaces the `myfirstagent-bot:latest` tag but
    doesn't restart anything using the old image automatically.
 
@@ -69,7 +69,7 @@ the first thing to verify is still set.
 confirm it prints `OK`. Real incident, found 2026-08-16: `PHOENIX_ENABLED`
 and `PHOENIX_ENDPOINT` were missing from the bot's `docker run` command —
 a regression from a previously-verified-working state
-(`docs/deployment-plan.md`) that nobody noticed because nothing checked
+(`docs/plans/deployment-plan.md`) that nobody noticed because nothing checked
 for it; it was only found weeks later while investigating something
 unrelated (API call counts). A container that starts cleanly and answers
 messages normally gives zero signal that its traces are actually
@@ -77,7 +77,7 @@ reaching Phoenix — `docker logs` showing the OTel registration banner
 only proves `register()` was *called*, not that the collector received
 anything. This step exists specifically to catch that class of silent
 regression on the very next deploy instead of an indeterminate time
-later. See `docs/telemetry-and-testing-plan.md`'s "Currently NOT
+later. See `docs/plans/telemetry-and-testing-plan.md`'s "Currently NOT
 connected on the live deployment" section for the full incident and
 `tools/check_telemetry.py`'s own docstring for how the check works (it
 sends one message through `test_api.py`, then queries Phoenix's GraphQL
@@ -97,7 +97,7 @@ missing-env-var regression this check was built for.
 VM (step 3), manually message the live bot with each of the inputs below
 and confirm the expected behavior before considering the deploy done. This
 is not optional cleanup — every case here is a real incident that shipped
-silently in this project at least once (see `docs/guardrails-plan.md` and
+silently in this project at least once (see `docs/plans/guardrails-plan.md` and
 the `e75895b` commit) because it was only caught by chance, later,
 instead of immediately after deploy.
 
@@ -148,7 +148,7 @@ per-category instruction added to `_LAYER2_BY_CATEGORY` in the future
 needs the same formatting note, or this will recur for that category.
 
 **That prompt-only fix was deployed and re-tested live, and the model
-still emitted `**AI**` anyway** — the same lesson `docs/guardrails-plan.md`
+still emitted `**AI**` anyway** — the same lesson `docs/plans/guardrails-plan.md`
 already documents for the classifier prompts: instruction-following isn't
 100% reliable, so a rule that must always hold needs a code-level
 backstop, not just a prompt asking nicely. Fixed for real by adding
@@ -262,4 +262,4 @@ ever match.
   nothing to build or transfer.
 - If this project ever moves to a proper CI/CD pipeline that builds in
   GitHub Actions and pushes to a registry, this skill becomes obsolete —
-  see `docs/deployment-plan.md`'s "CD" open question, not yet decided.
+  see `docs/plans/deployment-plan.md`'s "CD" open question, not yet decided.

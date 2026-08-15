@@ -1,5 +1,5 @@
 """
-Local file cache for news articles -- see docs/local-news-cache-plan.md.
+Local file cache for news articles -- see docs/plans/local-news-cache-plan.md.
 
 One YAML file per article, named `{source}-{id}.yaml` where `id` is a
 short hash of the article's link. Hashing the link (rather than an

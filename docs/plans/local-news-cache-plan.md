@@ -34,7 +34,7 @@ deferral reasoning — it's synchronous and user-facing, needs the harness
 (`tools/measure_guardrails.py`) extended to cover it before changing,
 and doesn't have an equivalent live incident forcing the same urgency.
 
-**Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
+**Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/current/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
 
 ## Why this is worth doing (not just "instead of on-demand")
 
@@ -58,7 +58,7 @@ If every cached article already carries rough category tags, "does this
 plausibly cover topic X" becomes a filter over structured data instead of
 the model eyeballing a live dump on every single query. This is the same
 move this project's guardrail history already learned to make the hard
-way (`docs/system-overview.md` Appendix B.1): things that must be judged
+way (`docs/current/system-overview.md` Appendix B.1): things that must be judged
 correctly belong in code, not in a model's free-text reading of raw
 content, wherever that's achievable.
 
@@ -199,7 +199,7 @@ cost. Batching by cycle means one call per pull (4–6 calls/day at a 4–6
 hour interval), each classifying everything that cycle fetched at once.
 
 **Why a cheap model fits here:** this is exactly the shape
-`docs/model-portability-plan.md`'s "Level 2 — per-stage model routing"
+`docs/plans/model-portability-plan.md`'s "Level 2 — per-stage model routing"
 already anticipated — a small/fast model is sufficient as long as it
 supports structured output, same as the router and the output-check
 already use. No new infrastructure decision, just another consumer of a
@@ -210,7 +210,7 @@ an LLM call. It was considered — zero marginal cost, no model dependency
 — but rejected as the primary mechanism: this project's own guardrail
 history is a direct lesson that hand-rolled text-matching heuristics are
 exactly the kind of thing that quietly breaks in ways that are hard to
-notice (`docs/system-overview.md` Appendix B.1). A cheap structured-output
+notice (`docs/current/system-overview.md` Appendix B.1). A cheap structured-output
 model call is more reliable for the same reason it already won for the
 router and the output check. Per **P4** (accuracy raised by
 post-deployment testing, not assumption), classification accuracy should
@@ -288,7 +288,7 @@ combined — with it, those same 150 calls seed content that any number of
 matching queries can draw from within each call's 2-day cache window.
 
 **Worked example: Perigon's budget, concretely.** 150 requests/month,
-free/non-commercial tier (see `docs/ai-news-sources.md`'s key-acquisition
+free/non-commercial tier (see `docs/current/ai-news-sources.md`'s key-acquisition
 section). 3 pulls/day ≈ 93/month, leaving ≈57/month headroom for testing.
 When the daily cap is hit, that cycle's pull is skipped (not attempted)
 and logged, same shape as `news_push.py`'s existing per-cycle outcome
@@ -307,7 +307,7 @@ run by an individual is a reasonable read of "in development," not
 is worth being able to revisit, not silently forgotten. **1 pull/day**,
 chosen deliberately conservative relative to whatever NewsAPI's actual
 technical rate limit turns out to be (not confirmed live — see
-`docs/ai-news-sources.md`). **Trigger to revisit:** if this project is
+`docs/current/ai-news-sources.md`). **Trigger to revisit:** if this project is
 ever monetized, opened beyond an invite-only pilot, or otherwise starts
 looking like the "production" NewsAPI's own terms describe, upgrade to a
 paid plan or drop NewsAPI — don't keep running on the Developer plan past
@@ -319,7 +319,7 @@ The original concern: the Perigon and NewsAPI keys exist in Vault and
 nothing stopped `search_news` from calling them unthrottled on every
 matching on-demand query from every user. Since resolved for
 *unauthorized* usage: `news_sources.RESTRICTED_SOURCES` gates both behind
-a per-user DB flag (`docs/ai-news-sources.md`'s "Restricted sources"
+a per-user DB flag (`docs/current/ai-news-sources.md`'s "Restricted sources"
 section), defaulting to off for everyone except the admin. **What's still
 true:** `try_consume_api_budget` is only ever called from
 `news_ingest.py` — the admin's own `search_news` usage of Perigon/NewsAPI
@@ -398,14 +398,14 @@ stop the cycle) are all unchanged from the live-fetch version — only
    fallback for a still-empty query remains a possible later addition,
    not required for v1.
 4. ~~**Classification model**~~ **Resolved**: the current DeepSeek
-   instance, now. `docs/model-portability-plan.md`'s Level 2 routing can
+   instance, now. `docs/plans/model-portability-plan.md`'s Level 2 routing can
    swap in a cheaper model later without a redesign — independent
    decision, not a blocker.
 5. ~~**Cleanup mechanism**~~ **Resolved**: folded into the ingestion
    tick — delete expired, then fetch new, same cycle, one job.
 6. **Storage engine, later.** Still the one open item, and deliberately
    left open rather than resolved: files for now, per the original
-   request. Same reasoning pattern as `docs/data-layer-plan.md`'s SQLite
+   request. Same reasoning pattern as `docs/plans/data-layer-plan.md`'s SQLite
    deferral — revisit only if a real trigger shows up (e.g., needing to
    query across cached articles in ways flat files make awkward), not
    preemptively.
@@ -417,7 +417,7 @@ stop the cycle) are all unchanged from the live-fetch version — only
   alone proves too coarse in practice.
 - No move off SQLite or onto a shared cache store — this is a
   single-process, single-host cache, consistent with
-  `docs/data-layer-plan.md`'s current stance on the rest of this
+  `docs/plans/data-layer-plan.md`'s current stance on the rest of this
   project's persistence.
 - No retroactive backfill of historical articles — the cache starts
   empty and fills from the first ingestion cycle forward.

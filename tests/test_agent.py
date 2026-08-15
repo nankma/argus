@@ -72,7 +72,7 @@ def test_compose_prompt_omits_language_when_unset(isolated_subscribers_db):
 def test_compose_prompt_language_applies_regardless_of_category(isolated_subscribers_db):
     # Real requirement: unlike interests (news_query-only), a language
     # preference must govern every reply, including subscription
-    # confirmations -- see docs/bot-features-plan.md item 2.
+    # confirmations -- see docs/plans/bot-features-plan.md item 2.
     users_db.set_language(105, "French")
     for category in ("news_query", "set_interest", "start_push", "set_language"):
         prompt = agent._compose_prompt(_fake_request({"chat_id": 105, "category": category}))

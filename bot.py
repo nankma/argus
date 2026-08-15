@@ -2,13 +2,13 @@
 Telegram bot entry point for the agent — the headless alternative to
 agent.py's CLI REPL. Polling mode: no public endpoint or TLS needed, and
 the same shape works locally and in a long-running Kubernetes Deployment
-later. See docs/deployment-plan.md.
+later. See docs/plans/deployment-plan.md.
 
 Reuses build_agent/run_agent/setup_telemetry from agent.py unchanged — this
 file only adds the Telegram-specific plumbing (per-chat history, handler
 registration, the polling loop).
 
-Access is gated by an approval workflow (see docs/bot-features-plan.md item
+Access is gated by an approval workflow (see docs/plans/bot-features-plan.md item
 1): ADMIN_CHAT_ID is always allowed; anyone else's first message registers
 a pending request in the shared subscribers DB (users_db.py) and notifies
 the admin via admin_bot.py — a separate bot/token — with Approve/Deny
@@ -52,7 +52,7 @@ PUSH_TICK_SECONDS = 900
 # Same tick shape as PUSH_TICK_SECONDS -- check frequently, let each
 # source's own interval (news_ingest._SOURCE_INTERVAL_HOURS, 4h default,
 # longer for budget-capped sources) decide whether this tick actually does
-# anything. See docs/local-news-cache-plan.md.
+# anything. See docs/plans/local-news-cache-plan.md.
 INGEST_TICK_SECONDS = 900
 
 # Much coarser than the two ticks above -- healthcheck.py only needs to
@@ -90,7 +90,7 @@ def _trim_history(messages: list, timestamps: list[datetime], now: datetime) -> 
     the result is always within both. Also drops any leading ToolMessage(s)
     left with no preceding tool-calling AIMessage in the kept window.
 
-    Real incident, 2026-08-16 (docs/guardrails-plan.md): a pure position/
+    Real incident, 2026-08-16 (docs/plans/guardrails-plan.md): a pure position/
     age cut can land the trim boundary in the middle of a tool-call/
     tool-response pair -- a stored history like [..., AIMessage(tool_calls=
     [...]), ToolMessage, ToolMessage, AIMessage(final answer)] gets cut to
@@ -221,7 +221,7 @@ async def notify_admin(admin_bot_token: str, admin_chat_id: int, chat_id: int, u
 
 
 async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Gate access per docs/bot-features-plan.md item 1. Returns True if the
+    """Gate access per docs/plans/bot-features-plan.md item 1. Returns True if the
     sender may proceed; otherwise replies explaining why and returns
     False."""
     chat_id = update.effective_chat.id
@@ -277,7 +277,7 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
     topics> -- set them. /interests clear -- clear them. Stored per-chat
     in users_db.py; injected into the agent's context on future messages
     (see handle_message) so it can prioritize a subscriber's own topics
-    when their question is general -- see docs/bot-features-plan.md."""
+    when their question is general -- see docs/plans/bot-features-plan.md."""
     if not await check_access(update, context):
         return
 
@@ -341,7 +341,7 @@ async def handle_language_command(update: Update, context: ContextTypes.DEFAULT_
 async def process_message(chat_id: int, user_text: str, agent, guard_model) -> dict:
     """The actual guardrail/agent/formatting pipeline, independent of
     Telegram's Update/Context objects -- extracted so test_api.py's local
-    curl endpoint (docs/local-testing-api-plan.md) exercises this exact
+    curl endpoint (docs/reference/local-testing-api-plan.md) exercises this exact
     logic, not a separate reimplementation that could silently drift from
     what real Telegram traffic runs. handle_message (below) is now a thin
     wrapper: Telegram-specific I/O only, no pipeline logic of its own.
@@ -351,11 +351,11 @@ async def process_message(chat_id: int, user_text: str, agent, guard_model) -> d
     the way through) -- useful for a test caller to assert on without
     parsing the reply text or cross-referencing docker logs/Phoenix."""
     # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
-    # docs/guardrails-plan.md for the incident this design responds to.
+    # docs/plans/guardrails-plan.md for the incident this design responds to.
     if guardrails.fails_local_prefilter(user_text):
         return {"blocked_at": "layer1_prefilter", "category": None, "reply": guardrails.REDIRECT_MESSAGE}
 
-    # Guardrail layer 2 -- now the router (docs/context-management-plan.md):
+    # Guardrail layer 2 -- now the router (docs/plans/context-management-plan.md):
     # one structured-output call answers both "is this on-topic" and "what
     # kind of request is this", gating the expensive agent call and telling
     # it which layer-2 instructions/tool to reach for in the same pass.
@@ -369,7 +369,7 @@ async def process_message(chat_id: int, user_text: str, agent, guard_model) -> d
     # chat_id and category feed agent.py's dynamic-prompt middleware
     # (layers 2/3) and the update_interests/set_push_enabled tools (which
     # need to know *which* user's row to write) -- see
-    # docs/context-management-plan.md's router design.
+    # docs/plans/context-management-plan.md's router design.
     try:
         result_messages = await asyncio.to_thread(
             run_agent,
@@ -467,7 +467,7 @@ async def _push_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def register_push_job(app: Application) -> None:
-    """Wires up the periodic-push scheduler (docs/bot-features-plan.md item
+    """Wires up the periodic-push scheduler (docs/plans/bot-features-plan.md item
     5) -- requires the apscheduler dependency (see environment.yml) for
     Application.job_queue to exist at all. Called by both bot.py's own
     main() and combined_bot.py's, so standalone and combined deployment
@@ -487,7 +487,7 @@ async def _ingest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def register_ingest_job(app: Application) -> None:
     """Wires up the periodic news-cache ingestion job -- see
-    docs/local-news-cache-plan.md. Same registration shape as
+    docs/plans/local-news-cache-plan.md. Same registration shape as
     register_push_job, called from the same places."""
     app.job_queue.run_repeating(_ingest_job, interval=INGEST_TICK_SECONDS, first=10)
 
@@ -535,7 +535,7 @@ def main():
     app = Application.builder().token(token).post_init(_start_test_api).post_shutdown(_stop_test_api).build()
     app.bot_data["agent"] = agent
     # Reuses the same model instance for guardrail classification calls
-    # (guardrails.py) -- no separate model/infra, see docs/guardrails-plan.md.
+    # (guardrails.py) -- no separate model/infra, see docs/plans/guardrails-plan.md.
     app.bot_data["guard_model"] = model
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]

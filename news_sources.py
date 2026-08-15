@@ -10,11 +10,11 @@ callers (search_news, and news_push.py's periodic-digest dedup) can reason
 about recency without each doing their own per-source date parsing. See
 the incident this responds to: search_news wasn't surfacing "published" to
 the model at all, so it had no way to judge freshness or avoid repeating
-itself across calls -- see docs/bot-features-plan.md item 5.
+itself across calls -- see docs/plans/bot-features-plan.md item 5.
 
 SOURCE_REGISTRY lists sources with the env var (if any) required to enable
 them; enabled_sources() skips key-gated sources whose key isn't set, so the
-tool degrades gracefully instead of erroring. See docs/ai-news-sources.md
+tool degrades gracefully instead of erroring. See docs/current/ai-news-sources.md
 for what each source is and how to add a new one.
 """
 
@@ -185,7 +185,7 @@ def fetch_mit_tech_review(query: str = None, max_results: int = 5) -> list[dict]
 # All query-less (see _fetch_rss note above) -- added 2026-08-13 per a real
 # gap: a subscriber asked about a specific company (AAOI) and no source in
 # the registry covered anything outside AI-industry press. See
-# docs/ai-news-sources.md for the sources tested and rejected (CNN's feeds
+# docs/current/ai-news-sources.md for the sources tested and rejected (CNN's feeds
 # are abandoned -- lastBuildDate over a year stale; CNBC and Fortune block
 # with 403; Reuters discontinued public RSS in 2020).
 
@@ -344,7 +344,7 @@ def fetch_perigon(query: str, max_results: int = 5) -> list[dict]:
 # actually filter by `query`; every "rss" source below returns its latest
 # N items regardless of what was asked (see _fetch_rss). That distinction
 # matters for anything downstream that assumes a nonzero result means a
-# real topic match -- see docs/local-news-cache-plan.md.
+# real topic match -- see docs/plans/local-news-cache-plan.md.
 #
 #   forum -- community-curated discussion board, not edited articles
 #   api   -- real query-based search, JSON REST
@@ -382,9 +382,9 @@ SOURCE_REGISTRY = [
 # sources like GNews), but because their real-world usage is constrained
 # in ways that don't scale to every caller of search_news: NewsAPI's free
 # tier is documented as development/testing only, not production
-# (docs/ai-news-sources.md), and Perigon's 150/month budget is already
+# (docs/current/ai-news-sources.md), and Perigon's 150/month budget is already
 # fully spoken for by news_ingest.py's own scheduled pulls (3/day, see
-# docs/local-news-cache-plan.md) -- search_news calling them too, on every
+# docs/plans/local-news-cache-plan.md) -- search_news calling them too, on every
 # matching on-demand query from every user, would exhaust both almost
 # immediately. GNews is deliberately not here: its 100/day budget has
 # real headroom beyond what news_ingest.py alone uses.
@@ -420,7 +420,7 @@ def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int)
     instrumentation only sees LangChain-mediated calls (LLM invocations,
     @tool-decorated tool calls), so without this wrapper these fetches are
     invisible to Phoenix regardless of whether tracing is enabled. See
-    docs/local-news-cache-plan.md's "API call visibility" section.
+    docs/plans/local-news-cache-plan.md's "API call visibility" section.
 
     trace.get_tracer() returns a real tracer once agent.py's
     setup_telemetry() has called phoenix.otel.register(), or a safe no-op

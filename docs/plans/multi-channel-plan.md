@@ -3,7 +3,7 @@
 **On hold as of 2026-08-09 — see "Why this is on hold" below.** Nothing
 here is built. This doc still exists to capture the goal, technical
 approach, and open questions for whenever this gets picked back up, same
-pattern as `docs/bot-features-plan.md` and `docs/deployment-plan.md`.
+pattern as `docs/plans/bot-features-plan.md` and `docs/plans/deployment-plan.md`.
 
 **The ask:** since the bot already runs on a cloud VM rather than a laptop,
 add LINE as a second client alongside Telegram, so users can talk to it from
@@ -84,7 +84,7 @@ LINE requires:
   webhook response.
 
 **Recommended shape**, matching this project's established "keep it on the
-one small VM, avoid new paid infra" pattern (see `docs/deployment-plan.md`'s
+one small VM, avoid new paid infra" pattern (see `docs/plans/deployment-plan.md`'s
 E2.1.Micro reasoning): a lightweight reverse proxy (Caddy — auto-provisions
 and renews Let's Encrypt certs with a few lines of config, far less
 operational overhead than manually running `certbot`) in front of a small
@@ -94,7 +94,7 @@ internal HTTP server the bot process runs (e.g. `aiohttp.web`, since
 Balancer for TLS termination — adds real cost/complexity for a feature this
 project can get for free with Caddy on the existing VM.
 
-Same two-firewall-layer gotcha documented in `docs/deployment-plan.md`
+Same two-firewall-layer gotcha documented in `docs/plans/deployment-plan.md`
 ("Setup notes") will apply again: both the OCI Security List (cloud-level)
 and the VM's local `iptables` (host-level) need a rule opening the HTTPS
 port, or the webhook silently can't be reached — this bit the Phoenix OTLP

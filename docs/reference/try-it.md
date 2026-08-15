@@ -7,7 +7,7 @@ headlines.
 
 **Code:** [github.com/nankma/argus](https://github.com/nankma/argus) —
 the [README](https://github.com/nankma/argus#readme) has an overview, and
-[`docs/system-overview.md`](https://github.com/nankma/argus/blob/main/docs/system-overview.md)
+[`docs/current/system-overview.md`](https://github.com/nankma/argus/blob/main/docs/current/system-overview.md)
 is the full architecture and design write-up if you want the details.
 
 ## Getting access

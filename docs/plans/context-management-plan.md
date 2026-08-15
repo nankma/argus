@@ -97,7 +97,7 @@ with lower ones:
   *can't* override higher ones is still an active adversarial-robustness
   research problem (prompt injection via tool output/RAG content), not
   something the layering alone guarantees. This is exactly why
-  `docs/guardrails-plan.md`'s four-layer input/output classification stays
+  `docs/plans/guardrails-plan.md`'s four-layer input/output classification stays
   in place as a separate, independent defense — this doc's layering is
   about *organizing* the prompt well, not a replacement for the guardrails
   that actually *police* what gets through.
@@ -170,13 +170,13 @@ described below has since shipped as `guardrails.classify_message` /
 `MessageClassification` (`category: Literal["news_query", "set_interest",
 "remove_interest", "start_push", "stop_push", "set_language",
 "off_topic"]` — `set_language` was added after this section was
-originally written, for `docs/bot-features-plan.md` item 2). Left in the
+originally written, for `docs/plans/bot-features-plan.md` item 2). Left in the
 original future-tense wording below since the design rationale is still
 the accurate explanation of *why* it's built this way, not because it's
-still pending — see `docs/guardrails-plan.md`'s own Status table for the
+still pending — see `docs/plans/guardrails-plan.md`'s own Status table for the
 authoritative current state.
 
-This is the piece that ties this doc together with `docs/guardrails-plan.md`
+This is the piece that ties this doc together with `docs/plans/guardrails-plan.md`
 and the newly-requested natural-language subscription management
 (subscribe/unsubscribe to topics, start/stop periodic push — all via plain
 conversation, not just `/interests`, since voice input is an eventual goal
@@ -215,7 +215,7 @@ and which tool the agent should reach for this turn.
 - `category in ("start_push", "stop_push")` → layer 2 = "the user wants to
   toggle periodic push; use the `set_push_enabled` tool." Originally
   scoped to only recognize the intent and flip a `push_enabled` flag,
-  with actual scheduled sending deferred (`docs/bot-features-plan.md`
+  with actual scheduled sending deferred (`docs/plans/bot-features-plan.md`
   item 5) — that deferral is now resolved too: item 5 shipped in full
   (`news_push.py`, the scheduler, the cache convergence), not just the
   flag.
@@ -228,7 +228,7 @@ one more `category` value, one more tool, and one more `dynamic_prompt`
 branch — not touching the classifier's core shape or the agent's
 construction. `guardrails.py`'s `is_input_on_topic` did evolve into this
 richer classifier rather than staying a separate, narrower check, exactly
-as anticipated — `docs/guardrails-plan.md`'s own Status table reflects
+as anticipated — `docs/plans/guardrails-plan.md`'s own Status table reflects
 this current shape already, no further doc update pending here.
 
 **Tools stay a single fixed list, not swapped per category.** `create_agent`
@@ -245,7 +245,7 @@ goal.
 ## Planned refactor: dispatch settings routes out of the agent
 
 **Status: not built.** Identified 2026-08-09 while documenting the request
-pipeline for `docs/system-overview.md` §B2.
+pipeline for `docs/current/system-overview.md` §B2.
 
 **The observation.** The router (built, live) classifies every message
 into a category, and the agent's layer-2 instructions and tool set are
@@ -278,9 +278,9 @@ agent.
   which prompt fragment got selected
 - Route B becomes deterministic and therefore fully unit-testable — no
   model call means no non-determinism to measure (see the reliability
-  discussion in `docs/guardrails-plan.md`)
+  discussion in `docs/plans/guardrails-plan.md`)
 - **Testability in isolation — a second, independent justification added
-  2026-08-14.** `docs/guardrails-plan.md`'s guardrail-harness incident
+  2026-08-14.** `docs/plans/guardrails-plan.md`'s guardrail-harness incident
   found a `set_language` failure specifically (layer 4 blocked a correct
   confirmation while the state change silently succeeded, reproduced 1/5
   with no tunnel or HTTP layer involved — the one finding from that
@@ -314,7 +314,7 @@ That last point is the real design question: it makes the router do more,
 and the router is a single point of failure for every message. Worth
 measuring whether a richer structured output degrades its classification
 accuracy before committing — the same discipline applied in
-`docs/system-overview.md` Appendix B.1, where a plausible prompt change measured
+`docs/current/system-overview.md` Appendix B.1, where a plausible prompt change measured
 dramatically worse.
 
 ### Splitting layer 3 and layer 4 by branch, not just by narrow/full
@@ -341,7 +341,7 @@ query variant:
   since query replies are free-form in a way command confirmations aren't.
 
 **Why this matters beyond tidiness**: the `set_language` reliability gap
-found in `docs/guardrails-plan.md` (53%/87% pass rate on the command
+found in `docs/plans/guardrails-plan.md` (53%/87% pass rate on the command
 branch's `discusses_own_configuration` check) is a concrete case where the
 shared prompt was carrying an implicit assumption that didn't hold for one
 category — the carve-out language named "interests" and "push
@@ -416,7 +416,7 @@ above, and should be measured the same way before committing.
   `update_interests`/`set_push_enabled`/`set_push_interval` all live in
   `agent.py`, `push_enabled`/`push_interval_hours` are real `users_db`
   columns.
-- ~~How `docs/guardrails-plan.md` needs to change once `is_input_on_topic`
+- ~~How `docs/plans/guardrails-plan.md` needs to change once `is_input_on_topic`
   becomes this router~~ — **resolved**: that doc's own Status table
   already reflects the router as built.
 - Whether to formally adopt LangGraph's `Store` API later if per-user
@@ -427,8 +427,8 @@ above, and should be measured the same way before committing.
 - **Net call count per turn — built, but never actually measured.** One
   router call (replacing guardrails' old input check) + the agent's own
   1-2 calls + the existing output check (layer 4 in
-  `docs/guardrails-plan.md`) is the theoretical shape; whether that's
+  `docs/plans/guardrails-plan.md`) is the theoretical shape; whether that's
   actually a wash or slight improvement over the pre-router call count is
   still an assumption, not a measured latency number. Same open item as
-  `docs/guardrails-plan.md`'s own "actual token/latency numbers still not
+  `docs/plans/guardrails-plan.md`'s own "actual token/latency numbers still not
   measured" note — one measurement would answer both.

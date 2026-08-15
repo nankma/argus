@@ -25,7 +25,7 @@ signal that looked exactly like a real router/classifier bug:
 2. `curl -d '{"text": "我對區塊鏈很感興趣", ...}'` run through this
    session's Bash tool mangled the multi-byte payload before it left the
    local machine, even through a freshly-verified, non-stale tunnel
-   (docs/guardrails-plan.md's retracted "Chinese-language crypto"
+   (docs/plans/guardrails-plan.md's retracted "Chinese-language crypto"
    incident) — second misread as "the router misclassifies Chinese
    crypto-related requests specifically."
 
@@ -74,11 +74,11 @@ the content:
    `guardrails.classify_message`) both locally and via `docker exec`
    inside the deployed container, to further isolate whether it's the
    model/prompt itself or something about the live process's wiring
-   (see docs/guardrails-plan.md's incidents for worked examples of this
+   (see docs/plans/guardrails-plan.md's incidents for worked examples of this
    elimination process).
 
-This is the same discipline `docs/guardrails-plan.md` and
-`docs/model-portability-plan.md` already apply to guardrail prompt
+This is the same discipline `docs/plans/guardrails-plan.md` and
+`docs/plans/model-portability-plan.md` already apply to guardrail prompt
 changes ("measure before shipping, and measure the actual failure mode
 before assuming what it is") — applied one layer earlier, to the test
 methodology itself, not just the fix.

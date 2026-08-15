@@ -77,7 +77,7 @@ genuinely needed — not defaults carried over from another stack.
 
 | Component | Role | Why this over the obvious alternative |
 |---|---|---|
-| **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. Model choice is injected rather than hardcoded into consumers, so it stays swappable — see `docs/model-portability-plan.md` |
+| **DeepSeek** | LLM inference | An order of magnitude cheaper than frontier models for a workload that's mostly summarization. Quality is sufficient for synthesis, and the cost difference is what makes an always-on push feature viable at all. Model choice is injected rather than hardcoded into consumers, so it stays swappable — see `docs/plans/model-portability-plan.md` |
 | **LangChain** | Agent framework | Framework-managed agent loop, and — critically — a swappable model interface. That's what lets the entire test suite run against a scripted fake with no network and no API cost. |
 | **Telegram** | Delivery channel | Supports *long polling*, so the bot needs no public endpoint, no TLS, no domain. Eliminates an entire class of attack surface and operational burden. |
 | **SQLite** | Persistence | Zero operational overhead and adequate at current scale. A known limitation, deliberately accepted — see Appendix B.2. |
@@ -733,7 +733,7 @@ acceptable.
 | **Probabilistic guardrails** | A legitimate message can occasionally be rejected; a bad one can occasionally pass | Four independent layers; classifiers fail *open*, so an outage never blocks legitimate use | Inherent — reduced by measurement (Appendix B.1), not eliminated |
 | **In-memory conversation history** | Restart loses in-flight context | Deliberate — history is capped at 1 h / 20 messages anyway | Only if conversations become genuinely multi-turn |
 | **No rate limiting** | An approved user could burn API quota | Access is approval-gated, bounding exposure | Before opening access more widely |
-| **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access. All access sits behind one module, keeping migration cheap — see `docs/data-layer-plan.md` | When a second host or real concurrency is needed |
+| **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access. All access sits behind one module, keeping migration cheap — see `docs/plans/data-layer-plan.md` | When a second host or real concurrency is needed |
 | **Linear cost scaling** | Each push subscriber costs LLM calls per interval | Cheap model; conservative 1-hour interval floor | Before any open signup |
 | **Manual deploy step** | Human error surface each release | Documented workflow plus the 13-case checklist | CD is designed (§A1), not built |
 | **Silent source degradation** | An upstream format change makes that source quietly return nothing | Per-source isolation keeps the request succeeding on the rest | Needs a source-health check; not built |
@@ -754,7 +754,7 @@ that justifies the paid tier. The research is written up rather than
 discarded.
 
 **A managed database.** Deferred with the reasoning recorded in
-`docs/data-layer-plan.md`. SQLite on one VM doesn't scale and can't be
+`docs/plans/data-layer-plan.md`. SQLite on one VM doesn't scale and can't be
 shared — a real limitation, and an understood one. But migrating now,
 with no paying users, means paying migration cost twice: once today, once
 again when the actual requirements are known.

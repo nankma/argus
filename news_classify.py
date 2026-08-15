@@ -1,14 +1,14 @@
 """
 Batched article classification for the local news cache -- see
-docs/local-news-cache-plan.md's "Classification mechanism" section.
+docs/plans/local-news-cache-plan.md's "Classification mechanism" section.
 
 One structured-output LLM call per ingestion cycle classifies every
 newly-fetched article in that cycle at once, rather than one call per
 article -- at the volumes this project's source registry produces, a
 per-article call would mean hundreds of LLM calls/day for a task a single
 batched call handles just as well. Same DeepSeek instance already used
-elsewhere (see docs/local-news-cache-plan.md's resolved "classification
-model" question) -- docs/model-portability-plan.md's cheaper per-stage
+elsewhere (see docs/plans/local-news-cache-plan.md's resolved "classification
+model" question) -- docs/plans/model-portability-plan.md's cheaper per-stage
 routing can swap this later without a redesign.
 
 The taxonomy below is an explicit v1, not a final answer -- see the plan

@@ -2,11 +2,11 @@
 Shared SQLite-backed subscriber store for bot.py (the public info bot) and
 admin_bot.py (the approval bot). Both processes need to see the same
 approval state, so this can't live in either bot's in-memory dict — see
-docs/bot-features-plan.md item 1.
+docs/plans/bot-features-plan.md item 1.
 
 DB_FILE is configurable via SUBSCRIBERS_DB_FILE so a containerized
 deployment can point both bots at the same file on a shared volume (see
-docs/deployment-plan.md) — same reasoning as agent.py's PHOENIX_ENDPOINT.
+docs/plans/deployment-plan.md) — same reasoning as agent.py's PHOENIX_ENDPOINT.
 """
 
 import json
@@ -152,7 +152,7 @@ def init_db() -> None:
 
 def try_consume_api_budget(source: str, daily_cap: int, today: str) -> bool:
     """Global (not per-user) daily call budget for a rate-limited news
-    source -- see docs/local-news-cache-plan.md's Perigon/NewsAPI worked
+    source -- see docs/plans/local-news-cache-plan.md's Perigon/NewsAPI worked
     examples. Returns True and records the call if `source` is still under
     `daily_cap` for `today`; returns False (without incrementing) if the
     cap is already reached. `today` is passed in rather than computed here so
@@ -176,7 +176,7 @@ def record_api_call(source: str, today: str) -> None:
     or enforcing any cap -- for callers that want usage visibility but
     aren't subject to news_ingest.py's own scheduled-pull budget (e.g.
     agent.py's search_news, an on-demand admin path that was previously
-    invisible to this table entirely -- see docs/ai-news-sources.md's
+    invisible to this table entirely -- see docs/current/ai-news-sources.md's
     "Restricted sources" section). Shares the same api_budget table/rows
     as try_consume_api_budget, so get_api_budget_history/
     get_total_api_calls reflect combined usage from both call sites."""
@@ -248,7 +248,7 @@ def set_interest_categories(interest: str, categories: list[str]) -> None:
 def get_source_last_pulled_at(source: str) -> datetime | None:
     """Drives news_ingest.py's per-source due-check, same shape as
     get_last_push_at/record_push for subscribers -- a source's own pull
-    frequency (docs/local-news-cache-plan.md) is independent of any one
+    frequency (docs/plans/local-news-cache-plan.md) is independent of any one
     subscriber's push schedule. Also reused (with the synthetic keys
     healthcheck.INGEST_TICK_KEY/PUSH_TICK_KEY, not a real source name) to
     track whether the ingest/push jobs are ticking AT ALL, independent of

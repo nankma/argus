@@ -1,6 +1,6 @@
 """
 Lightweight liveness alerting for the two periodic jobs (news_ingest.py,
-news_push.py). See docs/telemetry-and-testing-plan.md's "Currently NOT
+news_push.py). See docs/plans/telemetry-and-testing-plan.md's "Currently NOT
 connected on the live deployment" finding: Phoenix telemetry silently
 disconnected at some point and nothing noticed for an unknown period,
 because nothing in this project was ever built to notice a silent

@@ -1,17 +1,17 @@
 """
 Input/output guardrails keeping the agent scoped to technology industry
 news and preventing it from discussing its own configuration or
-role-playing as another assistant. See docs/guardrails-plan.md for the
+role-playing as another assistant. See docs/plans/guardrails-plan.md for the
 incident that prompted this and the four-layer design (this module
 implements layers 1, 2, and 4 -- layer 3 is agent.py's dynamic-prompt
 middleware). Scope was AI-industry-only originally; broadened to
 technology industry generally alongside per-user interests
-(docs/bot-features-plan.md) so different subscribers can care about
+(docs/plans/bot-features-plan.md) so different subscribers can care about
 different tech topics without the guardrails rejecting their own bot's
 answers.
 
 Layer 2 was originally a plain on-topic/off-topic boolean
-(`is_input_on_topic`). Per docs/context-management-plan.md's router
+(`is_input_on_topic`). Per docs/plans/context-management-plan.md's router
 design, it's now `classify_message()`, returning a structured
 `MessageClassification` -- the same classification call now also decides
 *what kind* of on-topic request this is (a news question vs. a natural-
@@ -22,7 +22,7 @@ separate intent-classification call on top of a separate on-topic check.
 
 Layers 2 and 4 reuse whatever chat model is passed in (the same
 ChatDeepSeek instance already used for the main agent, per
-docs/guardrails-plan.md's reasoning for not standing up a separate model)
+docs/plans/guardrails-plan.md's reasoning for not standing up a separate model)
 -- a short, tool-free classification call, not the full agent loop.
 """
 
@@ -129,7 +129,7 @@ _ROUTER_PROMPT = (
 def classify_message(model, user_message: str) -> MessageClassification:
     """Layer 2. A single structured-output call answering both "is this
     on-topic" and, if so, "what kind of request is this" -- see the router
-    design in docs/context-management-plan.md. Fails open (treats a
+    design in docs/plans/context-management-plan.md. Fails open (treats a
     classification error as an on-topic news_query) so a hiccup doesn't
     block a legitimate request."""
     try:
@@ -175,7 +175,7 @@ _OUTPUT_SCOPE_PROMPT = (
 # 3 (agent.py's per-category system prompt) already tightly constrains what
 # the agent can say -- for these, only self-disclosure is worth checking,
 # not the broader "is this appropriate content" judgment. See
-# docs/guardrails-plan.md's 2026-08-08 finding for why: news_query replies
+# docs/plans/guardrails-plan.md's 2026-08-08 finding for why: news_query replies
 # are free-form (the model decides what to write about), so both checks
 # matter there, but a set_interest/push confirmation's shape is already
 # pinned down by the prompt that generated it.
@@ -201,7 +201,7 @@ def is_output_on_topic(model, response_text: str, category: str | None = None) -
     output is generated key-by-key in schema order, so a trailing
     reasoning field can't causally inform the booleans above it. Added
     after diagnosing a 53%/87% (Chinese/English) pass rate specifically
-    on set_language confirmations (docs/guardrails-plan.md); forcing
+    on set_language confirmations (docs/plans/guardrails-plan.md); forcing
     reasoning-before-conclusion was measured via
     tools/measure_guardrails.py --layer 4 (20 trials/case) to raise that
     to 85%/100% (92% combined) with self_disclosure staying at 92% (down
@@ -209,7 +209,7 @@ def is_output_on_topic(model, response_text: str, category: str | None = None) -
     regression) -- a net improvement, verified rather than assumed from
     the diagnostic script's own small (10-trial) sample, same "measure
     before shipping" discipline as the two prior layer-4 prompt changes.
-    See docs/guardrails-plan.md for the full before/after table.
+    See docs/plans/guardrails-plan.md for the full before/after table.
 
     `category` (the router's classification when known) narrows the check
     per _NARROW_CHECK_CATEGORIES above; unspecified/None and news_query

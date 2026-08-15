@@ -24,8 +24,8 @@ def test_build_info_app_wires_bot_data(monkeypatch, isolated_subscribers_db):
     assert users_db.get_restricted_sources_enabled(999) is True
     handlers = [h for group in app.handlers.values() for h in group]
     assert any(isinstance(h, MessageHandler) for h in handlers)
-    # the periodic-push scheduler (docs/bot-features-plan.md item 5) and
-    # the news-cache ingestion job (docs/local-news-cache-plan.md) must
+    # the periodic-push scheduler (docs/plans/bot-features-plan.md item 5) and
+    # the news-cache ingestion job (docs/plans/local-news-cache-plan.md) must
     # both be wired up in the combined process too, not just standalone
     # bot.py -- asserting the callback names, not just a count, so a
     # future job silently failing to register (or one accidentally

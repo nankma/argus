@@ -29,7 +29,7 @@ mamba install -n base -c conda-forge pillow markdown-it-py
 
 ### `build_showcase.py`
 
-Regenerates the shareable HTML showcase from `docs/system-overview.md`.
+Regenerates the shareable HTML showcase from `docs/current/system-overview.md`.
 
 ```bash
 "/c/ProgramData/miniforge3/python.exe" tools/build_showcase.py [output.html]

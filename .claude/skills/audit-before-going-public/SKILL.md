@@ -78,7 +78,7 @@ will invite someone to put them back.
 
 ## Real-world impact
 
-This project's `docs/deployment-plan.md` carried both production VMs'
+This project's `docs/plans/deployment-plan.md` carried both production VMs'
 public IPs, an SSH key filename, and the local directory containing it —
 which also disclosed the operator's username. It was explicitly annotated
 *"safe to document — no secrets,"* which was true when written and false
@@ -86,7 +86,7 @@ after the repo went public.
 
 Caught in a pre-push scan with minutes to spare. Had it landed, removing it
 would have required rewriting published history. See
-`docs/security-plan.md` finding 18.
+`docs/plans/security-plan.md` finding 18.
 
 The near-miss is the argument for this skill: the scan happened because
 pushing to a newly-public repo *happened* to prompt a second look. That's

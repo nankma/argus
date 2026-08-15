@@ -1,7 +1,7 @@
 # Security Plan
 
 A security review of the codebase and Docker deployment, originally done
-before committing to a cloud provider (`docs/deployment-plan.md` item 3).
+before committing to a cloud provider (`docs/plans/deployment-plan.md` item 3).
 **Oracle Cloud is now chosen and the bot is live** on a
 `VM.Standard.E2.1.Micro` instance — findings below updated where the move
 from "local only" to "actually on the internet" changes anything.
@@ -25,7 +25,7 @@ limiting** (finding 3) — worth fixing, not an active exploit today.
 | 6 | `admin_bot.py` confirms its own existence to non-admins | Trivial | Not started — optional |
 | 7 | No dependency/image vulnerability scanning in CI | Medium | Not started |
 | 8 | No automated secrets-scanning in CI (currently manual, per-commit) | Medium | Not started |
-| 9 | GitHub branch protection enforcement — unconfirmed | Unknown | Carried over from `docs/telemetry-and-testing-plan.md`, still unresolved |
+| 9 | GitHub branch protection enforcement — unconfirmed | Unknown | Carried over from `docs/plans/telemetry-and-testing-plan.md`, still unresolved |
 | 10 | Non-root container user | Good — already correct | No action needed |
 | 11 | No inbound ports (polling-only architecture) | Good — already correct | No action needed |
 | 12 | Admin identity check relies on Telegram-verified `chat_id`/`from_user.id` | Good — already correct | No action needed |
@@ -85,7 +85,7 @@ more once this runs on a cloud host or in Kubernetes, where more
 principals might have some level of access to the node/cluster without
 needing full ownership.
 
-This is the same gap `docs/deployment-plan.md`'s "Secrets management" open
+This is the same gap `docs/plans/deployment-plan.md`'s "Secrets management" open
 question already flags — worth resolving as part of choosing a cloud
 provider, since Kubernetes `Secret` objects are **base64-encoded, not
 encrypted**, by default (equivalent exposure to what's already true
@@ -176,7 +176,7 @@ industry, relevant if this project ever needs them:
   vault, running multi-cloud, or wanting **dynamic secrets** (short-lived,
   auto-rotated credentials issued on demand instead of long-lived static
   ones). Overkill for this project's single-provider, single-VM scale.
-- **Kubernetes-native tools** (relevant once `docs/deployment-plan.md`
+- **Kubernetes-native tools** (relevant once `docs/plans/deployment-plan.md`
   item 2's manifests exist): **Sealed Secrets** (encrypts a secret so
   it's safe to commit to git — only the in-cluster controller can decrypt
   it) and **External Secrets Operator** (syncs secrets from a real vault —
@@ -237,7 +237,7 @@ docs):
     the gap; don't eliminate it, because Telegram doesn't allow that.
 
 **Automating the distribution half, even though generation stays manual.**
-Once `docs/deployment-plan.md` item 2's Kubernetes manifests exist, the
+Once `docs/plans/deployment-plan.md` item 2's Kubernetes manifests exist, the
 standard pattern is **External Secrets Operator** (syncs a vault's current
 value into a native Kubernetes `Secret`) paired with a tool like
 **Reloader** (watches for `Secret` changes and automatically triggers a
@@ -283,7 +283,7 @@ agent's only tools are `save_note` (writes to a local file) and
 `search_news` itself (read-only external fetch) — there's no tool that can
 exfiltrate data, hit arbitrary attacker-chosen URLs, or take a destructive
 action. Re-assess this finding whenever a new tool is added — the four
-other planned features in `docs/bot-features-plan.md` (translation,
+other planned features in `docs/plans/bot-features-plan.md` (translation,
 per-user source selection, proactive push) don't meaningfully raise this
 risk on their own, but keep it in mind for anything added later that
 expands what a tool call can actually do.
@@ -291,7 +291,7 @@ expands what a tool call can actually do.
 **Related but distinct, and now live**: a real *benign* scope-drift
 incident (not malicious external content — an ambiguous user question
 pulled the agent off its assigned role and into discussing its own
-implementation) — see `docs/guardrails-plan.md` for the incident and the
+implementation) — see `docs/plans/guardrails-plan.md` for the incident and the
 four-layer mitigation (pre-filter, secondary classifier gateway, hardened
 system prompt, output-side check). **Built and verified live**.
 
@@ -325,7 +325,7 @@ instead of relying on remembering to do it every time.
 
 ### 9. GitHub branch protection — still unconfirmed
 
-Carried over from `docs/telemetry-and-testing-plan.md` item 4: whether
+Carried over from `docs/plans/telemetry-and-testing-plan.md` item 4: whether
 branch protection on `main` is actually enforced (private repos need
 GitHub Team/Enterprise for this, per earlier research in this project) was
 never confirmed after being set up. Not re-checked this session — `gh` CLI
@@ -364,11 +364,11 @@ a couple of friends" scale.
 ### 14. Cloud VM OS-level hardening
 
 Now live and relevant: Oracle `VM.Standard.E2.1.Micro`, `us-sanjose-1`,
-Ubuntu 24.04 Minimal, see `docs/deployment-plan.md`. There are now **two**
+Ubuntu 24.04 Minimal, see `docs/plans/deployment-plan.md`. There are now **two**
 such VMs — the bot (`myfirstagent-bot` instance) and a second, isolated
 one running Phoenix (`myfirstagent-phoenix` — deliberately separate so a
 Phoenix memory spike can't take the bot down; see
-`docs/deployment-plan.md`'s "Live Phoenix deployment" section for that
+`docs/plans/deployment-plan.md`'s "Live Phoenix deployment" section for that
 VM's specific hardening: SSH-tunnel-only access, no public port 6006/4317,
 native auth with the default `admin`/`admin` password overridden).
 
@@ -446,7 +446,7 @@ Phoenix went from "not deployed" to "live and receiving real trace data
 raised its own access-control surface — worth a dedicated finding rather
 than folding into finding 14 (that one's about OS-level VM hardening;
 this is about Phoenix's own application-level access design). Full setup
-detail lives in `docs/deployment-plan.md`'s "Live Phoenix deployment"
+detail lives in `docs/plans/deployment-plan.md`'s "Live Phoenix deployment"
 section; this is the security-relevant summary.
 
 **Isolated on its own VM.** `myfirstagent-phoenix`, separate from the bot
@@ -505,7 +505,7 @@ loop, and one fewer thing that needs rotating/protecting outside Vault.
 
 **Caught 2026-08-09, immediately before the repository was made public.**
 
-`docs/deployment-plan.md` recorded both VMs' **public IP addresses**, the
+`docs/plans/deployment-plan.md` recorded both VMs' **public IP addresses**, the
 SSH private-key filename, and the local directory holding it — which also
 disclosed the operator's Windows username. It carried an explicit
 justification: *"safe to document — no secrets."*

@@ -1,5 +1,5 @@
 """
-Regenerate the shareable HTML showcase from docs/system-overview.md.
+Regenerate the shareable HTML showcase from docs/current/system-overview.md.
 
 The artifact is *derived* from the markdown and never hand-edited --
 otherwise the two drift apart, which happened once already. Run this after

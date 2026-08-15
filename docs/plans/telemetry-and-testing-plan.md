@@ -102,7 +102,7 @@ needed. That didn't survive contact with reality:
   the Windows-native block entirely since it's an isolated Linux
   environment. This split turns out to be the right shape for the future
   Kubernetes deployment too, not just a workaround — see
-  `docs/deployment-plan.md`.
+  `docs/plans/deployment-plan.md`.
 - Considered and set aside: **LangSmith** (cloud-only — no fully local mode,
   requires an external account even on the free tier); **Langfuse**
   self-hosted (more full-featured — evals, prompt management — but requires
@@ -182,7 +182,7 @@ and `PHOENIX_ENDPOINT` entirely.** `docker inspect`ing the running
 container's env shows only `PHOENIX_API_KEY_SECRET_OCID` — fetching the
 API key secret happens in `docker-entrypoint.sh` regardless, but that
 alone doesn't turn tracing on; `setup_telemetry()` checks `PHOENIX_ENABLED`
-specifically. This is a regression from the state `docs/deployment-plan.md`
+specifically. This is a regression from the state `docs/plans/deployment-plan.md`
 records as "verified end-to-end" (`PHOENIX_ENABLED=true`,
 `PHOENIX_ENDPOINT=http://10.0.0.234:4317`, a real trace confirmed in
 Phoenix's UI) — somewhere between that verification and the current
@@ -194,7 +194,7 @@ worth checking whether that VM is still running before just restoring the
 flags. **Not fixed as part of this session's work** — flagged here so it
 isn't lost; restoring it means (a) confirming/reviving the Phoenix VM, (b)
 re-adding both env vars to the bot's `docker run` command in
-`docs/deployment-plan.md` and using them on the next actual redeploy.
+`docs/plans/deployment-plan.md` and using them on the next actual redeploy.
 
 **Practical consequence while this stayed broken**: zero traces reached
 Phoenix — not just the source-fetch spans below, but every LLM call,
@@ -274,7 +274,7 @@ fully connected, these calls would never appear as spans.
 
 Prompted by a real gap: diagnosing how many calls had been made against
 NewsAPI/Perigon (the two budget-constrained restricted sources, see
-`docs/ai-news-sources.md`) turned up that `search_news`'s on-demand usage
+`docs/current/ai-news-sources.md`) turned up that `search_news`'s on-demand usage
 of them was invisible everywhere — not logged, not counted against any
 budget, and (per the section above) not even reaching Phoenix since it
 was disconnected.
@@ -329,7 +329,7 @@ No secrets needed — same zero-real-calls guarantee as running locally.
   applying it is a manual step on GitHub's side, not something committable
   to this repo. Not confirmed done.
 
-This is CI (test automation) only — not CD. See `docs/deployment-plan.md`
+This is CI (test automation) only — not CD. See `docs/plans/deployment-plan.md`
 for what actual deployment automation needs first (it needs the whole
 deployment chain resolved, not just this).
 

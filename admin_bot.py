@@ -1,13 +1,13 @@
 """
 Admin-only companion bot for approving/denying access requests to the
-public info bot (bot.py) — see docs/bot-features-plan.md item 1. Kept as a
+public info bot (bot.py) — see docs/plans/bot-features-plan.md item 1. Kept as a
 separate bot/token deliberately: approval controls never appear on the same
 surface a stranger could message, and every message/button tap here is
 still re-checked against ADMIN_CHAT_ID regardless.
 
 Shares subscribers.db with bot.py (see users_db.py) — both processes must
 run against the same file, so co-locate them (same container/host, or a
-shared volume once this is containerized — see docs/deployment-plan.md).
+shared volume once this is containerized — see docs/plans/deployment-plan.md).
 
 Run:
     conda activate myfirstagent

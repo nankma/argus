@@ -16,10 +16,13 @@ targets — that's you. Report back one of two things: **done** (all
 checks passed), or a **diagnosis** (what failed, what you found, likely
 cause) for the caller to act on. Never just "it failed."
 
-Read `local-infra/infrastructure.md` (gitignored) first, every time —
-it has the real VM IPs, SSH key, and current `docker run` command. The
-`build-locally-deploy-remotely` skill (preloaded) has placeholders on
-purpose; don't ask the caller to repeat what's already written down.
+Read `local-infra/infrastructure.yaml` (gitignored) first, every time —
+it has the real VM IPs, SSH key, and current `docker run` command as
+structured data. `docs/current/infrastructure.md` has the safe, narrative
+version (topology, security model) if you need the *why*, but the real
+values only ever live in the `.yaml`. The `build-locally-deploy-remotely`
+skill (preloaded) has placeholders on purpose; don't ask the caller to
+repeat what's already written down.
 
 # Workflow
 
@@ -29,8 +32,8 @@ purpose; don't ask the caller to repeat what's already written down.
    deploy, confirm it's in the `Dockerfile`'s `COPY` line first — this
    has broken a deploy before.
 2. **Transfer and restart.** `docker save | ssh ... docker load`, then
-   restart with the same flags as `local-infra/infrastructure.md`'s
-   current `docker run` block. Wait for `docker logs` to show "Both bots
+   restart with the same flags as `local-infra/infrastructure.yaml`'s
+   `vm_bot.docker_run.command`. Wait for `docker logs` to show "Both bots
    ready" before checking anything else.
 3. **Verify — all of these, every time:**
    - `docker logs` has real output (not empty — see the
@@ -50,9 +53,11 @@ whether to change application code — hand that back to the caller.
 
 Hit something not already documented? Fix it in the same place a future
 you would look: `build-locally-deploy-remotely` for process issues,
-`local-infra/infrastructure.md` for infrastructure facts. Don't leave a
-new lesson sitting only in your final report — the next deploy may be a
-fresh instance of you with no memory of this one.
+`local-infra/infrastructure.yaml` for real infrastructure facts (IPs,
+keys, current flags), `docs/current/infrastructure.md` if it's a structural fact
+safe to publish (a new firewall rule's *shape*, not its exact values).
+Don't leave a new lesson sitting only in your final report — the next
+deploy may be a fresh instance of you with no memory of this one.
 
 Same for tooling gaps: if verifying something means hand-parsing SSH
 output instead of running a script, say so and propose a

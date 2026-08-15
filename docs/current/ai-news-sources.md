@@ -30,7 +30,7 @@ filtering. The other 16+ are `rss`-class and always return their latest
 items whether or not any of them are actually relevant — this is why
 `search_news` returning a nonzero count is not proof the topic was
 matched; the model reading the titles is currently the only thing that
-catches this. See `docs/local-news-cache-plan.md` for where this is headed.
+catches this. See `docs/plans/local-news-cache-plan.md` for where this is headed.
 
 ## Content depth per source (investigated 2026-08-13)
 
@@ -86,7 +86,7 @@ For the three structurally content-less/near-content-less sources
 posts) — and for anything a lede genuinely doesn't mention, like a
 consequence reported deeper in an article body — closing that gap needs
 either full-page scraping or a paid API tier. See
-`docs/local-news-cache-plan.md`'s open question on this; it's a
+`docs/plans/local-news-cache-plan.md`'s open question on this; it's a
 materially bigger decision (scraping, paywalls, bot defenses, legal
 posture, recurring cost) than anything on this page.
 
@@ -183,7 +183,7 @@ fit, not features:
 
 1. Go to `https://gnews.io/register` and create a free account (email + password, no payment method required for the free tier).
 2. After registering, the API key is shown directly on the account dashboard (`https://gnews.io/dashboard`) — no separate approval step.
-3. Send the key value in this conversation (or set it directly as an env var if working locally) and it'll be wired in: locally via `$env:GNEWS_API_KEY = "..."` for testing, and into OCI Vault following the existing secrets pattern (`docs/security-plan.md` finding 2) for the deployed bot — same handling as `DEEPSEEK_API_KEY`/`TELEGRAM_BOT_TOKEN`, never as a plaintext env var in the running container.
+3. Send the key value in this conversation (or set it directly as an env var if working locally) and it'll be wired in: locally via `$env:GNEWS_API_KEY = "..."` for testing, and into OCI Vault following the existing secrets pattern (`docs/plans/security-plan.md` finding 2) for the deployed bot — same handling as `DEEPSEEK_API_KEY`/`TELEGRAM_BOT_TOKEN`, never as a plaintext env var in the running container.
 4. Once the key is set, `enabled_sources()` picks it up automatically — no code change needed, it's already implemented and registered.
 
 **After GNews is working and verified live** (confirm the response shape actually matches what `fetch_gnews` expects — per this doc's standing rule, verify before trusting), Perigon is the natural second pick if broader coverage is still wanted. NewsAPI stays parked unless a paid plan is actually being considered.
@@ -193,7 +193,7 @@ fit, not features:
 Added 2026-08-14, after realizing `search_news` (the on-demand chat tool)
 calls every enabled source directly and live, on every matching query,
 completely independent of `news_ingest.py`'s own budget-cap mechanism
-(see `docs/local-news-cache-plan.md`). That mechanism only protects the
+(see `docs/plans/local-news-cache-plan.md`). That mechanism only protects the
 periodic ingestion job's own calls — nothing previously stopped
 `search_news` from also calling NewsAPI/Perigon on every relevant chat
 message, which would exhaust both budgets almost immediately on real
@@ -241,7 +241,7 @@ flipped to `False` (unlike `enabled_sources` itself) so a future caller
 that forgets to pass it explicitly fails closed, not open. **Superseded
 the next day (2026-08-15)** when `news_push.py` stopped calling
 `news_sources` live at all and converged onto the local cache (see
-`docs/local-news-cache-plan.md`'s "Interaction with `news_push.py`") —
+`docs/plans/local-news-cache-plan.md`'s "Interaction with `news_push.py`") —
 the same gating now lives in `news_push.select_candidate_articles`,
 checking each cached article's `source_key` against `RESTRICTED_SOURCES`
 instead of gating a live source list, same effect.

@@ -2,7 +2,7 @@
 
 Nothing here is built — this doc records a decision that was made and
 deferred, so the reasoning isn't lost. Same pattern as
-`docs/multi-channel-plan.md`.
+`docs/plans/multi-channel-plan.md`.
 
 **The concern raised:** SQLite runs on a single machine. It can't be
 shared between hosts and it can't scale out. That means the service will
@@ -29,7 +29,7 @@ Three reasons, in order of weight:
 1. **Migrating now means paying twice.** The eventual target depends on
    requirements that don't exist yet — how many users, whether a second
    host is ever needed, whether there's a webhook-based channel forcing a
-   different topology (`docs/multi-channel-plan.md`). Choosing a database
+   different topology (`docs/plans/multi-channel-plan.md`). Choosing a database
    before those are known means likely choosing wrong and migrating again.
 
 2. **The data is currently reconstructible.** Subscriber records are
@@ -39,7 +39,7 @@ Three reasons, in order of weight:
    accepted trade at the time.
 
 3. **Nothing today needs sharing.** Both bots and the scheduler run in a
-   single process on a single host (`docs/system-overview.md` Appendix B.1), so
+   single process on a single host (`docs/current/system-overview.md` Appendix B.1), so
    there is no second consumer that SQLite is currently blocking. The
    limitation is real but not yet *binding*.
 
@@ -108,7 +108,7 @@ Any one of these turns the deferred decision into a live one:
 - **Real users with data worth keeping.** The "reconstructible" argument
   above expires the moment losing the data would actually cost someone
   something.
-- **A webhook-based channel** (`docs/multi-channel-plan.md`) that changes
+- **A webhook-based channel** (`docs/plans/multi-channel-plan.md`) that changes
   the deployment topology.
 - **Write concurrency becoming real** — multiple writers make
   single-file SQLite an active liability rather than a passive limit.

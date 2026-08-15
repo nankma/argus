@@ -57,7 +57,7 @@ re-run can't tell you what a *specific* historical call actually saw).
 
 ### Getting a bearer token
 
-Phoenix runs with `PHOENIX_ENABLE_AUTH=true` (see `docs/security-plan.md`
+Phoenix runs with `PHOENIX_ENABLE_AUTH=true` (see `docs/plans/security-plan.md`
 finding 17), so GraphQL queries need the System API Key. It's stored as a
 5th Vault secret (`PHOENIX_API_KEY_SECRET_OCID`), fetched the same way
 the bot container fetches its own secrets:
@@ -77,7 +77,7 @@ value out.
 
 Phoenix's GraphQL endpoint is `http://localhost:6006/graphql` — only
 reachable from the Phoenix VM itself (or same-VCN traffic), not exposed
-publicly (see `docs/security-plan.md` finding 17), so run the query via
+publicly (see `docs/plans/security-plan.md` finding 17), so run the query via
 SSH to the Phoenix VM (`<phoenix-vm-ip>`), not the bot VM.
 
 First, find the project's node ID (once per investigation, or just
@@ -169,9 +169,9 @@ data left in the container or a test `chat_id`'s DB rows.
 
 ## See also
 
-- `docs/security-plan.md` finding 17 — why Phoenix isn't publicly
+- `docs/plans/security-plan.md` finding 17 — why Phoenix isn't publicly
   exposed and needs the System API Key for any access, read or write.
-- `docs/guardrails-plan.md` — the guardrail reliability findings
+- `docs/plans/guardrails-plan.md` — the guardrail reliability findings
   (classifier flakiness, structured-output vs. staged-text-prompt
   reliability) that most of this session's Phoenix-trace debugging was
   in service of.

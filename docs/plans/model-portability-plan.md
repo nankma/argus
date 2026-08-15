@@ -2,10 +2,10 @@
 
 Nothing here is built yet — this doc captures the goal, what's already
 possible, and the decisions to make before implementing, same pattern as
-`docs/deployment-plan.md` and `docs/multi-channel-plan.md`.
+`docs/plans/deployment-plan.md` and `docs/plans/multi-channel-plan.md`.
 
 Cross-references to "Appendix B.1" below mean
-`docs/system-overview.md` Appendix B.1 (Problems hit in development and
+`docs/current/system-overview.md` Appendix B.1 (Problems hit in development and
 production).
 
 **The question that prompted it:** the architecture has no AI gateway.
@@ -49,7 +49,7 @@ model as a parameter rather than constructing one:
 
 That injection point exists because of testability (it's what lets the
 suite run against a scripted fake — see
-`docs/telemetry-and-testing-plan.md`), but it happens to give most of what
+`docs/plans/telemetry-and-testing-plan.md`), but it happens to give most of what
 a gateway would provide: **the ability to substitute the model without
 touching consumer code.** The gap is only that construction is pinned to
 one provider class.
@@ -82,7 +82,7 @@ change plus a restart — no code change, no rebuild.
 **Cost:** roughly ten lines across three files. The target provider's
 LangChain package must be installed (e.g. `langchain-openai`), and its API
 key must be added to OCI Vault following the existing secrets pattern
-(`docs/security-plan.md` finding 2) — no new secrets design needed.
+(`docs/plans/security-plan.md` finding 2) — no new secrets design needed.
 
 **Recommended.** Low cost, and it makes the "which model?" decision
 reversible instead of baked in.
@@ -92,7 +92,7 @@ reversible instead of baked in.
 The most valuable item, and nearly free, because **the architecture
 already separates the calls.**
 
-The three-stage pipeline (`docs/system-overview.md` §B2) makes three
+The three-stage pipeline (`docs/current/system-overview.md` §B2) makes three
 distinct kinds of LLM call, and each already receives its model as a
 separate argument:
 
@@ -156,7 +156,7 @@ than two providers are in play simultaneously.
 
 Switching models is mechanically easy. It is **not behaviorally free.**
 
-The guardrail reliability figures recorded in `docs/system-overview.md`
+The guardrail reliability figures recorded in `docs/current/system-overview.md`
 Appendix B.1 of the overview — the structured-output check scoring 15/15, and the narrow-prompt
 variant scoring 1/15 — were measured **against DeepSeek specifically**.
 They are properties of a prompt/model pair, not of the prompt alone.
@@ -208,7 +208,7 @@ them until re-measured. Without a harness, that re-measurement is
 expensive enough that it will get skipped — which converts Level 1's
 "switching is easy" into a way to silently break a safety control.
 
-**Second use.** `docs/guardrails-plan.md` records an unrun experiment to
+**Second use.** `docs/plans/guardrails-plan.md` records an unrun experiment to
 determine *why* structured output outperformed the text prompts — the
 current result is confounded across three simultaneous changes. That
 experiment is four prompt variants scored the same way, so it needs
@@ -217,14 +217,14 @@ harness pay for itself twice.
 
 **Third use — built, 2026-08-14, `tools/measure_guardrails.py`.** An
 ad-hoc 6-trial manual test (via the new local curl API,
-`docs/local-testing-api-plan.md`) seemed to show the router rejecting
+`docs/reference/local-testing-api-plan.md`) seemed to show the router rejecting
 Chinese-language requests as off-topic in 5 of 6 trials against a
 100%-passing English control. Building the harness to properly measure
 it found the opposite: `classify_message` scored **140/140 (100%)**
 across 14 cases run directly, no HTTP, no tunnel. The original 6-trial
 result turned out to be an SSH tunnel corrupting requests in transit,
 not a router problem at all — see
-`docs/guardrails-plan.md`'s incident write-up for the full comparison
+`docs/plans/guardrails-plan.md`'s incident write-up for the full comparison
 across four different call paths that isolated this. **The harness is
 what caught its own trigger case as a false positive** — the concrete
 proof that ad-hoc manual trials (what every guardrail measurement in
@@ -236,13 +236,13 @@ from this incident that *did* survive re-verification — see below) are
 all scoreable standalone — hundreds of prompts fed directly at just that
 function, no agent run, no Telegram round-trip anywhere in the loop. The
 harness has since caught and fixed a real layer-4 issue this way (the
-`set_language` reasoning-before-conclusion fix, `docs/guardrails-plan.md`)
+`set_language` reasoning-before-conclusion fix, `docs/plans/guardrails-plan.md`)
 and also caught its own false positive a second time (the retracted
 "Chinese-language crypto" incident, same doc) — proof this extension
 pulled its weight, not just a planned-but-unused capability.
 
 **Fourth implication.** Discussing this incident surfaced a related
-design point, recorded in `docs/context-management-plan.md`'s "Planned
+design point, recorded in `docs/plans/context-management-plan.md`'s "Planned
 refactor: dispatch settings routes out of the agent" section: settings
 actions (interests/language/push) dispatched by a separate agent from
 news research would make it possible to test and fix one without risking

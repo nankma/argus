@@ -5,10 +5,10 @@ Agent construction (build_agent) takes the model as a parameter, and
 invocation (run_agent) takes optional callbacks/context — none of it is
 hardcoded at import time. This is what makes the agent testable: swap in a
 fake chat model and an in-memory/local callback handler for CI, without
-touching this file. See docs/telemetry-and-testing-plan.md for what's built
+touching this file. See docs/plans/telemetry-and-testing-plan.md for what's built
 vs. still planned (test suite, CI, real telemetry backend).
 
-The system prompt is layered per docs/context-management-plan.md, not one
+The system prompt is layered per docs/plans/context-management-plan.md, not one
 static string: LAYER1_IDENTITY (tight, always-present) + a per-category
 LAYER2 fragment (chosen by guardrails.classify_message's routing decision,
 threaded in via run_agent's `context` param) + layer 3 (the calling user's
@@ -194,7 +194,7 @@ def _compose_prompt(request) -> str:
     """Builds the full system prompt for one model call: layer 1 (always)
     + layer 2 (this turn's category, defaulting to news_query if the
     caller didn't classify one) + layer 3 (this user's stored interests
-    and language preference, if any). See docs/context-management-plan.md.
+    and language preference, if any). See docs/plans/context-management-plan.md.
 
     The language directive is appended last (after layer 2's category
     instructions) and applies regardless of category -- unlike interests,
@@ -255,7 +255,7 @@ def search_news(query: str, runtime: ToolRuntime, max_results_per_source: int = 
     chat_id = runtime.context["chat_id"]
     # RESTRICTED_SOURCES (NewsAPI, Perigon) are excluded by default -- their
     # budgets are already spoken for by news_ingest.py's own scheduled
-    # pulls (docs/local-news-cache-plan.md); calling them again here, live,
+    # pulls (docs/plans/local-news-cache-plan.md); calling them again here, live,
     # on every matching query from every user would exhaust both almost
     # immediately. Gate is per-user, not admin-only in code -- see
     # users_db.get_restricted_sources_enabled.

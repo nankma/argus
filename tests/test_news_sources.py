@@ -110,7 +110,7 @@ def test_fetch_gnews(requests_mock, monkeypatch):
 
 def test_fetch_perigon(requests_mock, monkeypatch):
     # NOTE: Perigon's real response shape is unverified (no API key available
-    # to test against the live service — see docs/ai-news-sources.md). This
+    # to test against the live service — see docs/current/ai-news-sources.md). This
     # test only locks in that fetch_perigon parses the shape it's coded to
     # expect; it is not a guarantee that shape matches Perigon's actual API.
     monkeypatch.setenv("PERIGON_API_KEY", "fake-key")

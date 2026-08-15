@@ -136,7 +136,7 @@ curled it directly:
 ## Resolved issue: the SSH tunnel was unreliable for repeated calls, now fixed and re-verified
 
 **Found 2026-08-14, fixed the same day**, during the guardrail-harness
-incident (`docs/guardrails-plan.md`). Running the same Chinese-language
+incident (`docs/plans/guardrails-plan.md`). Running the same Chinese-language
 request repeatedly through `ssh -L 8765:127.0.0.1:8765 ...` produced
 wrong results roughly 25% of the time; the identical request against the
 same running server, hit via the container's Docker bridge IP instead of

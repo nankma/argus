@@ -1,6 +1,6 @@
 """
 Mock response data for news_sources.py fetchers, shaped to match real
-responses captured during live verification (see docs/ai-news-sources.md
+responses captured during live verification (see docs/current/ai-news-sources.md
 for when/how each source was checked). Perigon's shape is NOT independently
 verified — no API key was available to test against the real service, so
 its fixture only matches what news_sources.fetch_perigon expects, not a

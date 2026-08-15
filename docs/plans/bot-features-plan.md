@@ -3,7 +3,7 @@
 Five product features requested for the Telegram bot. Nothing here is built
 yet — this doc exists to capture the goal, technical approach, and open
 questions before implementation starts, same pattern as
-`docs/deployment-plan.md` and `docs/telemetry-and-testing-plan.md`.
+`docs/plans/deployment-plan.md` and `docs/plans/telemetry-and-testing-plan.md`.
 
 ## Status
 
@@ -166,10 +166,10 @@ the only two real gaps left in this item.
   `bot.py`'s `/interests` command lets a user show/set/clear their own
   (comma-separated topics). `handle_message()` prepends a bracketed note
   with the user's interests to the *agent-facing* copy of their message
-  only — the guardrail classifiers (`docs/guardrails-plan.md`) still judge
+  only — the guardrail classifiers (`docs/plans/guardrails-plan.md`) still judge
   the user's actual raw text, not a synthetic wrapper.
 - **This drove a scope change beyond just storage**: the original
-  `SYSTEM_PROMPT` and `docs/guardrails-plan.md`'s classifiers were
+  `SYSTEM_PROMPT` and `docs/plans/guardrails-plan.md`'s classifiers were
   hardcoded to "AI industry" specifically, because that's the owner's own
   interest — but subscribers can care about different tech topics. Both
   were broadened to "technology industry" generally (AI included, not
@@ -182,7 +182,7 @@ the only two real gaps left in this item.
   choice, not an accident.
 - **Deployment implication:** a SQLite file needs a persistent volume — a
   bind mount for local Docker, and a Kubernetes `PersistentVolumeClaim`
-  once `docs/deployment-plan.md` item 2 (K8s manifests) is written. Add
+  once `docs/plans/deployment-plan.md` item 2 (K8s manifests) is written. Add
   this to that doc's checklist when the DB actually gets built, since it
   wasn't accounted for when the Dockerfile/deployment plan were written.
 
@@ -262,7 +262,7 @@ schedule sub-hourly pushes), `get_pushed_links`, `get_last_push_at`,
 `record_push`, `list_push_enabled_subscribers`.
 
 **Interval control is natural language**, per the router design
-(`docs/context-management-plan.md`), not a `/command` — same reasoning as
+(`docs/plans/context-management-plan.md`), not a `/command` — same reasoning as
 `push_enabled`: voice input is an eventual goal and voice has no slash
 commands. A new `set_push_interval` tool joins `set_push_enabled`; the
 router's `start_push` category (`guardrails.py`) now also covers "change
@@ -312,7 +312,7 @@ not needed at current scale (owner + a friend or two).
 Asked in passing whether WeChat, WhatsApp, or LINE could be additional
 front-ends alongside Telegram. Evaluated, not pursued for now — recorded
 here so this doesn't get re-litigated from scratch later, same pattern as
-`docs/ai-news-sources.md` documenting Reddit as considered-and-rejected.
+`docs/current/ai-news-sources.md` documenting Reddit as considered-and-rejected.
 
 - **WeChat** — no self-serve equivalent to Telegram's BotFather. Real-time
   auto-reply to arbitrary incoming messages needs a WeChat **Official
@@ -340,9 +340,9 @@ here so this doesn't get re-litigated from scratch later, same pattern as
   endpoint with a valid TLS certificate. `bot.py` deliberately uses
   Telegram's polling mode specifically to avoid needing that
   infrastructure before a cloud deployment target and domain exist (see
-  `docs/deployment-plan.md`). Adding WhatsApp or LINE support would force
+  `docs/plans/deployment-plan.md`). Adding WhatsApp or LINE support would force
   that decision now, ahead of schedule, rather than after the cloud
-  provider (`docs/deployment-plan.md` item 3) is chosen.
+  provider (`docs/plans/deployment-plan.md` item 3) is chosen.
 - **Conclusion**: not worth pursuing while the user base is "owner plus a
   few friends." Telegram already covers that need with the lowest setup
   friction. If multi-platform support becomes worth it later, the natural
@@ -355,7 +355,7 @@ here so this doesn't get re-litigated from scratch later, same pattern as
 - How `admin_bot.py` and `bot.py` share `subscribers.db` once containerized
   — a mounted volume both point at via `SUBSCRIBERS_DB_FILE`, or one
   container running both processes. Not decided; needs to land in
-  `docs/deployment-plan.md` once the cloud provider is chosen.
+  `docs/plans/deployment-plan.md` once the cloud provider is chosen.
 - Whether `admin_bot.py` should grow a `/pending` command to list
   outstanding requests (in case a notification message is missed/deleted)
   — not built, `list_pending()` already exists in `users_db.py` to support

@@ -1,7 +1,7 @@
 """
 Local-only HTTP test API -- lets the smoke-test checklist
 (build-locally-deploy-remotely skill) run via curl instead of a real
-Telegram client. See docs/local-testing-api-plan.md.
+Telegram client. See docs/reference/local-testing-api-plan.md.
 
 Calls bot.process_message directly -- the exact same guardrail/agent/
 formatting pipeline real Telegram traffic runs, not a separate
@@ -21,7 +21,7 @@ to `docker run -p`, full stop. The actual security control lives
 entirely in the host-side half of that flag (127.0.0.1, restricting
 which host interface Docker publishes to) -- get that half right and the
 in-process bind address genuinely doesn't matter for reachability from
-outside the VM. See docs/local-testing-api-plan.md for the corrected
+outside the VM. See docs/reference/local-testing-api-plan.md for the corrected
 docker run flag and why. Reachable only via SSH port-forward from a
 machine already holding the VM's SSH key (`ssh -L 8765:127.0.0.1:8765
 ubuntu@<vm-ip>`), the same trust boundary as SSH access to the VM itself

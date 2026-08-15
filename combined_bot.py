@@ -7,7 +7,7 @@ etc. into memory -- running two OS processes duplicates that. This matters
 on a small VM (e.g. Oracle's Always Free VM.Standard.E2.1.Micro, 1GB RAM)
 where that duplication is a real constraint. Merging into one process
 halves it, without changing the two-bot-token security design (see
-docs/bot-features-plan.md item 1) -- @mnkInfo_bot and @mnkInfoAdmin_bot
+docs/plans/bot-features-plan.md item 1) -- @mnkInfo_bot and @mnkInfoAdmin_bot
 stay two separate Telegram identities, just served by one Python process.
 
 bot.py and admin_bot.py keep their own standalone main()s too -- this file
@@ -59,14 +59,14 @@ import users_db
 # telemetry_monitor's own alert loop from ever starting in the same
 # stroke -- the exact misconfiguration that should have triggered an
 # alert also disabled the thing that would have sent it. See
-# docs/telemetry-and-testing-plan.md.
+# docs/plans/telemetry-and-testing-plan.md.
 
 
 def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None) -> Application:
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.bot_data["agent"] = agent
     # Reuses the same model instance for guardrail classification calls
-    # (guardrails.py) -- no separate model/infra, see docs/guardrails-plan.md.
+    # (guardrails.py) -- no separate model/infra, see docs/plans/guardrails-plan.md.
     app.bot_data["guard_model"] = guard_model
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["admin_bot_token"] = admin_bot_token
