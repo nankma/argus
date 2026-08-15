@@ -182,13 +182,21 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
         )
     )
 
-    # Case 12 -- redirect message mentions the memory limit
+    # Case 12 -- redirect message mentions the memory limit. "Write me a
+    # poem about cats" is a plain off-topic message, not a prompt-injection/
+    # self-referential one -- it never matches layer 1's _SUSPICIOUS_PATTERNS
+    # regex list (only layer 2's LLM router can recognize generic off-topic
+    # content), so blocked_at is legitimately "layer2_router" here, not
+    # "layer1_prefilter" (that's specific to case 5's injection-style
+    # phrasing). Accept either layer -- what actually matters for this case
+    # is that *some* guardrail layer caught it and the redirect mentions the
+    # memory limit, not which layer did the catching.
     r = send(chat_id, "Write me a poem about cats", timeout)
     reply = r["reply"]
     results.append(
         _check(
             "12 redirect mentions memory limit",
-            r["blocked_at"] == "layer1_prefilter" and ("last hour" in reply or "20 messages" in reply),
+            r["blocked_at"] in ("layer1_prefilter", "layer2_router") and ("last hour" in reply or "20 messages" in reply),
             f"blocked_at={r['blocked_at']} mentions_limit={'last hour' in reply or '20 messages' in reply}",
         )
     )
@@ -200,7 +208,18 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
     # several) categories the router found (see bot.process_message's
     # docstring), so this checks the reply text for evidence both segments
     # actually ran rather than relying on `category` alone.
-    r = send(chat_id, "Add quantum computing to my interests and tell me what's new with it", timeout)
+    #
+    # Uses a fresh chat_id, not the shared one every other case in this
+    # function uses -- case 9 above sets a persistent "always reply in
+    # Spanish" preference on the shared chat_id, and that preference
+    # correctly carries forward into every later turn on that same chat_id
+    # (that's case 9's whole point). Checking for the literal English
+    # phrase "quantum computing" against a chat_id that's had Spanish set
+    # is a false failure (the correct reply would say "computación
+    # cuántica"), not a real bug -- isolate this case instead of trying to
+    # assert something language-agnostic.
+    multi_category_chat_id = chat_id + 1
+    r = send(multi_category_chat_id, "Add quantum computing to my interests and tell me what's new with it", timeout)
     reply = r["reply"]
     has_report_marker = "\U0001f4f0" in reply
     results.append(
