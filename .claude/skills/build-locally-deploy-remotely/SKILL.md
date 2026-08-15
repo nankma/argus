@@ -61,6 +61,36 @@ reaching the log stream. Fixed with `PYTHONUNBUFFERED=1` in the
 Dockerfile — if this check ever comes up empty again, that env var is
 the first thing to verify is still set.
 
+## After every deploy: confirm telemetry is actually connected
+
+**Step 3.6, right after the `docker logs` check above:** run
+`python tools/check_telemetry.py --bot-vm ubuntu@<bot-vm-ip> --bot-key
+<key> --phoenix-vm ubuntu@<phoenix-vm-ip> --phoenix-key <key>` and
+confirm it prints `OK`. Real incident, found 2026-08-16: `PHOENIX_ENABLED`
+and `PHOENIX_ENDPOINT` were missing from the bot's `docker run` command —
+a regression from a previously-verified-working state
+(`docs/deployment-plan.md`) that nobody noticed because nothing checked
+for it; it was only found weeks later while investigating something
+unrelated (API call counts). A container that starts cleanly and answers
+messages normally gives zero signal that its traces are actually
+reaching Phoenix — `docker logs` showing the OTel registration banner
+only proves `register()` was *called*, not that the collector received
+anything. This step exists specifically to catch that class of silent
+regression on the very next deploy instead of an indeterminate time
+later. See `docs/telemetry-and-testing-plan.md`'s "Currently NOT
+connected on the live deployment" section for the full incident and
+`tools/check_telemetry.py`'s own docstring for how the check works (it
+sends one message through `test_api.py`, then queries Phoenix's GraphQL
+API from the Phoenix VM for a matching span — two SSH round trips, no
+local tunnel).
+
+If it fails, do not consider the deploy done — same rule as a failed
+smoke-test case below, treat this as a blocking check, not an optional
+nice-to-have. A `FAIL` at the "sending a test message" step means the
+bot itself is unreachable (a different, more urgent problem); a `FAIL`
+at the "polling Phoenix" step with the bot reachable is the specific
+missing-env-var regression this check was built for.
+
 ## After every deploy: run the smoke test
 
 **Step 4, always, no exceptions:** after the container is restarted on the

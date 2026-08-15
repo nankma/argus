@@ -241,7 +241,7 @@ def _stub_cache_and_categories(monkeypatch, cached_articles=(), topic_categories
     )
 
 
-def test_run_push_cycle_skips_subscriber_with_no_interests(monkeypatch):
+def test_run_push_cycle_skips_subscriber_with_no_interests(monkeypatch, isolated_subscribers_db):
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(1, interests=[])])
     record_push = MagicMock()
     monkeypatch.setattr(users_db, "record_push", record_push)
@@ -253,7 +253,7 @@ def test_run_push_cycle_skips_subscriber_with_no_interests(monkeypatch):
     record_push.assert_not_called()
 
 
-def test_run_push_cycle_skips_subscriber_not_due(monkeypatch):
+def test_run_push_cycle_skips_subscriber_not_due(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     recently_pushed = _subscriber(2, last_push_at=now - timedelta(hours=1), interval=24)
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [recently_pushed])
@@ -270,7 +270,7 @@ def test_run_push_cycle_skips_subscriber_not_due(monkeypatch):
     record_push.assert_not_called()
 
 
-def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch):
+def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(3)])
     record_push = MagicMock()
@@ -288,7 +288,7 @@ def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch):
     record_push.assert_called_once_with(3, ["https://example.com/new"], now)
 
 
-def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch):
+def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
         users_db, "list_push_enabled_subscribers", lambda: [_subscriber(8, language="French")]
@@ -306,7 +306,7 @@ def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch):
     write_digest.assert_called_once_with("fake-model", new_articles, "French")
 
 
-def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypatch):
+def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
         users_db,
@@ -324,7 +324,7 @@ def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypat
     assert select.call_args_list[1].kwargs["include_restricted"] is False
 
 
-def test_run_push_cycle_reads_cache_once_and_reuses_across_subscribers(monkeypatch):
+def test_run_push_cycle_reads_cache_once_and_reuses_across_subscribers(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
         users_db, "list_push_enabled_subscribers", lambda: [_subscriber(11), _subscriber(12)]
@@ -340,7 +340,7 @@ def test_run_push_cycle_reads_cache_once_and_reuses_across_subscribers(monkeypat
     read_all.assert_called_once()
 
 
-def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch):
+def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(4)])
     record_push = MagicMock()
@@ -355,7 +355,7 @@ def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch):
     record_push.assert_called_once_with(4, [], now)
 
 
-def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch):
+def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch, isolated_subscribers_db):
     # Stage 2 (the model's own judgment inside write_push_digest) decided
     # none of the stage-1 candidates were genuinely relevant.
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
@@ -374,7 +374,7 @@ def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch):
     record_push.assert_called_once_with(13, ["https://example.com/new"], now)
 
 
-def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch):
+def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(5)])
     record_push = MagicMock()
@@ -392,7 +392,7 @@ def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch):
     record_push.assert_called_once_with(5, ["https://example.com/new"], now)
 
 
-def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch):
+def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
         users_db, "list_push_enabled_subscribers", lambda: [_subscriber(6), _subscriber(7)]

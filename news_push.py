@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 
 import agent
 import guardrails
+import healthcheck
 import news_cache
 import news_classify
 import news_sources
@@ -238,6 +239,11 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     skipped. This function now logs every tick's summary and every
     subscriber's due-check outcome, not just successful sends."""
     now = now or datetime.now(timezone.utc)
+    # Recorded unconditionally, before any per-subscriber due-check -- see
+    # healthcheck.py's docstring for why: every subscriber can legitimately
+    # be "not due yet" for hours (push_interval_hours), which isn't the
+    # same as this job having stopped running entirely.
+    users_db.set_source_last_pulled_at(healthcheck.PUSH_TICK_KEY, now)
     subscribers = users_db.list_push_enabled_subscribers()
     print(f"[news_push] tick at {now.isoformat()}: {len(subscribers)} push-enabled subscriber(s)")
     cached_articles = news_cache.read_all()

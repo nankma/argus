@@ -47,6 +47,20 @@ import telemetry_monitor
 import test_api
 import users_db
 
+# Two independent, complementary liveness checks -- not the same thing:
+# telemetry_monitor.py answers "is Phoenix's OTLP port reachable" (only
+# meaningful, and only started, when PHOENIX_ENABLED is set -- see
+# _start_telemetry_monitor below); info_bot.register_health_check_job
+# (healthcheck.py) answers "are the ingest/push jobs still ticking at
+# all", which is meaningful regardless of whether Phoenix is configured
+# and doesn't depend on any external service being reachable. Real
+# incident, 2026-08-16: PHOENIX_ENABLED went missing from the deployed
+# container at some point, which broke telemetry AND silently prevented
+# telemetry_monitor's own alert loop from ever starting in the same
+# stroke -- the exact misconfiguration that should have triggered an
+# alert also disabled the thing that would have sent it. See
+# docs/telemetry-and-testing-plan.md.
+
 
 def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None) -> Application:
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
@@ -64,6 +78,7 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, info_bot.handle_message))
     info_bot.register_push_job(app)
     info_bot.register_ingest_job(app)
+    info_bot.register_health_check_job(app)
     return app
 
 

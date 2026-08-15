@@ -17,6 +17,7 @@ are worth sharing, not spending per-query).
 import time
 from datetime import datetime, timezone
 
+import healthcheck
 import news_cache
 import news_classify
 import news_sources
@@ -92,6 +93,13 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
     was a real incident there (docs/observability-and-debugging.md),
     worth not repeating here."""
     now = now or datetime.now(timezone.utc)
+    # Recorded unconditionally, before any per-source due-check -- this is
+    # what healthcheck.py's liveness check reads to answer "is this job
+    # still ticking at all", decoupled from whether any individual source
+    # happened to be due this tick (every source can legitimately be
+    # "not due yet" for hours at a time; that's not the same as the job
+    # itself having stopped running).
+    users_db.set_source_last_pulled_at(healthcheck.INGEST_TICK_KEY, now)
 
     deleted = news_cache.cleanup_expired(now)
     print(f"[news_ingest] tick at {now.isoformat()}: cleaned up {deleted} expired cache entr{'y' if deleted == 1 else 'ies'}")

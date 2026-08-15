@@ -695,3 +695,15 @@ def test_register_ingest_job_schedules_one_repeating_job():
     jobs = app.job_queue.jobs()
     assert len(jobs) == 1
     assert jobs[0].trigger.interval.total_seconds() == bot.INGEST_TICK_SECONDS
+
+
+def test_register_health_check_job_schedules_one_repeating_job():
+    from telegram.ext import Application
+
+    app = Application.builder().token("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11").build()
+
+    bot.register_health_check_job(app)
+
+    jobs = app.job_queue.jobs()
+    assert len(jobs) == 1
+    assert jobs[0].trigger.interval.total_seconds() == bot.HEALTH_CHECK_TICK_SECONDS

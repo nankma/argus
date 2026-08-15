@@ -31,7 +31,7 @@ def test_build_info_app_wires_bot_data(monkeypatch, isolated_subscribers_db):
     # future job silently failing to register (or one accidentally
     # registered twice) fails loudly here.
     job_callback_names = {job.callback.__name__ for job in app.job_queue.jobs()}
-    assert job_callback_names == {"_push_job", "_ingest_job"}
+    assert job_callback_names == {"_push_job", "_ingest_job", "_health_check_job"}
     # Real incident, 2026-08-09: /start went unhandled (only checking "any
     # MessageHandler" wouldn't have caught this -- it needs its own
     # CommandHandler, since the plain-text MessageHandler excludes all

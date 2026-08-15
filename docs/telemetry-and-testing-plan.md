@@ -170,6 +170,65 @@ in this doc or `docs/observability-and-debugging.md` that assumes a live
 Phoenix trace exists to query doesn't currently apply to the deployed bot
 until this is restored.
 
+### Why didn't anything alert on this? — the precise answer, found 2026-08-16
+
+There already **is** an alerting mechanism for exactly this —
+`telemetry_monitor.py`, wired into `combined_bot.py` — and it's not
+broken. It never started. `combined_bot.py`'s `_start_telemetry_monitor`:
+
+```python
+if not os.environ.get("PHOENIX_ENABLED"):
+    return None
+```
+
+The monitor that checks "is Phoenix's OTLP port reachable" and pages the
+admin (via `admin_bot.py`'s token) on a state change is itself gated
+behind the exact same env var that went missing. So the one
+misconfiguration — `PHOENIX_ENABLED` absent from the deployed
+container — simultaneously (a) disabled tracing and (b) prevented the
+monitor built to detect (a) from ever spinning up. Not a bug in
+`telemetry_monitor.py`'s logic (edge-triggered TCP reachability checks,
+alert on up→down and down→up, correctly designed) — the monitor was
+never given the chance to run at all. This is the single-point-of-failure
+shape worth naming for next time: a self-monitoring mechanism that's
+gated behind the same flag as the thing it monitors can't be relied on to
+catch that flag going missing.
+
+**Why the gating exists at all, and why it's not simply wrong**: running
+a Phoenix-reachability monitor when telemetry is deliberately off (local
+dev, `PHOENIX_ENABLED` intentionally unset) would be pointless noise
+against `PHOENIX_ENDPOINT`'s `localhost` default. The gate is a
+reasonable design choice for "don't monitor a thing that's supposed to be
+off" — the actual defect is purely operational (a `docker run` silently
+dropped two flags at some point), not a code bug to fix in
+`telemetry_monitor.py` itself.
+
+**What actually closes this gap, added the same day, two complementary
+pieces — deliberately not one**, since each catches a different half of
+"how would we have known":
+
+1. **`tools/check_telemetry.py`** (see below the smoke-test checklist
+   entry it's tied to) — an EXTERNAL, post-deploy check that doesn't run
+   inside the bot process at all, so it can't be silently disabled by the
+   bot's own missing env var the way `telemetry_monitor.py` was. This is
+   the layer that would have caught the exact regression described
+   above, on the very next deploy, regardless of what `docker run` did
+   or didn't include.
+2. **`healthcheck.py`** — a NEW, separate liveness check for whether
+   `news_ingest.py`/`news_push.py`'s periodic jobs are still ticking at
+   all, alerting the admin (reusing the same `admin_bot.py` channel
+   `telemetry_monitor.py` already uses) on a change in problem state.
+   Deliberately not gated behind `PHOENIX_ENABLED` or anything else
+   optional — it always runs once the bot starts, so it can't fail the
+   same way. Answers a different question than either `telemetry_monitor.py`
+   (is Phoenix reachable) or `check_telemetry.py` (are traces actually
+   landing): are the periodic jobs themselves still alive, independent of
+   whether Phoenix is even in the picture. See its own module docstring
+   for the full design (why it's deliberately not a full incident-
+   management system — no severity levels, no escalation, just reusing
+   the one paging channel this project already has for a one-admin
+   deployment).
+
 ### Raw source fetches — a gap auto-instrumentation can't close, added 2026-08-16
 
 `auto_instrument=True` only wires up `openinference-instrumentation-
