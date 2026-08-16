@@ -87,7 +87,7 @@ to fetch. Selection and deduplication are ordinary deterministic code; the
 LLM is used only to write prose from a fixed article list. That makes
 repeats impossible by construction rather than unlikely by persuasion.
 
-📖 **[Full technical write-up →](docs/current/system-overview.md)** — architecture,
+📖 **[Full technical write-up →](docs/system-overview.md)** — architecture,
 design decisions, measurements, and the problems hit along the way.
 
 ## Quick start
@@ -120,7 +120,7 @@ python combined_bot.py
 ```
 
 `combined_bot.py` runs both bots and the push scheduler in one process —
-see [why](docs/current/system-overview.md#appendix-b--difficulties-and-how-they-were-solved).
+see [why](docs/system-overview.md#appendix-b--difficulties-and-how-they-were-solved).
 `bot.py` and `admin_bot.py` still run standalone for local development.
 
 > **Adding a dependency?** Use `mamba`, not `conda` — conda's classic
@@ -177,12 +177,12 @@ Full setup, networking, and secrets configuration: **[deployment-plan.md](docs/p
 
 ## Documentation
 
-**Start here:** [System overview](docs/current/system-overview.md) — the full
+**Start here:** [System overview](docs/system-overview.md) — the full
 technical write-up.
 
 | Doc | Covers |
 |---|---|
-| [system-overview](docs/current/system-overview.md) | Architecture, system design, quality assurance, difficulties solved |
+| [system-overview](docs/system-overview.md) | Architecture, system design, quality assurance, difficulties solved |
 | [observability-and-debugging](docs/reference/observability-and-debugging.md) | Diagnosing the live service; querying traces |
 | [security-plan](docs/plans/security-plan.md) | Security review — findings, what's fixed, what's outstanding |
 | [deployment-plan](docs/plans/deployment-plan.md) | Cloud setup, CD design, deployment workflow |
@@ -204,7 +204,7 @@ technical write-up.
 
 A working pilot, live and serving real users — not a production service at
 scale. Known limitations are documented honestly rather than omitted: see
-[Appendix B.2](docs/current/system-overview.md#b2-known-limitations) for what it
+[Appendix B.2](docs/system-overview.md#b2-known-limitations) for what it
 can't currently do, each with an explicit trigger for when it must be
 fixed.
 

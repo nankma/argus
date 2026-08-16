@@ -587,7 +587,7 @@ confirming a pair that's fully inside the window is left untouched.
 ## Unrun experiment: what actually made the output check reliable
 
 **Status: not run.** Identified 2026-08-09 while writing up the layer-4
-measurements for `docs/current/system-overview.md` Appendix B.1.
+measurements for `docs/system-overview.md` Appendix B.1.
 
 **Background.** Four versions of the layer-4 output check were measured
 against the real model. Scores on "does it catch a self-disclosure leak":

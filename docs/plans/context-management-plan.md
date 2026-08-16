@@ -245,7 +245,7 @@ goal.
 ## Planned refactor: dispatch settings routes out of the agent
 
 **Status: built 2026-08-16.** Identified 2026-08-09 while documenting the
-request pipeline for `docs/current/system-overview.md` §B2; see "What got
+request pipeline for `docs/system-overview.md` §B2; see "What got
 built" below for the design points this section originally left open.
 
 **The observation.** The router (built, live) classifies every message
@@ -315,7 +315,7 @@ That last point is the real design question: it makes the router do more,
 and the router is a single point of failure for every message. Worth
 measuring whether a richer structured output degrades its classification
 accuracy before committing — the same discipline applied in
-`docs/current/system-overview.md` Appendix B.1, where a plausible prompt change measured
+`docs/system-overview.md` Appendix B.1, where a plausible prompt change measured
 dramatically worse.
 
 ## What got built

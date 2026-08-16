@@ -40,7 +40,7 @@ scope, since different subscribers care about different topics.
 | Need | Where |
 |---|---|
 | Full doc index, categorized | `docs/README.md` |
-| Full architecture, request pipeline, design principles | `docs/current/system-overview.md` |
+| Full architecture, request pipeline, design principles | `docs/system-overview.md` |
 | First-time environment setup, running any piece locally | `docs/reference/setup.md` |
 | Current VM topology, security model, deploy process shape | `docs/current/infrastructure.md` (real IPs/keys: `local-infra/infrastructure.yaml`, gitignored) |
 | A specific feature's design/history/status | the matching `docs/plans/*.md` — see `docs/README.md` for the full index |

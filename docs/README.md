@@ -3,6 +3,20 @@
 Three kinds of document, each answering a different question — this
 index exists so it's clear which is which at a glance.
 
+## `docs/` (top level) — kept at a stable path, linked externally
+
+Thematically these belong in `docs/current/`/`docs/reference/` below, but
+live at `docs/` directly instead: `README.md`, `tools/build_showcase.py`,
+and outside links (e.g. a shared showcase page) reference them by exact
+path, and a reorg that moves the file breaks those links silently. Moved
+back here 2026-08-16 after the `docs/current/`/`docs/reference/` split
+did exactly that.
+
+| Doc | Covers |
+|---|---|
+| `system-overview.md` | Full architecture, request pipeline, design principles. No decision history — read its own Appendix B or the matching plan doc for that. Should stay accurate to the running system or it's actively misleading, not just stale |
+| `try-it.md` | User-facing invite doc — how to try the live bot |
+
 ## `docs/plans/` — what we decided, what's done, what's still open
 
 Carries history and reasoning, not just current state. Each has its own
@@ -24,13 +38,13 @@ Status table.
 
 ## `docs/current/` — what actually exists, right now
 
-No decision history — read `system-overview.md`'s own Appendix B or the
-matching plan doc for that. These should stay accurate to the running
-system or they're actively misleading, not just stale.
+No decision history — read `system-overview.md`'s own Appendix B (top
+level, see above) or the matching plan doc for that. These should stay
+accurate to the running system or they're actively misleading, not just
+stale.
 
 | Doc | Covers |
 |---|---|
-| `system-overview.md` | Full architecture, request pipeline, design principles |
 | `ai-news-sources.md` | The live source registry — what's enabled, what needs a key |
 | `infrastructure.md` | VM topology, security model, deploy process shape (no real IPs/keys — see `local-infra/infrastructure.yaml`) |
 
@@ -43,4 +57,3 @@ Technique and tool usage, not a decision record.
 | `setup.md` | First-time environment setup, running any piece locally |
 | `observability-and-debugging.md` | Diagnosing a live issue — Phoenix traces, hot-patching |
 | `local-testing-api-plan.md` | `test_api.py`'s design and how to use it (named `-plan` from before it was built; content is now a reference, not an open plan) |
-| `try-it.md` | User-facing invite doc — how to try the live bot |

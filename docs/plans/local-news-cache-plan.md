@@ -34,7 +34,7 @@ deferral reasoning — it's synchronous and user-facing, needs the harness
 (`tools/measure_guardrails.py`) extended to cover it before changing,
 and doesn't have an equivalent live incident forcing the same urgency.
 
-**Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/current/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
+**Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
 
 ## Why this is worth doing (not just "instead of on-demand")
 
@@ -58,7 +58,7 @@ If every cached article already carries rough category tags, "does this
 plausibly cover topic X" becomes a filter over structured data instead of
 the model eyeballing a live dump on every single query. This is the same
 move this project's guardrail history already learned to make the hard
-way (`docs/current/system-overview.md` Appendix B.1): things that must be judged
+way (`docs/system-overview.md` Appendix B.1): things that must be judged
 correctly belong in code, not in a model's free-text reading of raw
 content, wherever that's achievable.
 
@@ -210,7 +210,7 @@ an LLM call. It was considered — zero marginal cost, no model dependency
 — but rejected as the primary mechanism: this project's own guardrail
 history is a direct lesson that hand-rolled text-matching heuristics are
 exactly the kind of thing that quietly breaks in ways that are hard to
-notice (`docs/current/system-overview.md` Appendix B.1). A cheap structured-output
+notice (`docs/system-overview.md` Appendix B.1). A cheap structured-output
 model call is more reliable for the same reason it already won for the
 router and the output check. Per **P4** (accuracy raised by
 post-deployment testing, not assumption), classification accuracy should

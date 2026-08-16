@@ -5,7 +5,7 @@ possible, and the decisions to make before implementing, same pattern as
 `docs/plans/deployment-plan.md` and `docs/plans/multi-channel-plan.md`.
 
 Cross-references to "Appendix B.1" below mean
-`docs/current/system-overview.md` Appendix B.1 (Problems hit in development and
+`docs/system-overview.md` Appendix B.1 (Problems hit in development and
 production).
 
 **The question that prompted it:** the architecture has no AI gateway.
@@ -139,7 +139,7 @@ reversible instead of baked in.
 The most valuable item, and nearly free, because **the architecture
 already separates the calls.**
 
-The three-stage pipeline (`docs/current/system-overview.md` §B2) makes three
+The three-stage pipeline (`docs/system-overview.md` §B2) makes three
 distinct kinds of LLM call, and each already receives its model as a
 separate argument:
 
@@ -203,7 +203,7 @@ than two providers are in play simultaneously.
 
 Switching models is mechanically easy. It is **not behaviorally free.**
 
-The guardrail reliability figures recorded in `docs/current/system-overview.md`
+The guardrail reliability figures recorded in `docs/system-overview.md`
 Appendix B.1 of the overview — the structured-output check scoring 15/15, and the narrow-prompt
 variant scoring 1/15 — were measured **against DeepSeek specifically**.
 They are properties of a prompt/model pair, not of the prompt alone.
