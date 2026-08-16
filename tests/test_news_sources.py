@@ -25,6 +25,24 @@ def test_fetch_hackernews(requests_mock):
     assert articles[0]["published_dt"] == datetime(2026, 8, 5, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def test_fetch_hackernews_omits_numeric_filter_when_since_not_given(requests_mock):
+    requests_mock.get("https://hn.algolia.com/api/v1/search_by_date", json=HACKERNEWS_RESPONSE)
+
+    news_sources.fetch_hackernews("AI", 5)
+
+    assert "numericFilters" not in requests_mock.last_request.qs
+
+
+def test_fetch_hackernews_adds_numeric_filter_when_since_given(requests_mock):
+    requests_mock.get("https://hn.algolia.com/api/v1/search_by_date", json=HACKERNEWS_RESPONSE)
+    since = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+    news_sources.fetch_hackernews("AI", 5, since=since)
+
+    # requests_mock lower-cases query string keys/values in .qs
+    assert requests_mock.last_request.qs["numericfilters"] == [f"created_at_i>{int(since.timestamp())}"]
+
+
 def test_fetch_arxiv(requests_mock):
     requests_mock.get("http://export.arxiv.org/api/query", text=ARXIV_RESPONSE)
 
@@ -37,6 +55,23 @@ def test_fetch_arxiv(requests_mock):
     assert "fake abstract" in articles[0]["summary"]
     assert "\n" not in articles[0]["title"]
     assert articles[0]["published_dt"] == datetime(2026, 8, 4, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_fetch_arxiv_omits_date_range_when_since_not_given(requests_mock):
+    requests_mock.get("http://export.arxiv.org/api/query", text=ARXIV_RESPONSE)
+
+    news_sources.fetch_arxiv("cat:cs.AI", 5)
+
+    assert requests_mock.last_request.qs["search_query"] == ["cat:cs.ai"]
+
+
+def test_fetch_arxiv_adds_date_range_when_since_given(requests_mock):
+    requests_mock.get("http://export.arxiv.org/api/query", text=ARXIV_RESPONSE)
+    since = datetime(2026, 8, 15, 12, 30, 0, tzinfo=timezone.utc)
+
+    news_sources.fetch_arxiv("cat:cs.AI", 5, since=since)
+
+    assert requests_mock.last_request.qs["search_query"] == ["cat:cs.ai and submitteddate:[202608151230 to 99991231235959]"]
 
 
 def test_parse_iso_published_handles_missing_and_malformed():
@@ -106,6 +141,42 @@ def test_fetch_gnews(requests_mock, monkeypatch):
     assert len(articles) == 1
     assert articles[0]["title"] == "Fake GNews Article"
     assert articles[0]["source"] == "Fake GNews Outlet"
+
+
+def test_fetch_gnews_omits_from_when_since_not_given(requests_mock, monkeypatch):
+    monkeypatch.setenv("GNEWS_API_KEY", "fake-key")
+    requests_mock.get("https://gnews.io/api/v4/search", json=GNEWS_RESPONSE)
+
+    news_sources.fetch_gnews("AI", 5)
+
+    assert "from" not in requests_mock.last_request.qs
+
+
+def test_fetch_gnews_adds_from_when_since_given(requests_mock, monkeypatch):
+    monkeypatch.setenv("GNEWS_API_KEY", "fake-key")
+    requests_mock.get("https://gnews.io/api/v4/search", json=GNEWS_RESPONSE)
+    since = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+    news_sources.fetch_gnews("AI", 5, since=since)
+
+    assert requests_mock.last_request.qs["from"] == ["2026-08-15t12:00:00z"]
+
+
+def test_fetch_newsapi_has_no_since_parameter():
+    # Deliberate -- see news_sources.py's comment above fetch_newsapi for
+    # why (NewsAPI's free-tier delay makes a server-side date filter
+    # counterproductive; news_ingest.py relies on client-side filtering
+    # for this source instead).
+    import inspect
+
+    assert "since" not in inspect.signature(news_sources.fetch_newsapi).parameters
+
+
+def test_fetch_perigon_has_no_since_parameter():
+    # Deliberate -- unverified, see news_sources.py's comment.
+    import inspect
+
+    assert "since" not in inspect.signature(news_sources.fetch_perigon).parameters
 
 
 def test_fetch_perigon(requests_mock, monkeypatch):

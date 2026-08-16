@@ -7,8 +7,8 @@ import news_sources
 import users_db
 
 
-def _article(link, title="Some title", source="TestSource"):
-    return {"title": title, "link": link, "source": source, "summary": None, "published": None, "published_dt": None}
+def _article(link, title="Some title", source="TestSource", published_dt=None):
+    return {"title": title, "link": link, "source": source, "summary": None, "published": None, "published_dt": published_dt}
 
 
 def _fake_classifying_model(categories_by_index=None):
@@ -193,6 +193,201 @@ def test_run_ingestion_cycle_no_new_articles_skips_classification_call(
 ):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", lambda q, n: [])])
+
+    model = MagicMock()
+    news_ingest.run_ingestion_cycle(model, now)
+
+    model.with_structured_output.assert_not_called()
+
+
+def test_run_ingestion_cycle_passes_since_to_server_side_since_sources(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    # hackernews is in _SERVER_SIDE_SINCE_SOURCES -- confirmed live
+    # 2026-08-16 that its numericFilters date param actually works, see
+    # news_sources.fetch_hackernews's docstring. The cutoff is
+    # last_article_dt (newest article actually seen), not last_pulled_at
+    # (wall-clock job time) -- see news_ingest.py's module docstring for
+    # why that distinction matters.
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    last_article_dt = now - timedelta(hours=4)
+    users_db.set_source_last_article_dt("hackernews", last_article_dt)
+    fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    _args, kwargs = fetch.call_args
+    assert kwargs.get("since") == last_article_dt
+
+
+def test_run_ingestion_cycle_does_not_pass_since_to_newsapi(monkeypatch, isolated_subscribers_db, isolated_news_cache):
+    # newsapi is time-filterable (api-class) but deliberately NOT in
+    # _SERVER_SIDE_SINCE_SOURCES -- its free-tier delay makes a server-side
+    # `from=` counterproductive (see news_sources.py's comment). It still
+    # relies on the client-side filter below, just not a since kwarg.
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.set_source_last_article_dt("newsapi", now - timedelta(hours=24))
+    fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("newsapi", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    _args, kwargs = fetch.call_args
+    assert "since" not in kwargs
+
+
+def test_run_ingestion_cycle_client_side_filter_drops_articles_not_newer_than_last_article_dt(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    last_article_dt = now - timedelta(hours=4)
+    users_db.set_source_last_article_dt("hackernews", last_article_dt)
+    old_article = _article("https://example.com/old", published_dt=last_article_dt - timedelta(minutes=1))
+    new_article = _article("https://example.com/new", published_dt=last_article_dt + timedelta(minutes=1))
+    fetch = MagicMock(return_value=[old_article, new_article])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: []}), now)
+
+    cached_links = {a["link"] for a in news_cache.read_all()}
+    assert cached_links == {"https://example.com/new"}
+
+
+def test_run_ingestion_cycle_advances_last_article_dt_to_the_newest_seen(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    # The high-water mark only moves forward to the newest article
+    # actually observed this cycle -- not to `now` (wall-clock), which is
+    # the exact distinction that makes it robust against a source's own
+    # indexing delay (see news_ingest.py's module docstring).
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    older = _article("https://example.com/older", published_dt=now - timedelta(hours=3))
+    newest = _article("https://example.com/newest", published_dt=now - timedelta(hours=1))
+    fetch = MagicMock(return_value=[older, newest])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: [], 1: []}), now)
+
+    assert users_db.get_source_last_article_dt("hackernews") == now - timedelta(hours=1)
+
+
+def test_run_ingestion_cycle_does_not_advance_last_article_dt_when_nothing_new(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    last_article_dt = now - timedelta(hours=4)
+    users_db.set_source_last_article_dt("hackernews", last_article_dt)
+    fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    assert users_db.get_source_last_article_dt("hackernews") == last_article_dt
+
+
+def test_run_ingestion_cycle_client_side_filter_keeps_articles_with_unparseable_date(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    # Can't tell if it's new -- kept rather than dropped, same "fails
+    # open" instinct as the rest of this codebase. Harmless either way:
+    # news_cache dedups by link hash, so re-caching an old one is a no-op
+    # overwrite, not a growing duplicate.
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.set_source_last_article_dt("hackernews", now - timedelta(hours=4))
+    undated = _article("https://example.com/undated", published_dt=None)
+    fetch = MagicMock(return_value=[undated])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: []}), now)
+
+    assert {a["link"] for a in news_cache.read_all()} == {"https://example.com/undated"}
+
+
+def test_run_ingestion_cycle_rss_source_not_time_filtered(monkeypatch, isolated_subscribers_db, isolated_news_cache):
+    # RSS sources have no query/date-range parameter at all -- an "old"
+    # article still gets cached, since there's nothing to filter by.
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.set_source_last_pulled_at("bbc_business", now - timedelta(hours=4))
+    old_article = _article("https://example.com/old", published_dt=now - timedelta(hours=10))
+    fetch = MagicMock(return_value=[old_article])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: []}), now)
+
+    assert {a["link"] for a in news_cache.read_all()} == {"https://example.com/old"}
+    _args, kwargs = fetch.call_args
+    assert "since" not in kwargs
+
+
+def test_run_ingestion_cycle_uses_raised_max_results_for_time_filterable_sources(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    hn_fetch = MagicMock(return_value=[])
+    rss_fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(
+        news_sources, "enabled_sources", lambda: [("hackernews", hn_fetch), ("bbc_business", rss_fetch)]
+    )
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    hn_args, _hn_kwargs = hn_fetch.call_args
+    assert hn_args[1] == news_ingest.MAX_RESULTS_PER_SOURCE_SINCE_LAST_PULL
+    rss_args, _rss_kwargs = rss_fetch.call_args
+    assert rss_args[1] == news_ingest.MAX_RESULTS_PER_SOURCE_RSS
+
+
+def test_run_ingestion_cycle_first_pull_has_no_since_and_no_filtering(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    # last_article_dt is None (never pulled before) -- nothing to filter
+    # against yet, so everything up to the safety cap is kept regardless
+    # of published_dt, and no since kwarg is passed at all.
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    old_article = _article("https://example.com/old", published_dt=now - timedelta(days=10))
+    fetch = MagicMock(return_value=[old_article])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: []}), now)
+
+    assert {a["link"] for a in news_cache.read_all()} == {"https://example.com/old"}
+    _args, kwargs = fetch.call_args
+    assert "since" not in kwargs
+
+
+def test_run_ingestion_cycle_skips_reclassifying_already_cached_links(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    # Matters most for RSS-class sources now that their cap is 200, not 5
+    # -- most of a 200-item pull is typically the same links as last
+    # cycle, and without this check every one of them would cost a real
+    # paid classification call every cycle for no reason.
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    already_cached = _article("https://example.com/seen")
+    news_cache.write_article("bbc_business", already_cached, ["IT"], now - timedelta(hours=1))
+    fresh = _article("https://example.com/fresh")
+    fetch = MagicMock(return_value=[already_cached, fresh])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", fetch)])
+    classify_mock = MagicMock(return_value={0: ["IT"]})
+    monkeypatch.setattr(news_ingest.news_classify, "classify_articles", classify_mock)
+
+    news_ingest.run_ingestion_cycle(MagicMock(), now)
+
+    classified_articles = classify_mock.call_args[0][1]
+    assert [a["link"] for a in classified_articles] == ["https://example.com/fresh"]
+    cached_links = {a["link"] for a in news_cache.read_all()}
+    assert cached_links == {"https://example.com/seen", "https://example.com/fresh"}
+
+
+def test_run_ingestion_cycle_all_articles_already_cached_skips_classification_call(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    already_cached = _article("https://example.com/seen")
+    news_cache.write_article("bbc_business", already_cached, ["IT"], now - timedelta(hours=1))
+    fetch = MagicMock(return_value=[already_cached])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", fetch)])
 
     model = MagicMock()
     news_ingest.run_ingestion_cycle(model, now)

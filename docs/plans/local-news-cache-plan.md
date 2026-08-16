@@ -20,6 +20,7 @@ the network per request.
 | 4 | Two-stage query filtering (category, then content) | **Built for the push path (item 6), not yet for `search_news` (item 5).** |
 | 5 | `search_news` rewritten to read the cache instead of live sources | **Not built — deliberately deferred.** Changes live, user-facing agent behavior (`agent.py`'s tool, and `guardrails.classify_message`'s output schema); items 1–3 are additive and don't touch anything currently running, so they shipped first. See "Next step" below. |
 | 6 | `news_push.py` converging onto the same cache | **Built 2026-08-15** — see "Interaction with `news_push.py`" below, rewritten in place rather than left as a follow-on. |
+| 7 | Since-based ingestion for query-capable sources (replacing the flat top-N cap) | **Built 2026-08-16** — see "Since-based ingestion" below |
 
 **Why item 6 moved from "optional" to "built" ahead of item 5:** a real
 incident forced it. `news_push.py` calling live, query-blind RSS sources
@@ -35,6 +36,67 @@ deferral reasoning — it's synchronous and user-facing, needs the harness
 and doesn't have an equivalent live incident forcing the same urgency.
 
 **Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
+
+## Since-based ingestion (item 7)
+
+**The problem, raised by a subscriber**: pushed digests were consistently
+landing around 4-6 items. Root cause traced to `news_ingest.py`'s
+`MAX_RESULTS_PER_SOURCE = 5` -- a flat top-N cap applied per query per
+cycle, regardless of how much was actually new since the last pull. On an
+active source, anything past the first 5 was silently discarded that
+cycle; the push-time `MAX_ARTICLES_PER_TOPIC` cap and the digest-writing
+model's own synthesis (merging same-story coverage) then narrow an
+already-thin candidate pool further. The real bottleneck was upstream, at
+ingestion, not in the push-selection logic itself.
+
+**Fix**: the 5 `forum`/`api`-class sources (the only ones with any
+query/date capability at all -- see `docs/current/ai-news-sources.md`'s "Source
+classes") now fetch "everything since this source's last successful
+pull" instead of a flat 5. Two mechanisms:
+
+1. A server-side date filter, for the 3 sources confirmed live to
+   support one correctly (hackernews, arxiv, gnews) -- an efficiency
+   optimization, smaller payloads.
+2. A client-side filter in `news_ingest.py`, applied to all 5 regardless
+   of #1: drop any article with `published_dt` at or before the cutoff.
+   This is what's actually authoritative, and the only mechanism for
+   newsapi/perigon, whose server-side date params turned out to be
+   respectively counterproductive (a live-confirmed ~24-36h free-tier
+   delay that would make a 24h since-window frequently return nothing)
+   and unverified (no API key to test against). See
+   `docs/current/ai-news-sources.md`'s "Since-based ingestion" section for the
+   full per-source live-verification table.
+
+**The cutoff itself was corrected the same day.** Originally implemented
+using `last_pulled_at` (when the ingestion job last ran) -- wrong, per a
+design review: that value advances every cycle regardless of whether
+anything new was found, so an article a source indexes with a delay
+(exactly NewsAPI's confirmed ~24-36h delay above) could fall behind a
+since-cutoff that already moved past it, and get silently skipped
+forever rather than just delayed. Fixed by tracking a separate per-source
+value instead -- `users_db.get_source_last_article_dt`/
+`set_source_last_article_dt`, the newest article's own `published_dt`
+actually observed, which only ever advances to what's genuinely been
+seen. `last_pulled_at` still exists and still drives the per-source
+due-check (`_is_source_due`) -- an unrelated question ("how often do we
+poll this source") that the fix didn't touch.
+
+`rss`-class sources (16 of the 21 registered) have no query or date-range
+parameter to ask for "since X" at all, so there's nothing to switch them
+to -- but their own flat cap was still part of the same complaint, and got
+raised the same day: `MAX_RESULTS_PER_SOURCE_RSS` went from 5 to **200**,
+since the original 5 was arbitrary and cut real digests down regardless of
+how much a feed actually had. This created a second problem needing its
+own fix: at 200/feed, most of a cycle's pull is typically the same items
+as last cycle, so **every currently-cached link is loaded once per cycle
+and skipped from classification** if a fetched article matches one --
+otherwise a redundant, paid DeepSeek classification call would run on
+~195 unchanged articles every 4 hours for nothing. New-vs-already-cached
+counts are logged per source and per cycle so this cap can be tuned again
+from real data instead of guessed at a second time. A new, higher
+`MAX_RESULTS_PER_SOURCE_SINCE_LAST_PULL` (50) is a safety ceiling for the
+5 time-filterable sources, not their real limit anymore -- that's now
+"however much is genuinely new."
 
 ## Why this is worth doing (not just "instead of on-demand")
 

@@ -96,10 +96,20 @@ def _clean_summary(raw: str | None, max_len: int = 300) -> str | None:
 # --- Free, no-key sources ------------------------------------------------
 
 
-def fetch_hackernews(query: str, max_results: int = 5) -> list[dict]:
+def fetch_hackernews(query: str, max_results: int = 5, since: datetime | None = None) -> list[dict]:
+    """`since`, when given, adds Algolia's `numericFilters=created_at_i>X`
+    -- confirmed live 2026-08-16 (45 hits in a 6h window for one query, all
+    strictly after the cutoff) -- so news_ingest.py can ask for everything
+    new since its last pull instead of a flat top-N regardless of how much
+    is genuinely new. Omitted (server returns its default top-N) when
+    `since` is None, e.g. the first-ever pull or agent.py's search_news,
+    which has no "last pull" concept."""
+    params = {"query": query, "tags": "story", "hitsPerPage": max_results}
+    if since is not None:
+        params["numericFilters"] = f"created_at_i>{int(since.timestamp())}"
     resp = requests.get(
         "https://hn.algolia.com/api/v1/search_by_date",
-        params={"query": query, "tags": "story", "hitsPerPage": max_results},
+        params=params,
         timeout=10,
         headers=_REQUEST_HEADERS,
     )
@@ -117,11 +127,22 @@ def fetch_hackernews(query: str, max_results: int = 5) -> list[dict]:
     ]
 
 
-def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5) -> list[dict]:
+def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5, since: datetime | None = None) -> list[dict]:
+    """`since`, when given, appends a `submittedDate:[X TO 9999...]` range
+    to the query -- confirmed live 2026-08-16 the syntax works. Note:
+    arXiv's own indexing has a real multi-day lag (a plain, unfiltered
+    query on 2026-08-16 returned nothing newer than 2026-08-13), so a
+    short since-last-pull window (news_ingest's default interval is 4h)
+    will often legitimately return nothing -- that's arXiv's real update
+    cadence, not a bug, and no worse than before (today's flat top-N cap
+    mostly re-fetches the same few papers on a source this slow)."""
+    search_query = query
+    if since is not None:
+        search_query = f"{query} AND submittedDate:[{since.strftime('%Y%m%d%H%M')} TO 99991231235959]"
     resp = requests.get(
         "http://export.arxiv.org/api/query",
         params={
-            "search_query": query,
+            "search_query": search_query,
             "sortBy": "submittedDate",
             "sortOrder": "descending",
             "max_results": max_results,
@@ -265,6 +286,24 @@ def fetch_techradar(query: str = None, max_results: int = 5) -> list[dict]:
 
 
 # --- Key-gated sources (skipped unless the env var below is set) --------
+# Deliberately NO `since` param on fetch_newsapi/fetch_perigon, unlike
+# fetch_hackernews/fetch_arxiv/fetch_gnews above -- news_ingest.py still
+# gets "everything since last pull" for these via a client-side filter on
+# published_dt instead (see its module docstring), which sidesteps two
+# real findings from live-testing this 2026-08-16:
+#   - NewsAPI's free "Developer" tier has an undocumented ~24-36h article
+#     delay -- `from=<24h ago>` returned 0 results live, `from=<36h ago>`
+#     returned 380. Since news_ingest.py pulls NewsAPI once every 24h
+#     (_SOURCE_INTERVAL_HOURS), a server-side `from=last_pulled_at` would
+#     frequently return nothing at all -- worse than today's flat top-N,
+#     not better. Client-side filtering has no such failure mode: it just
+#     takes whatever NewsAPI's own delayed index currently has and keeps
+#     what's new, so a delayed article surfaces on whichever later cycle
+#     it becomes available rather than being asked for and missed.
+#   - Perigon's date-filter behavior is simply unverified (no API key
+#     available to test against the live service, same caveat as its
+#     response-shape mapping below) -- not worth trusting an unconfirmed
+#     server-side param when the client-side filter works regardless.
 
 
 def fetch_newsapi(query: str, max_results: int = 5) -> list[dict]:
@@ -292,10 +331,19 @@ def fetch_newsapi(query: str, max_results: int = 5) -> list[dict]:
     ]
 
 
-def fetch_gnews(query: str, max_results: int = 5) -> list[dict]:
+def fetch_gnews(query: str, max_results: int = 5, since: datetime | None = None) -> list[dict]:
+    """`since`, when given, adds GNews's documented `from` (ISO 8601) date
+    filter -- confirmed live 2026-08-16 (30 articles in a 24h window for
+    one query, all recent). Note: `max` is capped at 10/request by GNews's
+    own free tier regardless of what's asked (docs/current/ai-news-sources.md), so
+    news_ingest.py's generous safety cap for time-filterable sources just
+    gets silently clamped here, not an error."""
+    params = {"q": query, "lang": "en", "max": max_results, "apikey": os.environ["GNEWS_API_KEY"]}
+    if since is not None:
+        params["from"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     resp = requests.get(
         "https://gnews.io/api/v4/search",
-        params={"q": query, "lang": "en", "max": max_results, "apikey": os.environ["GNEWS_API_KEY"]},
+        params=params,
         timeout=10,
     )
     resp.raise_for_status()

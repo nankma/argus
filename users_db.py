@@ -41,15 +41,15 @@ def _connect():
         conn.close()
 
 
-def _ensure_column(conn, column: str, sql_type: str) -> None:
-    """Adds `column` to subscribers if an older schema (from before this
+def _ensure_column(conn, table: str, column: str, sql_type: str) -> None:
+    """Adds `column` to `table` if an older schema (from before this
     column existed) doesn't already have it -- ALTER TABLE ADD COLUMN
     isn't naturally idempotent like CREATE TABLE IF NOT EXISTS, so check
     first. A no-op for a freshly-created table, which already has every
-    column from the CREATE TABLE statement below."""
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(subscribers)")}
+    column from its own CREATE TABLE statement."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in existing:
-        conn.execute(f"ALTER TABLE subscribers ADD COLUMN {column} {sql_type}")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
 def _migrate_api_budget_table(conn) -> None:
@@ -106,13 +106,13 @@ def init_db() -> None:
             )
             """
         )
-        _ensure_column(conn, "interests", "TEXT")
-        _ensure_column(conn, "push_enabled", "INTEGER")
-        _ensure_column(conn, "push_interval_hours", "INTEGER")
-        _ensure_column(conn, "last_push_at", "TEXT")
-        _ensure_column(conn, "pushed_links", "TEXT")
-        _ensure_column(conn, "language", "TEXT")
-        _ensure_column(conn, "restricted_sources_enabled", "INTEGER")
+        _ensure_column(conn, "subscribers", "interests", "TEXT")
+        _ensure_column(conn, "subscribers", "push_enabled", "INTEGER")
+        _ensure_column(conn, "subscribers", "push_interval_hours", "INTEGER")
+        _ensure_column(conn, "subscribers", "last_push_at", "TEXT")
+        _ensure_column(conn, "subscribers", "pushed_links", "TEXT")
+        _ensure_column(conn, "subscribers", "language", "TEXT")
+        _ensure_column(conn, "subscribers", "restricted_sources_enabled", "INTEGER")
         _migrate_api_budget_table(conn)
         conn.execute(
             """
@@ -132,6 +132,12 @@ def init_db() -> None:
             )
             """
         )
+        # last_article_dt: the published_dt of the newest article actually
+        # SEEN from this source, not when the job last ran -- see
+        # get_source_last_article_dt's docstring for why this is a
+        # different, more robust value than last_pulled_at for "since"
+        # filtering specifically.
+        _ensure_column(conn, "source_pull_state", "last_article_dt", "TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS interest_categories (
@@ -271,6 +277,46 @@ def set_source_last_pulled_at(source: str, when: datetime) -> None:
             ON CONFLICT(source) DO UPDATE SET last_pulled_at = excluded.last_pulled_at
             """,
             (source, when.isoformat()),
+        )
+
+
+def get_source_last_article_dt(source: str) -> datetime | None:
+    """The published_dt of the newest article actually SEEN from this
+    source so far -- deliberately a different value from
+    get_source_last_pulled_at (when the job last RAN). news_ingest.py
+    uses this one as the "since" cutoff for time-filterable sources,
+    2026-08-16, after a real design correction: using last_pulled_at (wall-
+    clock job time) for that meant an article that a source indexes with
+    a delay (confirmed live for NewsAPI's free tier -- up to ~36h, see
+    docs/current/ai-news-sources.md) could be silently skipped forever, because
+    last_pulled_at keeps advancing every cycle regardless of whether
+    anything new was actually found, and a delayed article's own
+    published_dt can fall behind a since-cutoff that already moved past it
+    by the time the source finally surfaces it. This value only advances
+    when a newer article is actually observed, so it can't outrun what's
+    genuinely been seen the way a wall-clock timestamp can."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT last_article_dt FROM source_pull_state WHERE source = ?", (source,)
+        ).fetchone()
+    return datetime.fromisoformat(row[0]) if row and row[0] else None
+
+
+def set_source_last_article_dt(source: str, when: datetime) -> None:
+    """Upserts -- same reasoning as set_source_last_pulled_at, a separate
+    column on the same row rather than a new table, since both are just
+    "one timestamp per source." Callers should only call this with a value
+    that's >= the current one (news_ingest.py only ever passes the max
+    published_dt actually observed this cycle) -- this function itself
+    doesn't enforce monotonicity, since the only caller already guarantees
+    it and a defensive check here would just be unreachable code."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_pull_state (source, last_pulled_at, last_article_dt) VALUES (?, ?, ?)
+            ON CONFLICT(source) DO UPDATE SET last_article_dt = excluded.last_article_dt
+            """,
+            (source, when.isoformat(), when.isoformat()),
         )
 
 

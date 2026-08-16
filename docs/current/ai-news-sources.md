@@ -12,11 +12,12 @@ registry covered anything outside AI-industry blogs and community boards.
 
 ## Source classes
 
-Every entry in `SOURCE_REGISTRY` is tagged with a class. This is
-descriptive, not behavioral — `enabled_sources()` doesn't branch on it —
-but it matters for one reason worth knowing before relying on a source's
-result count: **most sources here don't actually filter by the search
-query.**
+Every entry in `SOURCE_REGISTRY` is tagged with a class. `enabled_sources()`
+itself still doesn't branch on it, but `news_ingest.py` now does (see
+"Since-based ingestion" below) — it matters for two reasons worth knowing
+before relying on a source's result count: **most sources here don't
+actually filter by the search query, and most can't be asked "give me
+everything since X" either.**
 
 | Class | Meaning | Filters by query? |
 |---|---|---|
@@ -31,6 +32,74 @@ items whether or not any of them are actually relevant — this is why
 `search_news` returning a nonzero count is not proof the topic was
 matched; the model reading the titles is currently the only thing that
 catches this. See `docs/plans/local-news-cache-plan.md` for where this is headed.
+
+## Since-based ingestion (added 2026-08-16)
+
+`news_ingest.py` used to cap every source at a flat top-5 per query
+(`MAX_RESULTS_PER_SOURCE`), regardless of how much was actually new since
+its last pull — a real bottleneck on an active source: anything past the
+first 5 was silently discarded that cycle, gone until (if ever) it
+resurfaced in a later "latest 5". Now the 5 `forum`/`api`-class sources
+fetch "everything since this source's last successful pull" instead,
+verified live 2026-08-16 against each provider's real API (not assumed
+from docs):
+
+| Source | Server-side date filter | Verified live | Notes |
+|---|---|---|---|
+| **Hacker News** | `numericFilters=created_at_i>X` (Algolia) | ✅ 45 hits in a 6h window, all strictly after the cutoff | |
+| **arXiv** | `submittedDate:[X TO 99991231235959]` range in `search_query` | ✅ syntax confirmed working | Real caveat: arXiv's own indexing lags multiple days (an unfiltered query on 2026-08-16 returned nothing newer than 2026-08-13) — a short since-window often legitimately returns nothing. Not a bug, and no worse than the old flat cap on a source this slow. |
+| **GNews** | `from=` (ISO 8601) | ✅ 30 articles in a 24h window | `max` is still capped at 10/request by GNews's own free tier regardless of what's asked. |
+| **NewsAPI** | *(deliberately not used)* | ❌ found broken for this use case | `from=` **works syntactically** but the free "Developer" tier has an undocumented ~24-36h article delay — `from=<24h ago>` returned 0 results live, `from=<36h ago>` returned 380. Since NewsAPI is pulled once every 24h, a server-side since-filter would frequently return nothing. Handled with client-side filtering instead (see below), which doesn't have this failure mode. |
+| **Perigon** | *(deliberately not used)* | Not tested — no API key available | Same caveat as its response-shape mapping elsewhere in this doc — unverified, not trusted without a key to check against. |
+
+**Two mechanisms, not one.** A server-side date filter (where verified
+above) is applied as an efficiency optimization — smaller payloads,
+less wasted budget on rate-limited sources. But the actually-authoritative
+filter is a **client-side check in `news_ingest.py`** applied to every
+`forum`/`api`-class source's results regardless: drop anything with
+`published_dt` at or before the cutoff. This is what makes NewsAPI/Perigon
+work correctly despite having no server-side filter at all, and it's also
+the backstop if a server-side filter above ever silently misbehaves.
+`rss`-class sources are unaffected by any of this — a plain feed has no
+query or date-range parameter to ask for "since X" in the first place, so
+there's nothing to switch to since-based fetching for them.
+
+**The cutoff is the newest article's own `published_dt` actually seen
+from that source, not when the ingestion job last ran.** A design
+correction made the same day, after the job-run-time version was found to
+have a real failure mode: `last_pulled_at` (wall-clock job time) advances
+every cycle regardless of whether anything new was found, so an article a
+source indexes with a delay (exactly NewsAPI's ~24-36h delay above) could
+have its `published_dt` fall *behind* a since-cutoff that already moved
+past it by the time the source finally surfaces it — silently skipped
+forever, not just delayed. Fixed by tracking a separate per-source value
+(`users_db.get_source_last_article_dt`/`set_source_last_article_dt`) that
+only advances to the max `published_dt` actually observed each cycle, so
+it can never outrun what's genuinely been seen the way a wall-clock
+timestamp can.
+
+**Their own top-N cap was raised instead, same day**: `rss`-class sources
+went from a flat 5 to 200 (`news_ingest.MAX_RESULTS_PER_SOURCE_RSS`) — the
+5 was arbitrary and, per a real subscriber report, was cutting pushed
+digests down to a handful of items even when a feed had more genuinely
+new content available. 200 comfortably exceeds what any registered feed
+actually carries (most run 20-50 entries per the content-depth
+investigation below), so this is effectively "take everything the feed
+has" now, not a real limit.
+
+**A new problem that cap raise created, and its fix**: at 200/feed, most
+of a cycle's fetch is typically the *same* items as the previous cycle
+(feeds don't turn over that fast) — without a dedup check, every one of
+them would go through a real, paid DeepSeek classification call every 4
+hours for no reason (`news_cache.write_article`'s overwrite-by-link-hash
+already makes a redundant *write* harmless, but a redundant
+*classification call* isn't free the same way). Fixed by loading every
+currently-cached link once per ingestion cycle and skipping
+classification/caching for anything already present. Both the
+newly-cached and already-cached counts are logged per source and per
+cycle specifically so `MAX_RESULTS_PER_SOURCE_RSS` can be tuned again
+later from real data (`docker logs`) rather than guessed at a second
+time.
 
 ## Content depth per source (investigated 2026-08-13)
 
