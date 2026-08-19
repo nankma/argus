@@ -479,6 +479,19 @@ def main():
         help="run layer 2 against a real test_api.py endpoint (e.g. through an SSH tunnel) "
         "instead of calling classify_message directly -- the tunnel/deployment reliability test base",
     )
+    parser.add_argument(
+        "--via-claude",
+        nargs="?",
+        const="sonnet",
+        default=None,
+        metavar="MODEL",
+        help="drive layers 2/4 through the claude CLI instead of DEEPSEEK_API_KEY, billing a "
+        "Claude Code subscription rather than DeepSeek credit. Scores are NOT comparable to "
+        "the pinned-deepseek-chat baseline -- it's a different model. Use it to check that a "
+        "prompt change works at all when DeepSeek credit is short, then re-measure on DeepSeek "
+        "before recording a number. Each trial is a separate CLI process, so prefer "
+        "--trials 1 and --group over a full default run.",
+    )
     args = parser.parse_args()
 
     def filtered(cases):
@@ -497,12 +510,19 @@ def main():
         print_layer1_report(measure_layer1(filtered(LAYER1_CASES)))
 
     if args.layer in ("2", "4", "all"):
-        if not os.environ.get("DEEPSEEK_API_KEY"):
+        if args.via_claude:
+            from tools.claude_cli_model import ClaudeCLIModel
+
+            model = ClaudeCLIModel(model=args.via_claude)
+            print(f"\nlayers 2/4 via the claude CLI ({args.via_claude}) -- "
+                  f"not comparable to the deepseek-chat baseline.", file=sys.stderr)
+        elif not os.environ.get("DEEPSEEK_API_KEY"):
             print("\nDEEPSEEK_API_KEY not set -- skipping layers 2/4 (need a real model call).", file=sys.stderr)
             return
-        from langchain_deepseek import ChatDeepSeek
+        else:
+            from langchain_deepseek import ChatDeepSeek
 
-        model = ChatDeepSeek(model="deepseek-chat")
+            model = ChatDeepSeek(model="deepseek-chat")
         if args.layer in ("2", "all"):
             print_layer2_report(measure_layer2(model, filtered(LAYER2_CASES), args.trials))
             print_layer2_multi_intent_report(
