@@ -372,6 +372,73 @@ the vast majority of articles identically (uncorroborated), so Option B
 cannot be the *only* ranking signal. It separates the top handful from
 the rest; something else still has to order the rest.
 
+### Measured: similarity does NOT fix source collapse (negative result)
+
+The natural assumption — raised 2026-08-19 — is that once you have a
+similarity function, MMR-style diversity re-ranking will also break up the
+source concentration. **Measured on the real cache, it does not.**
+
+Setup: the newest 200 cached articles as the candidate pool, selecting 20,
+relevance = recency rank. Source concentration reported as **effective N**
+(1/HHI — see `sample-diversity-survey.md`; higher is more diverse, 20
+would be perfectly even):
+
+| Selection method | effective N | avg pairwise content similarity |
+|---|---|---|
+| Baseline — pure recency (production today) | **3.1** | 0.0039 |
+| MMR, content similarity only, λ=0.3 | 3.1 | — |
+| MMR, content similarity only, λ=0.5 | **2.9** *(worse)* | — |
+| MMR, content similarity only, λ=0.7 | 3.1 | 0.0021 |
+| MMR, content similarity only, λ=0.9 | 4.0 | 0.0001 |
+| **Hard per-source cap, k=2** (Option A) | **11.1** | 0.0018 |
+| **MMR with source as an explicit term** (λ=0.5, w=0.6) | **10.0** | 0.0011 |
+
+**Content-based diversity barely moves source concentration at all**, and
+at λ=0.5 it made it slightly *worse*. Only at an extreme λ=0.9 — where
+relevance is nearly ignored — does it reach 4.0, still far below what a
+10-line cap achieves.
+
+**Why**: the two problems are different. Similarity re-ranking removes
+**redundancy** (the same story appearing repeatedly). Source collapse is
+**frequency domination** — Hacker News publishing many *genuinely
+different* stories per hour. MMR looks at HN's 9 articles in the top 20,
+correctly sees 9 unrelated topics, finds nothing redundant, and keeps them
+all. It is working exactly as designed; it is simply solving a different
+problem.
+
+The redundancy column confirms it's doing its own job properly: average
+pairwise similarity drops monotonically as λ rises (0.0039 → 0.0001).
+But note how small those numbers already are — **in the newest-200 window,
+zero pairs exceeded 0.4 similarity**. The corroborated stories found
+earlier are spread across the whole 48-hour, 2082-article cache, not
+concentrated in the recent window. So in this particular selection, there
+was almost no redundancy available to remove.
+
+**Conclusion, and the direct answer to "how do embeddings/BM25 help
+scramble the sources": they don't, and they aren't the right tool for
+that.** What they are genuinely needed for is:
+
+1. **Enabling the diversity toolkit at all** — MMR, DPP, and submodular
+   selection all require a similarity function as input. Without one, none
+   of them can run. They just need a *source* term added if source
+   diversity is the goal.
+2. **Corroboration counting** (Option B) — detecting that N outlets
+   covered the same story is a similarity problem.
+3. **Collapsing aggregator duplicates** — see the section above; this is
+   what makes any source count trustworthy in the first place.
+4. **Semantic interest matching** (Part 2) — "AAOI", "fiber-optic
+   components".
+
+**Source diversity itself needs source identity to be an explicit term in
+the objective** — either a hard cap (effective N 11.1) or a weighted term
+in MMR (10.0). Both work; the cap is simpler and needs no similarity
+function at all, the weighted term degrades more gracefully and composes
+with content diversity in one pass.
+
+This is the Appendix B.1 lesson repeating: the plausible-sounding
+mechanism was measured before being built, and it turned out not to do
+what it looked like it would do.
+
 ### What is deliberately not recommended
 
 - **Collaborative filtering** — structurally impossible at this user count.

@@ -259,6 +259,21 @@ explicitly. The failure mode in this project was that the trade-off was
 being made *implicitly* (recency-only ordering happened to imply "no
 diversity"), so nobody chose it.
 
+**1b. "Diversity" is not one axis — name which one you mean.** Added
+2026-08-19 after measuring it. **Content diversity** (are these items
+about different things?) and **source diversity** (do these items come
+from different places?) are separate objectives, and optimizing one does
+not deliver the other. Measured on this project's real cache: MMR over
+content similarity left source concentration essentially unchanged
+(effective N 3.1 → 3.1), because the dominant source was publishing many
+genuinely *different* stories — there was no redundancy for MMR to find.
+A per-source cap reached effective N 11.1 on the same data. See
+`news-ranking-plan.md`'s "similarity does NOT fix source collapse". The
+generalizable point: **the whole selection-time family in §3 below
+optimizes whatever your similarity function measures — so if source
+identity matters, it has to be *in* that function**, not assumed to
+follow from content dissimilarity.
+
 **2. Concentration is sometimes real signal, not bias.** Malmquist bias
 is the sharpest statement of this: the bright objects genuinely are
 bright. Google's host-crowding escape hatch says the same thing
