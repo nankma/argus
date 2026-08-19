@@ -203,15 +203,58 @@ def test_record_push_sets_last_push_at_and_links(isolated_subscribers_db):
     pushed_at = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
     users_db.record_push(18, ["https://example.com/a", "https://example.com/b"], pushed_at)
     assert users_db.get_last_push_at(18) == pushed_at
-    assert users_db.get_pushed_links(18) == ["https://example.com/a", "https://example.com/b"]
+    assert set(users_db.get_pushed_links(18, now=pushed_at)) == {
+        "https://example.com/a", "https://example.com/b"
+    }
 
 
-def test_record_push_merges_and_dedupes_links_newest_first(isolated_subscribers_db):
-    users_db.record_push(19, ["https://example.com/old"], datetime(2026, 8, 1, tzinfo=timezone.utc))
-    users_db.record_push(
-        19, ["https://example.com/new", "https://example.com/old"], datetime(2026, 8, 8, tzinfo=timezone.utc)
+def test_record_push_merges_and_dedupes_links(isolated_subscribers_db):
+    t1 = datetime(2026, 8, 8, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 8, 8, 12, tzinfo=timezone.utc)
+    users_db.record_push(19, ["https://example.com/old"], t1)
+    users_db.record_push(19, ["https://example.com/new", "https://example.com/old"], t2)
+    assert set(users_db.get_pushed_links(19, now=t2)) == {
+        "https://example.com/old", "https://example.com/new"
+    }
+
+
+def test_pushed_links_are_pruned_by_age_not_by_count(isolated_subscribers_db):
+    """The count cap this replaced was silently wrong at short push
+    intervals -- see users_db.PUSHED_LINK_RETENTION_HOURS."""
+    recent = datetime(2026, 8, 8, tzinfo=timezone.utc)
+    # sent a day ago -- comfortably inside the retention window
+    users_db.record_push(30, ["https://example.com/yesterday"], recent - timedelta(hours=24))
+
+    # far more links than the old 200-entry cap, all in one later push
+    users_db.record_push(30, [f"https://example.com/{i}" for i in range(500)], recent)
+
+    links = users_db.get_pushed_links(30, now=recent)
+    assert len(links) == 501, "nothing should be evicted just for being numerous"
+    assert "https://example.com/yesterday" in links, (
+        "under the old count cap this would have been evicted by the 500 newer links, "
+        "and the article resent"
     )
-    assert users_db.get_pushed_links(19) == ["https://example.com/new", "https://example.com/old"]
+
+    # ...but once it falls outside the retention window it goes
+    much_later = recent + timedelta(hours=users_db.PUSHED_LINK_RETENTION_HOURS + 1)
+    assert users_db.get_pushed_links(30, now=much_later) == []
+
+
+def test_pushed_links_reads_the_legacy_plain_list_format(isolated_subscribers_db):
+    """Live subscriber rows predate the {link: sent_at} format. They must
+    still dedupe rather than being dropped, which would resend articles the
+    subscriber has already seen."""
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    users_db.request_access(31, "legacy", "Legacy")
+    conn = _sqlite3.connect(users_db.DB_FILE)
+    conn.execute("UPDATE subscribers SET pushed_links = ? WHERE chat_id = 31",
+                 (_json.dumps(["https://example.com/seen-before"]),))
+    conn.commit()
+    conn.close()
+
+    assert users_db.get_pushed_links(31) == ["https://example.com/seen-before"]
 
 
 def test_list_push_enabled_subscribers_only_returns_approved_and_enabled(isolated_subscribers_db):

@@ -14,7 +14,7 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 DB_FILE = os.environ.get("SUBSCRIBERS_DB_FILE", "subscribers.db")
 
@@ -24,11 +24,23 @@ DENIED = "denied"
 
 DEFAULT_PUSH_INTERVAL_HOURS = 24
 MIN_PUSH_INTERVAL_HOURS = 1
-# Bounds how many previously-pushed article links are remembered per user --
-# a fallback dedup check for articles whose "published" date didn't parse
-# (see news_push.py), not meant as a full history. Cheap to keep generous
-# at this project's scale (owner + a few friends).
-_MAX_REMEMBERED_PUSHED_LINKS = 200
+# How long a sent article's link is remembered per subscriber. This is the
+# ONLY thing that decides whether they have already seen an article -- see
+# news_push.select_candidate_articles, which as of 2026-08-19 filters on
+# this and nothing else.
+#
+# Pruned by AGE, not by count (it used to keep the most recent 200). The
+# count cap was silently wrong at short push intervals: news_cache's TTL is
+# 48h, so an article can be re-offered for at most that long, but a
+# subscriber on the 1h minimum interval could take ~48 pushes in that
+# window and overflow 200 links -- evicting a link that was still
+# re-offerable and re-sending the article. Keying on time makes the
+# retention window match the thing it actually has to outlast.
+#
+# Deliberately longer than news_cache.DEFAULT_TTL_HOURS (48h): once an
+# article ages out of the cache it can never be a candidate again, so this
+# only needs to cover that window, and the margin costs a few rows.
+PUSHED_LINK_RETENTION_HOURS = 72
 
 
 @contextmanager
@@ -516,12 +528,38 @@ def set_push_interval_hours(chat_id: int, hours: int) -> None:
         )
 
 
-def get_pushed_links(chat_id: int) -> list[str]:
+def _parse_pushed_links(raw: str | None, now: datetime | None = None) -> dict[str, str]:
+    """Returns {link: iso_timestamp} for links still inside the retention
+    window. Accepts the pre-2026-08-19 format too -- a bare JSON list of
+    links with no timestamps -- since live subscriber rows are still in it.
+    Those legacy links are treated as sent `now`, i.e. given a full fresh
+    retention window rather than being dropped: re-sending an article the
+    subscriber already saw is a worse failure than remembering it slightly
+    too long."""
+    if not raw:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    data = json.loads(raw)
+    if isinstance(data, list):  # legacy format
+        return {link: now.isoformat() for link in data}
+    cutoff = now - timedelta(hours=PUSHED_LINK_RETENTION_HOURS)
+    kept = {}
+    for link, sent_at in data.items():
+        try:
+            if datetime.fromisoformat(sent_at) > cutoff:
+                kept[link] = sent_at
+        except (TypeError, ValueError):
+            kept[link] = now.isoformat()  # unparseable -- keep, don't risk a resend
+    return kept
+
+
+def get_pushed_links(chat_id: int, now: datetime | None = None) -> list[str]:
+    """Links sent to this subscriber inside the retention window. `now` is a
+    parameter so the pruning is deterministic in tests, same convention as
+    news_push.run_push_cycle."""
     with _connect() as conn:
         row = conn.execute("SELECT pushed_links FROM subscribers WHERE chat_id = ?", (chat_id,)).fetchone()
-    if not row or not row[0]:
-        return []
-    return json.loads(row[0])
+    return list(_parse_pushed_links(row[0] if row else None, now))
 
 
 def get_last_push_at(chat_id: int) -> datetime | None:
@@ -536,13 +574,23 @@ def record_push(chat_id: int, article_links: list[str], pushed_at: datetime) -> 
     """Called after a periodic digest is actually sent (or after a due
     check finds nothing new -- see news_push.py) to advance the dedup
     state: last_push_at resets the "how long until due again" clock, and
-    pushed_links is the fallback dedup list for articles whose published
-    date didn't parse (see news_sources.py's published_dt). Capped to the
-    most recent _MAX_REMEMBERED_PUSHED_LINKS, newest first."""
-    existing = get_pushed_links(chat_id)
-    merged = (article_links + [link for link in existing if link not in article_links])[
-        :_MAX_REMEMBERED_PUSHED_LINKS
-    ]
+    pushed_links records what this subscriber has actually been sent.
+
+    `article_links` must be the links that genuinely appeared in the
+    delivered digest, NOT the candidate list -- a candidate the
+    digest-writing model judged irrelevant and left out was never seen by
+    the subscriber, so marking it as sent would silently retire an article
+    nobody read. news_push extracts these from the digest's own <a href>
+    tags for that reason.
+
+    Stored as {link: sent_at} and pruned by age, not truncated by count --
+    see PUSHED_LINK_RETENTION_HOURS."""
+    now = pushed_at if pushed_at.tzinfo else pushed_at.replace(tzinfo=timezone.utc)
+    with _connect() as conn:
+        row = conn.execute("SELECT pushed_links FROM subscribers WHERE chat_id = ?", (chat_id,)).fetchone()
+    merged = _parse_pushed_links(row[0] if row else None, now)
+    for link in article_links:
+        merged[link] = now.isoformat()
     with _connect() as conn:
         conn.execute(
             """
@@ -578,7 +626,7 @@ def list_push_enabled_subscribers() -> list[dict]:
                 "interests": json.loads(interests_json) if interests_json else [],
                 "push_interval_hours": interval_hours if interval_hours is not None else DEFAULT_PUSH_INTERVAL_HOURS,
                 "last_push_at": datetime.fromisoformat(last_push_at) if last_push_at else None,
-                "pushed_links": json.loads(pushed_links_json) if pushed_links_json else [],
+                "pushed_links": list(_parse_pushed_links(pushed_links_json)),
                 "language": language,
                 "restricted_sources_enabled": bool(restricted),
             }

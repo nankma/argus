@@ -11,7 +11,12 @@ import users_db
 from tests.fakes import FakeToolCallingModel
 
 
-def _article(link, published_dt=None, title="Some title", source="TestSource", categories=None, source_key="test"):
+# Selection keys on fetched_at (when we downloaded it), not published_dt --
+# see news_push.select_candidate_articles. fetched_at defaults to published_dt
+# so the many tests that only care about ordering stay readable; tests about
+# the delay case set them apart explicitly.
+def _article(link, published_dt=None, title="Some title", source="TestSource", categories=None,
+             source_key="test", fetched_at=None):
     return {
         "title": title,
         "link": link,
@@ -19,21 +24,95 @@ def _article(link, published_dt=None, title="Some title", source="TestSource", c
         "source_key": source_key,
         "summary": None,
         "published_dt": published_dt,
+        "fetched_at": fetched_at if fetched_at is not None else published_dt,
         "categories": categories or [],
     }
+
+
+# A fixed "now" for the age guard (MAX_ARTICLE_AGE_HOURS). Tests that use
+# dated fixtures pass this so they don't start failing as the wall clock
+# moves past the guard -- the same reason run_push_cycle takes `now`.
+NOW = datetime(2026, 8, 6, tzinfo=timezone.utc)
 
 
 # --- select_candidate_articles (stage 1: category filter) -----------------
 
 
-def test_select_candidate_articles_filters_by_published_dt():
-    since = datetime(2026, 8, 1, tzinfo=timezone.utc)
-    old = _article("https://example.com/old", published_dt=datetime(2026, 7, 1, tzinfo=timezone.utc))
-    new = _article("https://example.com/new", published_dt=datetime(2026, 8, 5, tzinfo=timezone.utc))
+def test_select_candidate_articles_ignores_dates_when_deciding_already_seen():
+    """A date ranks; it never filters. Both of these were published well
+    before the subscriber's last push, and neither has been sent -- so both
+    must come through. This is the GNews case: a source publishing ~12h
+    behind was excluded outright by the old `published_dt <= since` test,
+    stranding 227 cached articles that could never reach a digest."""
+    since = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+    old_but_unsent = _article("https://example.com/a", published_dt=NOW - timedelta(hours=30))
+    older_but_unsent = _article("https://example.com/b", published_dt=NOW - timedelta(hours=40))
 
-    result = news_push.select_candidate_articles([old, new], ["AI"], {}, since, set())
+    result = news_push.select_candidate_articles(
+        [old_but_unsent, older_but_unsent], ["AI"], {}, since, set(), now=NOW
+    )
 
-    assert [a["link"] for a in result] == ["https://example.com/new"]
+    assert [a["link"] for a in result] == ["https://example.com/a", "https://example.com/b"]
+
+
+def test_select_candidate_articles_keeps_offering_an_unsent_article():
+    """An article that lost the max_per_topic cut is not "seen" -- it stays a
+    candidate until it is actually sent or ages out of the cache. Under the
+    previous timestamp-based filter it would have been excluded forever,
+    unsent and unrecorded."""
+    articles = [
+        _article(f"https://example.com/{i}", published_dt=NOW - timedelta(hours=i))
+        for i in range(1, 6)
+    ]
+
+    first = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), max_per_topic=2, now=NOW)
+    assert [a["link"] for a in first] == ["https://example.com/1", "https://example.com/2"]
+
+    # next cycle: only what was actually sent is excluded
+    second = news_push.select_candidate_articles(
+        articles, ["AI"], {}, None, {a["link"] for a in first}, max_per_topic=2, now=NOW
+    )
+    assert [a["link"] for a in second] == ["https://example.com/3", "https://example.com/4"]
+
+
+def test_select_candidate_articles_drops_articles_older_than_the_age_guard():
+    """Guards the fetched_at rule against genuinely ancient content: Perigon's
+    one successful fetch returned 50 articles whose newest was over a year
+    old (security-plan.md finding 21). Freshly downloaded, but not news."""
+    ancient = _article(
+        "https://example.com/ancient",
+        published_dt=NOW - timedelta(days=400),
+        fetched_at=NOW,
+    )
+    recent = _article("https://example.com/recent", published_dt=NOW - timedelta(hours=2), fetched_at=NOW)
+
+    result = news_push.select_candidate_articles([ancient, recent], ["AI"], {}, None, set(), now=NOW)
+
+    assert [a["link"] for a in result] == ["https://example.com/recent"]
+
+
+def test_select_candidate_articles_keeps_articles_with_unparseable_published_dt():
+    """Fails open, same instinct as the rest of the pipeline -- an article
+    whose date didn't parse isn't assumed ancient."""
+    undated = _article("https://example.com/undated", published_dt=None, fetched_at=NOW)
+
+    result = news_push.select_candidate_articles([undated], ["AI"], {}, None, set(), now=NOW)
+
+    assert [a["link"] for a in result] == ["https://example.com/undated"]
+
+
+def test_select_candidate_articles_never_resends_a_pushed_link():
+    """already_pushed_links is now checked unconditionally, not only when the
+    date is unparseable -- so it guards every path."""
+    already_sent = _article(
+        "https://example.com/sent", published_dt=NOW - timedelta(hours=1), fetched_at=NOW
+    )
+
+    result = news_push.select_candidate_articles(
+        [already_sent], ["AI"], {}, None, {"https://example.com/sent"}, now=NOW
+    )
+
+    assert result == []
 
 
 def test_select_candidate_articles_falls_back_to_pushed_links_for_unparsed_dates():
@@ -48,9 +127,9 @@ def test_select_candidate_articles_falls_back_to_pushed_links_for_unparsed_dates
 
 
 def test_select_candidate_articles_dedupes_across_topics():
-    article = _article("https://example.com/shared", published_dt=datetime(2026, 8, 5, tzinfo=timezone.utc))
+    article = _article("https://example.com/shared", published_dt=NOW - timedelta(hours=1))
 
-    result = news_push.select_candidate_articles([article], ["AI", "robotics"], {}, None, set())
+    result = news_push.select_candidate_articles([article], ["AI", "robotics"], {}, None, set(), now=NOW)
 
     assert len(result) == 1
 
@@ -105,11 +184,11 @@ def test_select_candidate_articles_includes_restricted_sources_when_enabled():
 
 def test_select_candidate_articles_caps_per_topic():
     articles = [
-        _article(f"https://example.com/{i}", published_dt=datetime(2026, 8, i + 1, tzinfo=timezone.utc))
+        _article(f"https://example.com/{i}", published_dt=NOW - timedelta(hours=8 - i))
         for i in range(1, 8)
     ]
 
-    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), max_per_topic=3)
+    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), max_per_topic=3, now=NOW)
 
     assert len(result) == 3
     # newest-first
@@ -278,14 +357,43 @@ def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch, i
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
-    monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="<b>Digest</b>"))
+    # the digest must actually cite the article for it to count as sent
+    digest = '<b>Digest</b> 🔗 <a href="https://example.com/new">Source</a>'
+    monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value=digest))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
     send = AsyncMock()
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
 
-    send.assert_called_once_with(3, "<b>Digest</b>")
+    send.assert_called_once_with(3, digest)
     record_push.assert_called_once_with(3, ["https://example.com/new"], now)
+
+
+def test_run_push_cycle_only_records_articles_the_digest_actually_cited(
+    monkeypatch, isolated_subscribers_db
+):
+    """Stage 2 (the digest prompt) drops candidates it judges irrelevant. A
+    dropped candidate was never seen by the subscriber, so it must stay
+    eligible for a later digest rather than being retired unread."""
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(9)])
+    record_push = MagicMock()
+    monkeypatch.setattr(users_db, "record_push", record_push)
+    candidates = [
+        {**_article("https://example.com/used"), "topic": "AI"},
+        {**_article("https://example.com/dropped"), "topic": "AI"},
+    ]
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=candidates))
+    monkeypatch.setattr(
+        news_push, "write_push_digest",
+        MagicMock(return_value='📰 <a href="https://example.com/used">Only this one</a>'),
+    )
+    monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
+
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+
+    record_push.assert_called_once_with(9, ["https://example.com/used"], now)
 
 
 def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch, isolated_subscribers_db):
@@ -389,7 +497,10 @@ def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch, i
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
 
     send.assert_not_called()
-    record_push.assert_called_once_with(5, ["https://example.com/new"], now)
+    # Nothing was delivered, so nothing is recorded as seen -- the articles
+    # stay eligible for the next digest. last_push_at still advances, so the
+    # next attempt is a full interval away rather than retrying every tick.
+    record_push.assert_called_once_with(5, [], now)
 
 
 def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch, isolated_subscribers_db):
@@ -403,7 +514,8 @@ def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch, isolated_s
 
     call_count = {"n": 0}
 
-    def select_side_effect(cached_articles, topics, topic_categories, since, pushed_links, include_restricted=False):
+    def select_side_effect(cached_articles, topics, topic_categories, since, pushed_links,
+                           include_restricted=False, now=None):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("boom")

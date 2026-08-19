@@ -101,6 +101,38 @@ cycle specifically so `MAX_RESULTS_PER_SOURCE_RSS` can be tuned again
 later from real data (`docker logs`) rather than guessed at a second
 time.
 
+## Download lag per source (measured 2026-08-19)
+
+How far behind an article's own publication time we actually download it,
+measured across 2,253 cached articles by comparing `fetched_at` against
+`published_dt`. This matters more than it looks: until 2026-08-19,
+`news_push` filtered candidates on `published_dt`, so **any source with a
+real publication delay was structurally excluded from digests** no matter
+how good its content (see `news_push.select_candidate_articles`).
+
+| Source | Median download lag | Note |
+|---|---|---|
+| `hackernews` | 1.7 h | |
+| `techradar` | 2.6 h | representative of the RSS sources |
+| **`gnews`** | **12.8 h** | matches the documented 12-hour free-tier delay exactly |
+| **`arxiv`** | **12.8 h** | arXiv's own indexing lag, not a tier restriction |
+| **`newsapi`** | **32.1 h** | matches the 24–36 h free-tier delay measured 2026-08-16 |
+
+The concrete cost of the old rule: **227 GNews articles sat in the cache,
+correctly fetched and classified, with zero of them eligible for any
+digest.** Measured against the same snapshot after the fix, all 227 are
+eligible — because eligibility no longer consults a date at all. A date
+now only ranks; `already_pushed_links` alone decides what a subscriber has
+seen (see `news_push.select_candidate_articles`).
+
+Delayed sources still rarely *win* the ranking, since it is publication
+order and they are 12–32 h behind by construction. The difference is that
+they are no longer disqualified: the candidate pool drains in publication
+order, so an unsent article keeps its place until it is actually sent or
+ages out of the cache. Making delayed-but-valuable content win on merit
+rather than recency is the separate ranking question tracked in
+`docs/analysis/news-ranking-plan.md`.
+
 ## Content depth per source (investigated 2026-08-13)
 
 Prompted by a real question: besides the title, what does each source

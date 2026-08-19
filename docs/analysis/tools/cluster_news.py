@@ -42,12 +42,13 @@ def load(path):
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             p = line.rstrip("\n").split("\t")
-            if len(p) >= 3 and p[2].strip():
-                summary = p[3].strip() if len(p) > 3 else ""
+            if len(p) >= 4 and p[3].strip():
+                summary = p[4].strip() if len(p) > 4 else ""
                 rows.append({
                     "src": p[0].strip(),
                     "dt": p[1].strip(),
-                    "title": p[2].strip(),
+                    "fetched_at": p[2].strip(),
+                    "title": p[3].strip(),
                     "summary": "" if summary in ("null", "None") else summary,
                 })
     return rows

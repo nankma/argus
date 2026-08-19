@@ -39,7 +39,8 @@ fallback for sources whose date didn't parse, by checking against
 users_db's remembered pushed_links from recent pushes.
 """
 
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 
 import agent
 import guardrails
@@ -50,6 +51,23 @@ import news_sources
 import users_db
 
 MAX_ARTICLES_PER_TOPIC = 5
+
+# Ceiling on how old an article's own publication date may be to still be
+# pushed, regardless of when we downloaded it. Needed as of 2026-08-19,
+# when candidate selection switched from published_dt to fetched_at (see
+# select_candidate_articles): "new to us" is the right test for a source
+# that publishes on a delay, but on its own it would also happily push
+# genuinely ancient content. Real case that forced this: Perigon's one
+# successful fetch returned 50 articles whose NEWEST was over a year old
+# (docs/plans/security-plan.md finding 21) -- under a fetched_at-only rule
+# every one of them would have been eligible.
+#
+# 7 days is deliberately generous rather than tight. It exists to exclude
+# absurdly stale content, not to enforce freshness -- the fetched_at check
+# already does that. arXiv's own indexing runs ~3 days behind
+# (docs/current/ai-news-sources.md), and those papers are legitimately worth
+# sending, so a tighter bound would silently drop a real source.
+MAX_ARTICLE_AGE_HOURS = 168
 
 _PUSH_DIGEST_PROMPT = (
     "You are a technology industry analyst writing a periodic news digest "
@@ -98,6 +116,7 @@ def select_candidate_articles(
     already_pushed_links: set[str],
     include_restricted: bool = False,
     max_per_topic: int = MAX_ARTICLES_PER_TOPIC,
+    now: datetime | None = None,
 ) -> list[dict]:
     """Stage 1 (category filter): narrows the shared cache to one
     subscriber's candidate articles, before the digest-writing model
@@ -127,18 +146,50 @@ def select_candidate_articles(
     it," per that function's own docstring, so this is consistent with
     an existing accepted limitation, not a new one.
 
-    "New" and restricted-source gating are unchanged from the previous
-    live-fetch version of this function: published after `since` when
-    published_dt parsed, else not already in `already_pushed_links`;
-    NewsAPI/Perigon articles are skipped entirely unless
-    `include_restricted`. Cached articles are considered newest-first so
-    `max_per_topic` keeps the most recent candidates, not an arbitrary
-    filesystem-glob order."""
+    **A date is a ranking signal, never a "have they seen it" filter.**
+    Restructured 2026-08-19 around that separation:
+
+    - **Filter** -- `already_pushed_links`, and nothing else. That set is
+      the direct record of what this subscriber was actually sent, so it
+      answers the question exactly rather than approximating it.
+    - **Rank** -- `published_dt`, newest first. What a date is genuinely
+      good for.
+    - **Quality gate** -- `MAX_ARTICLE_AGE_HOURS`, which drops absurdly
+      stale articles regardless of when we downloaded them. A gate on
+      worth-sending, not on already-seen.
+
+    Why this matters, from two real failures. The original code filtered on
+    `published_dt <= since`, which structurally excluded every source with
+    a publication delay: GNews publishes ~12h behind, so for any subscriber
+    pushed more recently than that, its articles were skipped outright --
+    227 of them sat in the cache, correctly fetched and classified, and not
+    one could ever reach a digest. Switching that filter to `fetched_at`
+    fixed the delay case but kept the deeper flaw: an article that was a
+    candidate and simply lost the `max_per_topic` cut would have its
+    timestamp fall behind the next `since` and be excluded forever, unsent
+    and unrecorded.
+
+    Both failures come from the same mistake -- using a timestamp as a
+    proxy for "already seen" when the actual record exists. Anything not
+    yet sent stays a candidate until it is sent or ages out of the cache,
+    so the pool drains in publication order and nothing starves.
+
+    Restricted-source gating is unchanged: NewsAPI/Perigon articles are
+    skipped entirely unless `include_restricted`.
+
+    `since` is retained in the signature but no longer filters -- it stays
+    only because callers already pass it and removing it would be a
+    breaking change for no gain. `now` is a parameter rather than read from
+    the clock so the age guard is deterministic in tests, same convention
+    as run_push_cycle's own `now`."""
+    now = now or datetime.now(timezone.utc)
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
     ordered = sorted(
         cached_articles,
-        key=lambda a: a.get("published_dt") or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda a: a.get("published_dt") or epoch,
         reverse=True,
     )
+    max_age = timedelta(hours=MAX_ARTICLE_AGE_HOURS)
     seen_links = set()
     candidates = []
     for topic in topics:
@@ -155,11 +206,15 @@ def select_candidate_articles(
             article_cats = set(article.get("categories") or [])
             if topic_cats and not (article_cats & topic_cats):
                 continue
+            # The one and only "has this subscriber seen it" test.
+            if link in already_pushed_links:
+                continue
+            # Not already-seen, but not worth sending either if it's ancient.
+            # Articles whose published_dt didn't parse pass this guard rather
+            # than being dropped -- same fail-open instinct as the rest of
+            # the pipeline.
             published_dt = article.get("published_dt")
-            if published_dt is not None:
-                if since is not None and published_dt <= since:
-                    continue
-            elif link in already_pushed_links:
+            if published_dt is not None and now - published_dt > max_age:
                 continue
             seen_links.add(link)
             candidates.append({**article, "topic": topic})
@@ -196,6 +251,25 @@ def write_push_digest(model, articles: list[dict], language: str | None = None) 
         ]
     )
     return response.content
+
+
+_HREF_RE = re.compile(r"""href=["']([^"']+)["']""", re.IGNORECASE)
+
+
+def links_actually_sent(digest: str, candidates: list[dict]) -> list[str]:
+    """Which candidate articles genuinely appear in the delivered digest.
+
+    The digest is free-form prose the model writes from the candidate list,
+    and _PUSH_DIGEST_PROMPT explicitly tells it to omit candidates that
+    aren't relevant -- so "what we offered" and "what the subscriber saw"
+    are different sets. Only the latter should count as seen: marking an
+    omitted candidate as sent would retire an article nobody ever read.
+
+    Recovered by matching the digest's own <a href> targets against the
+    candidate links, since TREND_REPORT_STRUCTURE requires every cited item
+    to carry its source link and forbids inventing URLs."""
+    hrefs = {h.strip() for h in _HREF_RE.findall(digest or "")}
+    return [a["link"] for a in candidates if a.get("link") in hrefs]
 
 
 def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: datetime) -> bool:
@@ -273,6 +347,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                 subscriber["last_push_at"],
                 set(subscriber["pushed_links"]),
                 include_restricted=subscriber["restricted_sources_enabled"],
+                now=now,
             )
             if not new_articles:
                 # Nothing new this cycle -- still advance last_push_at so
@@ -302,15 +377,24 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
             # also model output about to be sent to a real user unread.
             if guardrails.is_output_on_topic(model, digest):
                 await send(chat_id, digest)
-                print(f"[news_push] chat_id={chat_id}: sent digest with {len(new_articles)} article(s)")
+                # Only what the subscriber actually saw is recorded as seen.
+                # A candidate the model left out stays eligible for a later
+                # digest rather than being silently retired unread -- see
+                # links_actually_sent and select_candidate_articles.
+                sent_links = links_actually_sent(digest, new_articles)
+                print(
+                    f"[news_push] chat_id={chat_id}: sent digest -- "
+                    f"{len(sent_links)} of {len(new_articles)} candidate(s) appeared in it"
+                )
             else:
+                # Blocked before delivery, so nothing was seen and nothing is
+                # recorded as seen. last_push_at still advances (below), so
+                # the next attempt is a full interval away rather than
+                # retrying every tick.
+                sent_links = []
                 print(f"[news_push] chat_id={chat_id}: digest blocked by output guardrail, not sent")
 
-            # Advance the dedup state regardless of whether the guardrail
-            # blocked the send: these articles were considered this cycle
-            # either way, and not recording them would just retry (and
-            # re-fetch) every tick until the interval naturally moves on.
-            users_db.record_push(chat_id, [a["link"] for a in new_articles], now)
+            users_db.record_push(chat_id, sent_links, now)
         except Exception as exc:
             print(f"[news_push] chat_id={chat_id}: cycle failed with {exc!r}")
             continue
