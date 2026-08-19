@@ -17,3 +17,10 @@ showcase.html
 # local-infra/infrastructure.md's own warning banner for why this exists
 # and the rules around it.
 local-infra/
+
+# analysis/ build artifacts -- regenerate with analysis/tools/ (see analysis/README.md).
+# The report is a ~700KB generated file; the snapshot is a point-in-time pull
+# from the production VM. Findings that outlive both live in
+# analysis/cluster-measurements.md.
+analysis/cluster-report.html
+analysis/data/
