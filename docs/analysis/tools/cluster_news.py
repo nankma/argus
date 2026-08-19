@@ -11,9 +11,9 @@ that package. Clustering is connected components (single-linkage) over a
 similarity threshold, which is the standard approach in the near-duplicate
 detection literature -- if A~B and B~C then A, B and C are one story.
 
-    python analysis/tools/cluster_news.py
-    python analysis/tools/cluster_news.py --detail          # show cluster contents
-    python analysis/tools/cluster_news.py --json out.json   # machine-readable
+    python docs/analysis/tools/cluster_news.py
+    python docs/analysis/tools/cluster_news.py --detail          # show cluster contents
+    python docs/analysis/tools/cluster_news.py --json out.json   # machine-readable
 
 Reads analysis/data/cache-snapshot.tsv by default (see fetch_cache_snapshot.py).
 Makes no network calls and no LLM calls -- pure local computation, free to
@@ -42,13 +42,15 @@ def load(path):
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             p = line.rstrip("\n").split("\t")
-            if len(p) >= 4 and p[3].strip():
-                summary = p[4].strip() if len(p) > 4 else ""
+            if len(p) >= 5 and p[4].strip():
+                summary = p[5].strip() if len(p) > 5 else ""
+                cats = [c for c in p[3].strip().split(",") if c]
                 rows.append({
                     "src": p[0].strip(),
                     "dt": p[1].strip(),
                     "fetched_at": p[2].strip(),
-                    "title": p[3].strip(),
+                    "categories": cats,
+                    "title": p[4].strip(),
                     "summary": "" if summary in ("null", "None") else summary,
                 })
     return rows
@@ -142,7 +144,7 @@ def show_detail(rows, sim, threshold):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--input", default="analysis/data/cache-snapshot.tsv")
+    ap.add_argument("--input", default="docs/analysis/data/cache-snapshot.tsv")
     ap.add_argument("--detail", action="store_true",
                     help="print the contents of every multi-article cluster")
     ap.add_argument("--detail-threshold", type=float, default=0.40)

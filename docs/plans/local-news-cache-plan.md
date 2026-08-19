@@ -98,6 +98,40 @@ from real data instead of guessed at a second time. A new, higher
 5 time-filterable sources, not their real limit anymore -- that's now
 "however much is genuinely new."
 
+## Item 7's unintended consequence: classification stopped working (found 2026-08-19)
+
+Raising the RSS cap from 5 to 200 grew each cycle's batch from ~100
+articles to 100-1000+. `news_classify.classify_articles` made **one
+structured-output call per cycle**, and that call fails all-or-nothing
+above roughly 110 articles -- almost certainly the response exceeding the
+model's output token limit, since it emits one entry per article.
+
+Measured from production by grouping cached articles by the tick that
+wrote them: batches of 1/60/109 were 100%/95%/96% categorized; batches of
+113/139/147/171/281/1085 were **0%**.
+
+Net effect: **92.8% of the cache (2,099 of 2,262 articles) carried no
+categories**, and `news_push.select_candidate_articles` excludes
+uncategorized articles whenever the subscriber's topic has real
+categories -- so most of the cache was invisible to most subscribers.
+
+It ran for three days undetected because `classify_articles` caught every
+exception and returned `{}` silently. The article still got cached, just
+uncategorized, which is indistinguishable from "the classifier found
+nothing that applies."
+
+**Fixed**: batches are chunked at `MAX_ARTICLES_PER_CALL = 50` (well under
+the observed cliff, since the cliff moves with prompt and model changes),
+failures now print, and a failed chunk costs one chunk rather than the
+whole cycle. See `docs/analysis/cluster-measurements.md` for the full
+measurement.
+
+**The generalizable lesson**, and the reason this is recorded rather than
+just fixed: fail-open is the right behavior here -- a classification
+hiccup should not block caching an article -- but *fail-open and silent*
+is not. The same instinct that makes the system robust made a total
+outage indistinguishable from normal operation. Fail open, but say so.
+
 ## Why this is worth doing (not just "instead of on-demand")
 
 Two things converged to motivate this, both surfaced this session:

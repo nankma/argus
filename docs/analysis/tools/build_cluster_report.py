@@ -13,8 +13,8 @@ both slower and worse. Two panels come out of the same projection:
 Panel 2 is the one that explains why content-based MMR could not fix source
 concentration (see ../news-ranking-plan.md).
 
-    python analysis/tools/build_cluster_report.py
-    python analysis/tools/build_cluster_report.py --highlight-source gnews
+    python docs/analysis/tools/build_cluster_report.py
+    python docs/analysis/tools/build_cluster_report.py --highlight-source gnews
 
 Output is a single self-contained HTML file with no external assets --
 publishable as an artifact or openable directly. It is regenerated from
@@ -71,8 +71,8 @@ def scatter_svg(points, classify, styles, label):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--input", default="analysis/data/cache-snapshot.tsv")
-    ap.add_argument("--out", default="analysis/cluster-report.html")
+    ap.add_argument("--input", default="docs/analysis/data/cache-snapshot.tsv")
+    ap.add_argument("--out", default="docs/analysis/cluster-report.html")
     ap.add_argument("--threshold", type=float, default=0.40)
     ap.add_argument("--highlight-source", default="hackernews")
     args = ap.parse_args()
@@ -328,7 +328,7 @@ TEMPLATE = """<title>News clustering: how many clusters, and how big?</title>
       industry covered at once — and nothing more. Corroboration can promote the top few
       items; it cannot rank the rest, which all score identically as uncorroborated.</p>
     <p class="foot">Regenerate with
-      <code>python analysis/tools/build_cluster_report.py</code>. All computation is local
+      <code>python docs/analysis/tools/build_cluster_report.py</code>. All computation is local
       — scikit-learn only, no API calls, no LLM calls. See
       <code>analysis/README.md</code>.</p>
   </section>

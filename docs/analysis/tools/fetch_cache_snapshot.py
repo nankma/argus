@@ -14,10 +14,10 @@ plain `grep`/`cut` inside the container rather than running a script there.
 Connection details (VM IP, SSH key path) live in local-infra/infrastructure.yaml,
 which is gitignored -- pass them as arguments rather than hardcoding.
 
-    python analysis/tools/fetch_cache_snapshot.py \
+    python docs/analysis/tools/fetch_cache_snapshot.py \
         --host ubuntu@<bot-vm-ip> \
         --key "C:/path/to/ssh-key.pri.key" \
-        --out analysis/data/cache-snapshot.tsv
+        --out docs/analysis/data/cache-snapshot.tsv
 """
 
 import argparse
@@ -27,7 +27,7 @@ import sys
 import tempfile
 
 # Runs inside the container. Emits one tab-separated line per cached article:
-#   source_key <TAB> published_dt <TAB> fetched_at <TAB> title <TAB> summary
+#   source_key <TAB> published_dt <TAB> fetched_at <TAB> categories <TAB> title <TAB> summary
 # Tabs are stripped from the fields themselves so the format can't be broken
 # by an article whose own text contains one.
 REMOTE_SCRIPT = r"""
@@ -36,9 +36,15 @@ for f in *.yaml; do
   s=$(grep -m1 '^source_key:' "$f" | cut -d' ' -f2)
   d=$(grep -m1 '^published_dt:' "$f" | cut -d' ' -f2 | tr -d "'")
   a=$(grep -m1 '^fetched_at:' "$f" | cut -d' ' -f2 | tr -d "'")
+  # `categories` is a YAML list and always the last key, written either
+  # inline ("categories: []") or as a block of "- Name" lines. Take
+  # everything from that key to EOF, join it onto one line, and reduce it
+  # to a comma-separated list.
+  c=$(sed -n '/^categories:/,$p' "$f" | tr '\n' ' ' \
+      | sed "s/^categories: *//; s/\[//g; s/\]//g; s/- */,/g; s/  */ /g; s/^ *//; s/ *$//; s/^,//")
   t=$(grep -m1 '^title:' "$f" | sed 's/^title: //' | tr -d '\t')
   u=$(grep -m1 '^summary:' "$f" | sed 's/^summary: //' | cut -c1-300 | tr -d '\t')
-  printf '%s\t%s\t%s\t%s\t%s\n' "$s" "$d" "$a" "$t" "$u"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s" "$d" "$a" "$c" "$t" "$u"
 done
 """
 
@@ -49,7 +55,7 @@ def main():
     ap.add_argument("--host", required=True, help="ssh target, e.g. ubuntu@1.2.3.4")
     ap.add_argument("--key", required=True, help="path to the SSH private key")
     ap.add_argument("--container", default="myfirstagent-bot")
-    ap.add_argument("--out", default="analysis/data/cache-snapshot.tsv")
+    ap.add_argument("--out", default="docs/analysis/data/cache-snapshot.tsv")
     args = ap.parse_args()
 
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, newline="\n") as tmp:

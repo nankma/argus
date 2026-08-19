@@ -49,7 +49,7 @@ nothing metered**. Unlike `tools/measure_guardrails.py` and
 ### 1. `fetch_cache_snapshot.py` — pull the cache off the VM
 
 ```bash
-python analysis/tools/fetch_cache_snapshot.py \
+python docs/analysis/tools/fetch_cache_snapshot.py \
     --host ubuntu@<bot-vm-ip> \
     --key "C:/Users/<you>/path/to/ssh-key.pri.key"
 ```
@@ -67,9 +67,9 @@ gitignored — read them from there, don't hardcode.
 ### 2. `cluster_news.py` — how many clusters, and how big
 
 ```bash
-python analysis/tools/cluster_news.py                 # the sweep table
-python analysis/tools/cluster_news.py --detail        # every cluster's contents
-python analysis/tools/cluster_news.py --json out.json # machine-readable
+python docs/analysis/tools/cluster_news.py                 # the sweep table
+python docs/analysis/tools/cluster_news.py --detail        # every cluster's contents
+python docs/analysis/tools/cluster_news.py --json out.json # machine-readable
 ```
 
 Clusters with both TF-IDF cosine and BM25 across a threshold sweep, and
@@ -83,8 +83,8 @@ aggregator-echo and same-source-series false positives were found.
 ### 3. `build_cluster_report.py` — the visual report
 
 ```bash
-python analysis/tools/build_cluster_report.py
-python analysis/tools/build_cluster_report.py --highlight-source gnews
+python docs/analysis/tools/build_cluster_report.py
+python docs/analysis/tools/build_cluster_report.py --highlight-source gnews
 ```
 
 Projects the cache to 2D (TF-IDF → SVD(50) → t-SNE) and writes

@@ -103,18 +103,33 @@ def classify_interests(model, interests: list[str]) -> dict[str, list[str]]:
     return {interest: result.get(i, []) for i, interest in enumerate(interests)}
 
 
-def classify_articles(model, articles: list[dict]) -> dict[int, list[str]]:
-    """Returns {index: categories} for every article in `articles` that
-    the model actually returned an entry for. Fails open on any error
-    (model call failure, malformed response) by returning {} -- callers
-    treat a missing index as "no categories assigned" and still cache the
-    article uncategorized, same fail-open reasoning as
-    guardrails.classify_message: a classification hiccup shouldn't block
-    caching the article, it should just make it harder to find via
-    category filtering until the next cycle re-fetches and reclassifies
-    it (or a human notices and investigates)."""
-    if not articles:
-        return {}
+# Articles per classification call. One call per ingestion cycle was the
+# original design and it worked while a cycle produced ~100 articles; it
+# stopped working when docs/plans/local-news-cache-plan.md item 7 raised the
+# RSS per-source cap from 5 to 200 and cycles started producing 100-1000+.
+#
+# Measured from production on 2026-08-19, by grouping cached articles by the
+# tick that wrote them:
+#
+#     batch    1  -> 100% categorized      batch  113 -> 0%
+#     batch   60  ->  95% categorized      batch  147 -> 0%
+#     batch  109  ->  96% categorized      batch 1085 -> 0%
+#
+# All-or-nothing, with the cliff somewhere just above 110. The failure is
+# almost certainly the structured-output response exceeding the model's
+# output token limit -- one entry per article, so response length scales
+# with batch size. Whatever the precise cause, the fix is the same: keep
+# each call's response small enough to complete.
+#
+# 50 is deliberately well under the observed cliff rather than just below
+# it, since the cliff will move with prompt/model changes and the cost of
+# an extra call is far lower than the cost of silently losing a batch.
+MAX_ARTICLES_PER_CALL = 50
+
+
+def _classify_one_batch(model, articles: list[dict]) -> dict[int, list[str]]:
+    """One structured-output call. Returns {} on any failure -- see
+    classify_articles for the fail-open reasoning."""
     try:
         structured = model.with_structured_output(ClassificationBatch)
         result = structured.invoke(
@@ -123,6 +138,56 @@ def classify_articles(model, articles: list[dict]) -> dict[int, list[str]]:
                 {"role": "user", "content": _format_batch(articles)},
             ]
         )
-    except Exception:
+    except Exception as exc:
+        print(f"[news_classify] batch of {len(articles)} failed: {exc!r}")
+        return {}
+    if result is None:
+        print(f"[news_classify] batch of {len(articles)} returned no result")
         return {}
     return {item.index: list(item.categories) for item in result.items}
+
+
+def classify_articles(model, articles: list[dict]) -> dict[int, list[str]]:
+    """Returns {index: categories} for every article in `articles` that the
+    model actually returned an entry for, where the index is into
+    `articles` as given.
+
+    Split into chunks of MAX_ARTICLES_PER_CALL rather than one call for the
+    whole cycle -- see that constant for the production measurement that
+    forced it. Chunking also bounds the blast radius: a failed call now
+    costs one chunk's categories instead of the entire cycle's.
+
+    Fails open on any error (model call failure, malformed response) by
+    omitting that chunk's indexes -- callers treat a missing index as "no
+    categories assigned" and still cache the article uncategorized, same
+    reasoning as guardrails.classify_message: a classification hiccup
+    shouldn't block caching the article, it should just make it harder to
+    find via category filtering until a later cycle reclassifies it.
+
+    Unlike before, a failure is now *printed*. The silent version hid a
+    real outage: every batch above ~110 articles failed for three days
+    straight, leaving 92.8% of the cache uncategorized and therefore
+    invisible to push candidate selection, with nothing in the logs to
+    show for it."""
+    if not articles:
+        return {}
+    categories: dict[int, list[str]] = {}
+    failed_chunks = 0
+    total_chunks = 0
+    for start in range(0, len(articles), MAX_ARTICLES_PER_CALL):
+        chunk = articles[start:start + MAX_ARTICLES_PER_CALL]
+        total_chunks += 1
+        result = _classify_one_batch(model, chunk)
+        if not result:
+            failed_chunks += 1
+        for local_index, cats in result.items():
+            # translate the chunk-local index the model returned back to an
+            # index into the caller's own list
+            if 0 <= local_index < len(chunk):
+                categories[start + local_index] = cats
+    if failed_chunks:
+        print(
+            f"[news_classify] {failed_chunks} of {total_chunks} chunk(s) failed -- "
+            f"{len(articles) - len(categories)} article(s) left uncategorized"
+        )
+    return categories

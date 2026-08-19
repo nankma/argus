@@ -9,7 +9,7 @@ published copy at
 <https://claude.ai/code/artifact/c8b4c66f-ce7d-480f-80b6-d6bc3bc49ef7>.
 
 The HTML is **generated, never hand-edited** — regenerate it any time with
-`python analysis/tools/build_cluster_report.py` (see [README](README.md)).
+`python docs/analysis/tools/build_cluster_report.py` (see [README](README.md)).
 It is gitignored, like `showcase.html`, because it is a 700 KB build
 artifact derived from a snapshot that goes stale within days. This file
 holds the findings that outlive it.
@@ -143,9 +143,9 @@ source.
 See [README.md](README.md). Three commands, and only the first needs the VM:
 
 ```
-python analysis/tools/fetch_cache_snapshot.py --host ubuntu@<ip> --key <key>
-python analysis/tools/cluster_news.py
-python analysis/tools/build_cluster_report.py
+python docs/analysis/tools/fetch_cache_snapshot.py --host ubuntu@<ip> --key <key>
+python docs/analysis/tools/cluster_news.py
+python docs/analysis/tools/build_cluster_report.py
 ```
 
 All computation is local — scikit-learn only, no API calls, no LLM calls,
@@ -164,3 +164,131 @@ takes about a second and peaks around 36 MB.
 - **Titles and short summaries only.** The cache does not hold full article
   text, so clustering sees roughly a headline plus up to 300 characters.
   Full text would likely find more corroboration.
+
+---
+
+# Follow-up, 2026-08-19: clustering the *filtered* set, and can clusters replace the 13 categories?
+
+Two questions raised after seeing the scatter plot, plus an outage found
+while answering them.
+
+## First: the 13 categories are not working at all
+
+Before either question could be answered honestly, this had to be
+established. Of 2,262 cached articles, **only 163 (7.2%) carry any
+category**. The other 92.8% are uncategorized — and
+`news_push.select_candidate_articles` excludes uncategorized articles
+whenever the subscriber's topic has real categories, so most of the cache
+is invisible to most subscribers.
+
+Cause, found by grouping cached articles by the ingestion tick that wrote
+them:
+
+| Batch size | Categorized |
+|---|---|
+| 1 | 100% |
+| 60 | 95% |
+| 109 | 96% |
+| **113** | **0%** |
+| 139 / 147 / 156 / 171 | **0%** |
+| 281 | **0%** |
+| 1085 | **0%** |
+
+All-or-nothing, with a cliff just above 110. `news_classify` made **one
+call per ingestion cycle**, which was fine while a cycle produced ~100
+articles and stopped being fine when `local-news-cache-plan.md` item 7
+raised the RSS per-source cap from 5 to 200 and cycles began producing
+100–1000+. The likely mechanism is the structured-output response
+exceeding the model's output token limit — one entry per article, so
+response length scales with batch size.
+
+It ran for three days without a trace, because `classify_articles` caught
+every exception and returned `{}` with no logging. **Fixed**: batches are
+chunked at `MAX_ARTICLES_PER_CALL = 50`, a failure now prints, and a
+failed chunk costs one chunk instead of the whole cycle.
+
+A second, compounding failure in the same area: several cached
+interest→category mappings are empty (`AI` → `[]`, `robotics` → `[]`,
+`Bitcoin` → `[]`, `機器人科技` → `[]`). An empty mapping is treated as
+unrestricted by design, so those subscribers match *every* article, while
+subscribers whose interests did map correctly match almost none.
+
+## Q1 — What do the filtered results cluster into?
+
+Traced for a real subscriber (interests: semiconductors, quantum
+computing, robotics):
+
+| Interest | Mapped to | Candidates |
+|---|---|---|
+| semiconductors | `Hardware` | 32 of 2,262 |
+| quantum computing | `Research`, `Hardware` | 42 of 2,262 |
+| robotics | *(empty mapping)* | **2,262 — no filtering at all** |
+
+Clustering the 32 `Hardware` articles gives **31 clusters: 30 singletons
+and one pair**. There is nothing to cluster.
+
+**The honest answer to Q1 is that the filtered set can't be meaningfully
+clustered in its current state** — not because clustering doesn't work,
+but because the filter is either returning ~1% of the cache or 100% of it.
+Worth re-running once classification is repaired and the cache has
+refilled with properly categorized articles.
+
+## Q2 — Could the visual clusters replace the 13 categories?
+
+The intuition is well-founded. Formalizing the hand-circled clumps with
+HDBSCAN over the t-SNE layout finds **~80 clusters covering 89% of
+articles**, and they are far more coherent than the hand-written
+categories when measured back in the original TF-IDF space:
+
+| | Median coherence | vs random baseline |
+|---|---|---|
+| Discovered clusters | 0.0869 | **9×** |
+| The 13 categories | 0.0241 | 3× |
+
+They also read as genuinely specific topics — `quantum computing` (47
+articles), `apple / camera / airpods` (30), `bitcoin / price / btc` (68),
+`google / pixel` (50), `data center` (41), `supply chain` (18) — where the
+hand-written set offers only `Hardware` or `Finance`. Two categories,
+`Hardware` and `Policy`, score at **1× baseline**: articles labelled with
+them are no more similar to each other than two random articles.
+
+**But they cannot be categories, for one decisive reason: they are not
+stable.** Re-running the identical pipeline on the identical data with
+only the random seed changed:
+
+| | Run A | Run B |
+|---|---|---|
+| Clusters | 77 | 84 |
+| Noise points | 255 | 213 |
+| **Adjusted Rand Index between the two groupings** | &nbsp; | **0.478** |
+
+Less than half the grouping survives a change of seed *on the same data*.
+Real data changes every four hours. A category has to be a stable
+vocabulary that a stored user interest maps onto once and keeps matching;
+"cluster 36" means something different on the next run, so there is
+nothing durable to store a preference against.
+
+Two further caveats: several clusters are **single-source artifacts** (one
+outlet's beat, not a topic — the 68-article bitcoin cluster is one
+source), and the tail includes incoherent grab-bags (a 94-article cluster
+whose top terms are `null, v0, earth, dream, transformer`).
+
+### Conclusion
+
+**Not a replacement — a complement, at a different layer.**
+
+- **Categories** stay the stable, coarse vocabulary that a *stored user
+  interest* matches against. Their job is durability across time, and
+  clusters cannot do it. What they need is to actually run (see the outage
+  above) and probably a better taxonomy — `Hardware` and `Policy` earning
+  1× baseline is evidence the current 13 are partly arbitrary.
+- **Clusters** are valuable *within a single push cycle*, where stability
+  across runs is irrelevant: grouping the current candidate set by story
+  for de-duplication, for source diversity, and for structuring the digest
+  itself. That is exactly what `news-ranking-plan.md`'s Option B needs, and
+  the 9× coherence says the signal is real.
+
+The measurement that would change this conclusion: if cluster assignments
+proved stable across *consecutive real ingestion cycles* (not just seeds),
+the durability objection weakens. Worth testing before dismissing the idea
+permanently — the coherence numbers are strong enough to justify it.
