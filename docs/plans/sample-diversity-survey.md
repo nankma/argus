@@ -106,6 +106,17 @@ Known limitation worth carrying over: **HHI ignores correlation between
 holdings.** Two "different" sources that syndicate the same wire copy are
 not two sources, and HHI would score them as if they were.
 
+> **This caveat was confirmed in our own data on 2026-08-19**, one day
+> after this survey was written — while measuring TF-IDF similarity over
+> the real cache, the two highest-scoring "cross-source" pairs turned out
+> to be Hacker News entries linking to BBC articles, carrying BBC's exact
+> headline. That is one article counted twice, not two outlets
+> corroborating each other, and it inflates precisely the source already
+> over-represented. 16 titles in the cache appear more than once for this
+> reason. See `news-ranking-plan.md`'s "aggregators aren't corroboration"
+> section. The abstract caveat became a concrete requirement: collapse
+> aggregator entries onto their origin *before* counting anything.
+
 ### Diversity indices and Hill numbers (ecology)
 
 - **Shannon index** — accounts for both richness and evenness; sensitive

@@ -279,15 +279,98 @@ The structured-output-per-criterion shape is not a stylistic preference —
 it's this project's own measured finding (`system-overview.md` Appendix
 B.1: 15/15 vs 1/15 for a compact single-score prompt variant).
 
-### Option E — Embeddings (a prerequisite decision, not a feature)
+### Option E — Text similarity: lexical, dense, or hybrid
 
-Whether to introduce sentence embeddings at all.
+Originally written as a binary "introduce sentence embeddings, yes or
+no?" **That framing was wrong**, and was corrected 2026-08-19 after the
+operator pointed out that BM25 and embeddings are complementary and
+routinely deployed together. There are three tiers here, not two options,
+and the cheapest one is available today.
 
-| | |
+**Why they're complementary, not alternatives** (this is well-established
+in IR, not a novel claim): sparse lexical methods like BM25/TF-IDF excel
+at exact matching — product codes, tickers, named entities, rare
+technical terms — but cannot handle paraphrase. Dense embeddings handle
+paraphrase and conceptual similarity but underweight exact rare-term
+matches. A further point that matters specifically here: **BM25 performs
+well out-of-domain with no training, while dense retrievers degrade on
+data unlike what they were trained on.** Standard production practice is
+to run both in parallel and fuse the ranked lists, usually with
+Reciprocal Rank Fusion (`score(d) = Σ 1/(k + rank(d))`, k≈60), which
+discards raw scores and uses rank position only — sidestepping the
+score-calibration problem that also afflicts Option D.
+
+**Tier 1 — Lexical (TF-IDF/BM25). Available today, zero new dependencies.**
+
+`scikit-learn`, `numpy` and `scipy` are **already installed** in this
+project's environment (verified 2026-08-19). TF-IDF + cosine similarity
+therefore costs nothing new at all — no download, no API, no memory
+budget conversation.
+
+**Measured on the real production cache, 2026-08-19** (2082 articles
+pulled from the live VM):
+
+| Metric | Result |
 |---|---|
-| **Unlocks** | Story clustering for Option B (title-overlap heuristics are the free-but-crude alternative), *and* semantic interest matching from Part 2 — "AAOI" or "fiber-optic components" can't be expressed in 13 categories but is expressible as a vector |
-| **Cost** | Depends entirely on local vs API. A local sentence-transformer model on a 1 GB VM is a real memory question (principle P5); an embedding API is a new recurring cost and a new dependency |
-| **Why it's listed separately** | Doing it once, properly, serves both clustering and personalization. Deciding it silently inside Option B's implementation would be the wrong way to make a decision this size |
+| Vectorize + full pairwise similarity | **0.96 s** |
+| Peak memory | **36 MB** — comfortably inside the 1 GB VM (principle P5) |
+| Vocabulary | 16,255 terms (1-2 grams) |
+| Cross-source pairs at cosine ≥ 0.45 | 13 |
+
+And it genuinely finds real same-story clusters — a sample of what it
+surfaced, unedited:
+
+- `1.00` BBC Business + Hacker News — *"The critical tech staying safe by going underground"*
+- `0.75` GNews + Hacker News — *"Google to buy Spirit Airlines business data for $10M"*
+- `0.59`/`0.54` Engadget + TechCrunch + Hacker News — Apple camera-equipped AirPods (**three** sources)
+- `0.50` Hacker News + TechCrunch — *"Etched's valuation doubles to $21B"*
+
+**Tier 2 — Dense embeddings.** Adds paraphrase matching that no lexical
+method can do (two outlets describing the same event in entirely
+different words), and unlocks the semantic interest matching from Part 2.
+Still a real decision: a local sentence-transformer on a 1 GB VM is a
+genuine memory question, and an embedding API is new recurring cost plus
+a new dependency in the ingestion path.
+
+**Tier 3 — Hybrid, fused with RRF.** The production-standard answer, and
+the right end state. Only worth building once Tier 2 exists, since Tier 1
+alone has nothing to fuse with.
+
+**The revised recommendation for this option**: build Tier 1 now — it is
+effectively free, it is measured working on this project's own real data,
+and it unblocks Option B's clustering immediately. Treat Tier 2 as a
+separate, later decision informed by *where Tier 1 actually fails* (which
+we'll be able to see, rather than predict), and Tier 3 as the end state
+after that.
+
+### A real trap found while measuring Tier 1 — aggregators aren't corroboration
+
+The two highest-scoring pairs above (`1.00`, BBC + HN) are **the same
+article surfaced twice**, not two outlets independently covering a story:
+Hacker News is an aggregator, so an HN entry linking to a BBC piece
+carries BBC's exact headline. Counting that as "2 sources corroborated
+this" would be straightforwardly wrong, and it would systematically
+inflate exactly the source that is already over-represented (see the
+source-collapse incident above).
+
+Confirmed in the cache: **16 titles appear more than once**, which the
+existing dedup can't catch because `news_cache` deduplicates by link
+hash, and HN's link differs from BBC's.
+
+This is the concrete instance of a caveat the companion survey
+(`sample-diversity-survey.md`) flags in the abstract — HHI and similar
+concentration measures assume the units being counted are independent,
+and syndicated or aggregated content violates that. **Any corroboration
+count in Option B must first collapse aggregator entries onto their
+origin**, or it will measure the wrong thing. Worth knowing now rather
+than discovering it in a digest.
+
+**A second finding, on how much signal is actually there**: only 13
+cross-source pairs among 2082 articles cleared the threshold. Corroboration
+is a **sparse** signal at this volume — real and usable, but it will score
+the vast majority of articles identically (uncorroborated), so Option B
+cannot be the *only* ranking signal. It separates the top handful from
+the rest; something else still has to order the rest.
 
 ### What is deliberately not recommended
 
@@ -301,10 +384,17 @@ Whether to introduce sentence embeddings at all.
 
 ### If a single path has to be picked
 
-**A now, E decided next, then B, then C.** D last and only if B+C prove
-insufficient — it's the only option with recurring cost, and this
-project's own history (Appendix B.1) is a direct lesson that the
-plausible-sounding upgrade has to be measured before it's trusted.
+**A now, E-Tier-1 now (it's free and measured working), then B, then C.**
+D last and only if B+C prove insufficient — it's the only option with
+recurring cost, and this project's own history (Appendix B.1) is a direct
+lesson that the plausible-sounding upgrade has to be measured before it's
+trusted. E-Tier-2 (dense embeddings) becomes a separate decision informed
+by where Tier 1 measurably falls short, rather than one made up front.
+
+Revised 2026-08-19: the original ordering had "decide E" as a blocking
+gate before B, on the assumption that E meant an expensive
+embeddings commitment. Splitting E into tiers removes that gate — the
+lexical tier is free, already possible, and enough to unblock B.
 
 But the 2-day observation window is the right immediate move regardless:
 it costs nothing and it tells us whether source collapse is actually
