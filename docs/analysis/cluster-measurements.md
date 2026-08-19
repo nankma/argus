@@ -292,3 +292,89 @@ The measurement that would change this conclusion: if cluster assignments
 proved stable across *consecutive real ingestion cycles* (not just seeds),
 the durability objection weakens. Worth testing before dismissing the idea
 permanently — the coherence numbers are strong enough to justify it.
+
+---
+
+# Follow-up, 2026-08-19: picking an embedding backend, and whether it fits the VM
+
+Everything above used TF-IDF as a stand-in for "embeddings", because the
+project had no embedding model. That stand-in is what produced the two
+headline failures — word-attractor clusters, and a degenerate distance
+metric where 1,382 of 2,257 candidate articles tied at exactly zero
+distance from the selected set. So before designing anything on top of
+clusters, the question is which backend to actually use.
+
+Measured with `docs/analysis/tools/bench_embeddings.py` on the same 2,262
+article snapshot. Each backend runs in its **own process** — RSS is
+process-wide and `del` + `gc.collect()` does not return pages to the OS,
+so measuring them in one process credits whichever runs last with
+everything before it. The first version of that script did exactly that
+and reported fastembed at +1,077 MB.
+
+## The numbers
+
+| backend | dim | disk | RSS peak | docs/s | separation | med max-sim | exact zeros |
+|---|---|---|---|---|---|---|---|
+| TF-IDF (incumbent) | 4494 | 0 MB | **9 MB** | 43281 | **−0.101** | 0.0000 | 1382/2257 |
+| model2vec potion-base-8M | 256 | 8 MB | **80 MB** | 22145 | +0.155 | 0.2349 | 6/2257 |
+| fastembed bge-small (ONNX) | 384 | 54 MB | 855 MB | 8 | +0.195 | 0.5853 | 0/2257 |
+| sentence-transformers MiniLM-L6 | 384 | 634 MB | 416 MB | 129 | **+0.299** | 0.1752 | 11/2257 |
+
+**"Separation"** is the gap between the lowest-scoring pair that *should*
+match and the highest-scoring pair that shouldn't, across four probes.
+Absolute cosine values are not comparable across backends — each model
+family has its own similarity floor, and BGE scores everything high — so
+the gap is the comparable quantity.
+
+**TF-IDF's separation is negative.** Its false positive (two articles
+sharing only the word "google", 0.101) outscores a true match (same topic,
+different vocabulary, 0.000). On this task TF-IDF is not merely weak, it
+is anti-correlated. That is the single most useful number here: it retires
+the "maybe TF-IDF is good enough" option outright.
+
+## Does it fit the bot VM?
+
+Measured on the live box: `VM.Standard.E2.1.Micro`, 954 MB total, **420 MB
+available** with `myfirstagent-bot` already resident at 184 MB, 1 OCPU,
+x86_64, 33 GB free disk, 1 GB swap of which 240 MB is already in use.
+
+| backend | verdict |
+|---|---|
+| model2vec | **fits** — 80 MB, 340 MB headroom |
+| sentence-transformers | **does not fit in practice** — 416 MB peak against 420 MB available is 4 MB of headroom, plus 634 MB added to the Docker image |
+| fastembed | **does not fit** — over by 435 MB, and 8 docs/s makes it moot anyway |
+
+Disk is not the constraint. Peak RSS is.
+
+## Frozen-taxonomy quality on dense vectors
+
+Rerun of the frozen-taxonomy experiment (build clusters on the older 60%,
+assign the unseen newer 40%) with each backend:
+
+| backend | clusters | coverage, all | coverage, pruned | median best-match vs random |
+|---|---|---|---|---|
+| TF-IDF | 55 | 82.5% | **43.3%** | 0.216 vs 0.006 |
+| model2vec | 35 | 89.4% | **80.8%** | 0.446 vs 0.186 |
+| sentence-transformers | 36 | 86.0% | **75.8%** | 0.449 vs 0.143 |
+
+The pruning column is the important one. TF-IDF needed aggressive pruning
+because half its clusters were word-attractors, and pruning cost it 39
+points of coverage while contamination survived anyway. Dense vectors
+produce fewer junk clusters to begin with (35–36 rather than 55, worst
+coherence 1.5× baseline rather than near-random), so pruning costs 9–10
+points instead of 39.
+
+The specific failure case is fixed in both: "EmbeddingGemma, Google's new
+efficient embedding model" no longer lands in a Spirit Airlines cluster.
+
+At tight thresholds sentence-transformers pulls ahead (32.6% vs 20.2% at
+sim ≥ 0.50), which is consistent with its better separation. model2vec
+buys ~85% of the useful behaviour for 19% of the RAM, no torch dependency,
+and 87× faster encoding (0.2 s vs 17.4 s for the full corpus).
+
+## Reproducing
+
+```powershell
+conda activate myfirstagent
+python docs/analysis/tools/bench_embeddings.py
+```
