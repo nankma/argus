@@ -292,3 +292,58 @@ def test_traced_fetch_passes_query_and_max_results_through():
     news_sources.traced_fetch("hackernews", fake_fetch, "robotics", 7)
 
     assert captured == {"query": "robotics", "max_results": 7}
+
+
+def test_redact_strips_api_keys_from_error_text():
+    # Real incident, 2026-08-19: GNews's and Perigon's live keys were found in
+    # plaintext in `docker logs`, because requests puts the full request URL
+    # into an HTTPError message and news_ingest.py logs the exception. These
+    # are the exact two shapes that leaked, with fake key values.
+    gnews = ("400 Client Error: Bad Request for url: https://gnews.io/api/v4/search"
+             "?q=Edge+AI&lang=en&max=50&apikey=DEADBEEFCAFE1234&from=2026-08-19T01%3A18%3A39Z")
+    perigon = ("403 Client Error: Forbidden for url: https://api.perigon.io/v1/all"
+               "?q=quantum&size=50&apiKey=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+    assert "DEADBEEFCAFE1234" not in news_sources._redact(gnews)
+    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" not in news_sources._redact(perigon)
+    # the non-secret parts stay, so the message is still diagnosable
+    assert "q=Edge+AI" in news_sources._redact(gnews)
+    assert "400 Client Error" in news_sources._redact(gnews)
+
+
+def test_raise_for_status_redacts_the_key(requests_mock, monkeypatch):
+    monkeypatch.setenv("GNEWS_API_KEY", "SUPERSECRETKEY123")
+    requests_mock.get("https://gnews.io/api/v4/search", status_code=403, json={})
+
+    try:
+        news_sources.fetch_gnews("AI", 5)
+        assert False, "expected the 403 to propagate"
+    except Exception as exc:
+        assert "SUPERSECRETKEY123" not in str(exc), f"key leaked into: {exc}"
+        assert "403" in str(exc)
+
+
+def test_traced_fetch_redacts_the_key_before_it_reaches_telemetry(monkeypatch):
+    # traced_fetch's span attribute is shipped to Phoenix and retained 30 days,
+    # so it is the last point the value could escape the process.
+    recorded = {}
+
+    class FakeSpan:
+        def set_attribute(self, k, v):
+            recorded[k] = v
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(news_sources._tracer, "start_as_current_span", lambda name: FakeSpan())
+
+    def failing(query, max_results):
+        raise RuntimeError("401 for url: https://x/y?apiKey=LEAKYVALUE999")
+
+    try:
+        news_sources.traced_fetch("gnews", failing, "AI", 5)
+    except RuntimeError:
+        pass
+    assert "LEAKYVALUE999" not in recorded.get("error", "")
+    assert "<redacted>" in recorded.get("error", "")

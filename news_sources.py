@@ -37,6 +37,35 @@ _USER_AGENT = "Mozilla/5.0 (compatible; ArgusNewsBot/1.0; +https://github.com/na
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 
 
+# Query-string parameters whose value is a credential. requests puts the full
+# request URL into an HTTPError's message, and news_ingest.py logs that
+# exception straight to stdout -- i.e. into `docker logs`, unredacted, on
+# every failed fetch.
+#
+# Real incident, 2026-08-19: a routine check of the ingestion logs surfaced
+# GNews's and Perigon's live API keys in plaintext, from a 400 and a 403
+# respectively. Not a one-off mistake -- systematic, and it had been
+# happening on every error since these sources were added. Both keys were
+# rotated. traced_fetch's OpenTelemetry span carried the same value into
+# Phoenix.
+_SECRET_QUERY_PARAM_RE = re.compile(r"((?:api[-_]?key|apikey|token)=)[^&\s]+", re.IGNORECASE)
+
+
+def _redact(text: object) -> str:
+    """Strips credential values out of anything about to be logged."""
+    return _SECRET_QUERY_PARAM_RE.sub(r"\1<redacted>", str(text))
+
+
+def _raise_for_status(resp: requests.Response) -> None:
+    """requests.raise_for_status() with the credential stripped from the
+    error message. Use this instead of resp.raise_for_status() for any
+    source whose auth travels in the query string."""
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        raise requests.HTTPError(_redact(exc)) from None
+
+
 def _parse_iso_published(raw: str | None) -> datetime | None:
     """For sources that give an ISO-8601-ish string (HN's created_at,
     NewsAPI/GNews/Perigon's publishedAt/pubDate).
@@ -317,7 +346,7 @@ def fetch_newsapi(query: str, max_results: int = 5) -> list[dict]:
         },
         timeout=10,
     )
-    resp.raise_for_status()
+    _raise_for_status(resp)
     return [
         {
             "title": a.get("title"),
@@ -346,7 +375,7 @@ def fetch_gnews(query: str, max_results: int = 5, since: datetime | None = None)
         params=params,
         timeout=10,
     )
-    resp.raise_for_status()
+    _raise_for_status(resp)
     return [
         {
             "title": a.get("title"),
@@ -366,7 +395,7 @@ def fetch_perigon(query: str, max_results: int = 5) -> list[dict]:
         params={"q": query, "size": max_results, "apiKey": os.environ["PERIGON_API_KEY"]},
         timeout=10,
     )
-    resp.raise_for_status()
+    _raise_for_status(resp)
     return [
         {
             "title": a.get("title"),
@@ -488,7 +517,13 @@ def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int)
         try:
             articles = fetch(query, max_results)
         except Exception as exc:
-            span.set_attribute("error", str(exc))
+            # Redacted for the same reason as _raise_for_status: a fetch
+            # error's text can carry the request URL, and this attribute is
+            # shipped to Phoenix and retained for 30 days. Belt-and-braces --
+            # _raise_for_status already strips it at the source for the
+            # key-gated fetchers, but this is the last point before the value
+            # leaves the process.
+            span.set_attribute("error", _redact(exc))
             span.set_attribute("article_count", 0)
             raise
         span.set_attribute("article_count", len(articles))

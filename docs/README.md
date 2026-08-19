@@ -3,12 +3,12 @@
 Three kinds of document, each answering a different question — this
 index exists so it's clear which is which at a glance.
 
-> Research and measurement lives **outside this folder**, in
-> [`analysis/`](../analysis/README.md) — the news-ranking survey, the
-> cross-domain sample-diversity survey, the measured cluster numbers, and
-> the scripts that produce them. The split is deliberate: `docs/` records
-> what we decided and built; `analysis/` records what we measured and what
-> the literature says, most of which will never become code.
+> A fourth kind lives in [`docs/analysis/`](analysis/README.md) — research
+> and measurement: the news-ranking survey, the cross-domain
+> sample-diversity survey, the measured cluster numbers, and the scripts
+> that produce them. The split from `plans/` is deliberate: `plans/`
+> records what we decided and built; `analysis/` records what we measured
+> and what the literature says, most of which will never become code.
 
 ## `docs/` (top level) — kept at a stable path, linked externally
 

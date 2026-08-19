@@ -36,6 +36,7 @@ limiting** (finding 3) — worth fixing, not an active exploit today.
 | 17 | Phoenix telemetry access control | Resolved | **Done and verified live** — native auth, network isolation, Vault-stored API key, see below |
 | 18 | Docs written under a private-repo assumption, published unreviewed | Resolved | **Caught before the public push** — VM IPs and key paths redacted, see below |
 | 19 | Assistant tool-call leaked `DEEPSEEK_API_KEY` into session output | Resolved | **Rotated same-day** — new key, new OCI Vault secret version, verified live, old key revoked — see below |
+| 20 | News-source API keys logged in plaintext on every failed fetch | **High** | **Code fixed; keys need rotating** — GNews + Perigon keys found in `docker logs`, see below |
 
 ## Findings
 
@@ -591,6 +592,77 @@ actual key value stored in either that file or here.
 `${VAR:+...}${VAR:-...}` to test "is this set" — use `test -n "$VAR"` (or
 PowerShell's `if ($env:VAR)`), which reports presence without ever
 expanding to the value itself.
+
+### 20. News-source API keys written to logs on every failed fetch
+
+**Found 2026-08-19**, while investigating an unrelated question (why GNews
+and Perigon articles weren't reaching digests). Reading `docker logs` for
+the ingestion job surfaced both providers' live API keys in plaintext:
+
+```
+[news_ingest] gnews: fetch(...) failed with HTTPError('400 Client Error: Bad Request
+  for url: https://gnews.io/api/v4/search?q=...&apikey=<the real key>&from=...')
+[news_ingest] perigon: fetch(...) failed with HTTPError('403 Client Error: Forbidden
+  for url: https://api.perigon.io/v1/all?q=...&apiKey=<the real key>')
+```
+
+**Mechanism.** All three key-gated sources authenticate with the key as a
+**query-string parameter**, not a header. `requests` embeds the full request
+URL in an `HTTPError`'s message, and `news_ingest.py` logs the exception
+directly (`print(f"... failed with {exc!r}")`). So every 4xx/5xx from these
+sources wrote the credential to stdout, which `docker logs` retains.
+
+**Worse than the one-off in finding 19.** That was a single mistaken shell
+command. This was **systematic and long-standing** — it had been happening
+on every failed fetch since these sources were added, and Perigon has been
+returning 403 on every attempt (see below), so it recurred on a schedule.
+`news_sources.traced_fetch` also copied the same string into an
+OpenTelemetry span attribute, shipping it to Phoenix with 30-day retention.
+
+**Why nothing caught it.** The project's secret-scanning practice
+(finding 8) checks *files being committed*. No key was ever in a file — it
+was constructed at runtime from an env var, correctly fetched from OCI
+Vault, and only became plaintext inside an error message. **The whole
+Vault design (finding 2) was working exactly as intended and was bypassed
+downstream of itself.** Worth generalizing: protecting a secret at rest
+says nothing about what happens to it in an error path.
+
+**Fixed in code.** `news_sources._redact()` strips
+`apikey=`/`api_key=`/`token=` values, applied at two points:
+
+- `_raise_for_status()` — replaces `resp.raise_for_status()` in
+  `fetch_newsapi`/`fetch_gnews`/`fetch_perigon`, so the exception never
+  carries the key in the first place.
+- `traced_fetch`'s span attribute — the last point before the value leaves
+  the process, redacted as belt-and-braces.
+
+Verified against the two exact strings that leaked (with fake key values),
+plus regression tests in `tests/test_news_sources.py` asserting the key is
+absent from both the raised exception and the telemetry attribute.
+
+**Still outstanding: rotate both keys.** The code fix stops future leaks;
+it does not un-log what has already been written. Both keys are in this
+VM's `docker logs` history and were surfaced into a chat transcript.
+GNews: <https://gnews.io/dashboard>. Perigon: its own console. Rotating
+Perigon is needed regardless — see the 403 in finding 21 below.
+
+### 21. Perigon has been failing every request (403) and NewsAPI is near-dead
+
+Not a security finding, recorded here because it was found in the same
+investigation and the fix overlaps with rotating the key above.
+
+- **Perigon**: every fetch returns `403 Forbidden`. **0 articles in the
+  cache.** The key is invalid, expired, or the free tier was revoked.
+- **NewsAPI**: 1 article cached, 69 h behind the freshest article. It is
+  pulled once per 24 h and its free tier delays articles 24–36 h
+  (measured 2026-08-16), so it contributes almost nothing.
+
+Both are in `news_sources.RESTRICTED_SOURCES`, so they are excluded from
+non-admin digests by design anyway — meaning this had no subscriber-visible
+effect and would have gone unnoticed indefinitely. See
+`docs/analysis/news-ranking-plan.md` for the related finding that GNews's
+197 cached articles are also invisible to digests, for a completely
+different reason.
 
 ## Remaining work
 

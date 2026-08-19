@@ -31,10 +31,10 @@ repo:
 
 | Referenced as | Actually at |
 |---|---|
-| `system-overview.md` | [`docs/system-overview.md`](../docs/system-overview.md) — architecture, and Appendix B.1's measurement discipline |
-| `ai-news-sources.md` | [`docs/current/ai-news-sources.md`](../docs/current/ai-news-sources.md) — the source registry and per-source classes |
-| `local-news-cache-plan.md` | [`docs/plans/local-news-cache-plan.md`](../docs/plans/local-news-cache-plan.md) — the cache, and the cap raise that exposed source collapse |
-| `model-portability-plan.md` | [`docs/plans/model-portability-plan.md`](../docs/plans/model-portability-plan.md) — the "measure before shipping" precedent |
+| `system-overview.md` | [`docs/system-overview.md`](../system-overview.md) — architecture, and Appendix B.1's measurement discipline |
+| `ai-news-sources.md` | [`docs/current/ai-news-sources.md`](../current/ai-news-sources.md) — the source registry and per-source classes |
+| `local-news-cache-plan.md` | [`docs/plans/local-news-cache-plan.md`](../plans/local-news-cache-plan.md) — the cache, and the cap raise that exposed source collapse |
+| `model-portability-plan.md` | [`docs/plans/model-portability-plan.md`](../plans/model-portability-plan.md) — the "measure before shipping" precedent |
 
 ## Tools
 
