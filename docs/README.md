@@ -19,6 +19,11 @@ did exactly that.
 
 ## `docs/plans/` — what we decided, what's done, what's still open
 
+Two of these (`news-ranking-plan.md`, `sample-diversity-survey.md`) also
+have a Chinese translation alongside them as `*.zh.md` — the only
+translated docs in this repo. Keep each pair in sync; a translation that
+drifts from its original is worse than no translation.
+
 Carries history and reasoning, not just current state. Each has its own
 Status table.
 
@@ -33,7 +38,8 @@ Status table.
 | `local-news-cache-plan.md` | Periodic ingestion + local cache, two-stage filtering |
 | `model-portability-plan.md` | Swapping/routing LLM models, the guardrail-measurement harness |
 | `multi-channel-plan.md` | Adding LINE — on hold |
-| `news-ranking-plan.md` | How to score news importance and size a digest by it — survey + options, not built. Also carries the 2026-08-18 source-collapse diagnosis. Chinese translation alongside it as `news-ranking-plan.zh.md` (the only translated doc in this repo — keep the pair in sync) |
+| `news-ranking-plan.md` | How to score news importance and size a digest by it — survey + options, not built. Also carries the 2026-08-18 source-collapse diagnosis |
+| `sample-diversity-survey.md` | How other fields (statistics, ecology, finance, clinical trials, astronomy, genomics, IR/ML, search) handle an over-concentrated sample — companion to the above |
 | `security-plan.md` | The numbered security findings and their status |
 | `telemetry-and-testing-plan.md` | Test infrastructure, CI, Phoenix, what's covered vs. not |
 
