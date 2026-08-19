@@ -33,6 +33,7 @@ Status table.
 | `local-news-cache-plan.md` | Periodic ingestion + local cache, two-stage filtering |
 | `model-portability-plan.md` | Swapping/routing LLM models, the guardrail-measurement harness |
 | `multi-channel-plan.md` | Adding LINE — on hold |
+| `news-ranking-plan.md` | How to score news importance and size a digest by it — survey + options, not built. Also carries the 2026-08-18 source-collapse diagnosis. Chinese translation alongside it as `news-ranking-plan.zh.md` (the only translated doc in this repo — keep the pair in sync) |
 | `security-plan.md` | The numbered security findings and their status |
 | `telemetry-and-testing-plan.md` | Test infrastructure, CI, Phoenix, what's covered vs. not |
 
