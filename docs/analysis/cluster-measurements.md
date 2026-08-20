@@ -584,7 +584,7 @@ fraction is inside the bucket we pulled? A later fine step can fix
 precision; nothing downstream can recover an article the coarse pull never
 returned.
 
-Measured with `docs/analysis/tools/test_routing.py`, model2vec, against
+Measured with `docs/analysis/tools/measure_routing.py`, model2vec, against
 keyword ground truth for real subscriber interests taken from the live DB.
 
 ## Bucket routing does not work
@@ -715,7 +715,7 @@ both were measured:
   each category's members are whatever kNN returns for its name. No
   clustering in the path.
 
-Measured with `docs/analysis/tools/test_merged_categories.py`, merging the
+Measured with `docs/analysis/tools/measure_merged_categories.py`, merging the
 36 model2vec clusters into 8 categories.
 
 ## Merging fixes exactly one of the three failure modes
@@ -807,7 +807,7 @@ precision:
              already selected
 
 Re-measured with nearest-centroid assignment
-(`docs/analysis/tools/test_full_partition.py`):
+(`docs/analysis/tools/measure_full_partition.py`):
 
 | assignment policy | coverage | "Other" |
 |---|---|---|

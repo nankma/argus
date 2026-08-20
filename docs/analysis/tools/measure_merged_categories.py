@@ -12,11 +12,11 @@ in opposite directions:
      each category's members are whatever kNN/BM25 retrieves for its name.
      No clustering in the path at all.
 
-The measurement that matters is the same as in test_routing.py: COARSE
+The measurement that matters is the same as in measure_routing.py: COARSE
 RECALL against a subscriber interest. A later fine step fixes precision;
 nothing recovers an article the coarse step never returned.
 
-The prediction going in, from test_routing.py's three failure modes, is
+The prediction going in, from measure_routing.py's three failure modes, is
 that merging fixes exactly one of them:
 
   - fragmentation (relevant articles split across sibling clusters) --
@@ -29,7 +29,7 @@ So merging should raise recall for topics that were split, and leave the
 ceiling exactly where it was. This script checks whether that is what
 actually happens, and what it costs in precision.
 
-    python docs/analysis/tools/test_merged_categories.py
+    python docs/analysis/tools/measure_merged_categories.py
 """
 
 import os

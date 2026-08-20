@@ -26,7 +26,7 @@ The ceiling on recall is coverage: an article HDBSCAN left as noise, or
 that the coherence prune dropped, is in no bucket at all and is
 unreachable by any routing.
 
-    python docs/analysis/tools/test_routing.py --backend model2vec
+    python docs/analysis/tools/measure_routing.py --backend model2vec
 """
 
 import argparse

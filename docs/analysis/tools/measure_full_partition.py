@@ -25,7 +25,7 @@ This script measures the difference, and also the multi-label variant
 (assign to every category above a threshold, since one article genuinely
 belongs to several -- a ChatGPT story is AI and Software and Industry).
 
-    python docs/analysis/tools/test_full_partition.py
+    python docs/analysis/tools/measure_full_partition.py
 """
 
 import os
