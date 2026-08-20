@@ -329,16 +329,31 @@ CREATE TABLE IF NOT EXISTS interest_categories (
     interest        TEXT PRIMARY KEY,   -- normalized; see below
     display_text    TEXT NOT NULL,      -- as the subscriber typed it
     categories      TEXT NOT NULL,      -- JSON list of category names
-    status          TEXT NOT NULL,      -- 'mapped' | 'pending' | 'failed'
+    mapping_status  TEXT NOT NULL,      -- 'mapped' | 'failed'
     computed_at     TEXT NOT NULL,
-    taxonomy_version INTEGER NOT NULL   -- bumped on any category change
+    taxonomy_version INTEGER NOT NULL   -- taxonomy generation this was computed against
 );
 ```
 
-**`status` exists because "no categories" has two meanings**, and
+**The column is `mapping_status`, not `status`, and it deliberately has no
+"pending" value.** An earlier draft used `pending`, which collides with the
+`categories` table's own `status` in the same design: there, `proposed`
+means *waiting for an admin to approve*. Two `status` columns in one
+system where "pending" means "awaiting approval" in one and "not yet
+computed" in the other is a trap for whoever reads this next. The
+categories table's status is about **approval**; this one is about
+**computation**, and the names should not be confusable.
+
+**Staleness is derived, not stored.** A mapping is stale when
+`taxonomy_version < ` the current taxonomy generation. That needs no
+status value of its own, and it keeps "we have a usable answer that may be
+incomplete" distinct from "we have no answer" — which is the distinction
+the lazy recompute below depends on.
+
+**`mapping_status` exists because "no categories" has two meanings**, and
 conflating them is precisely the 2026-08-20 bug. `mapped` with an empty
 list means the model looked and nothing applied — a real answer.
-`pending`/`failed` means we don't know yet. `select_candidate_articles`
+`failed` means we don't know. `select_candidate_articles`
 treats an empty mapping as unrestricted (matches every article), which is
 the right fail-open behaviour for a genuine empty but is dangerous for an
 unknown, so the two must be distinguishable at the point of use.
@@ -363,6 +378,52 @@ primary key should be a normalized form (casefolded, trimmed) with
 `display_text` preserving the original. `users_db._is_duplicate_topic`
 already does fuzzy matching for the interest list itself and is the
 natural place to align this with.
+
+#### TODO: make the re-map lazy once the subscriber count grows
+
+**Not now — deliberately.** Activating a category currently re-maps every
+interest eagerly, in one batched call. With 8 interest rows that is a
+single call and the simplest thing that works.
+
+It stops being right as subscribers grow, for three reasons, none of
+which is about raw cost:
+
+1. **It recomputes for subscribers who will never be pushed to.** Someone
+   who turned push off still has interests in the table. Re-mapping them
+   on every category change is work whose result nobody reads.
+2. **It recomputes once per change, not once per read.** A category
+   activated and then retired an hour later — because the admin
+   reconsidered, or it turned out to duplicate an existing one — triggers
+   two full re-maps, and the second undoes the first. Nobody was pushed to
+   in between.
+3. **It puts a variable, unbounded cost inside an admin's button press.**
+   "Activate" should not get slower as the subscriber list grows.
+
+The lazy form: **Activate bumps the taxonomy generation and writes
+nothing else.** Every existing mapping is then stale by the
+`taxonomy_version` comparison, costing one integer write instead of N
+model calls. The push cycle recomputes a stale mapping only for the
+subscribers it is about to push to, and skips the work entirely when the
+generation hasn't moved.
+
+**This does not contradict Rule 1**, and the difference is worth being
+precise about, because it looks like a contradiction. Rule 1 is about an
+interest the subscriber has *just typed*: there is no answer at all, the
+subscriber is present, and a failure is both actionable and worth
+reporting. The lazy path is about *re-computing an existing mapping* after
+a system-initiated taxonomy change: an answer already exists and is still
+usable, merely possibly missing a brand-new category. It fails soft — the
+worst case is that a subscriber doesn't see articles in a category created
+minutes ago, for one cycle.
+
+That is exactly why staleness is derived from `taxonomy_version` rather
+than being a `mapping_status` value. "Stale" and "failed" must not be
+handled alike: a stale mapping is used as-is until it is refreshed, while
+a failed one has no answer to use and must not be treated as
+unrestricted.
+
+Trigger for doing this: when re-mapping on activate stops being a single
+batched call, or when an admin notices "Activate" is slow.
 
 #### Failure at write time
 
