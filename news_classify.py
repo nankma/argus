@@ -38,11 +38,24 @@ Category = Literal[
 ]
 
 CATEGORIES: list[str] = list(Category.__args__)
+_CATEGORY_SET: frozenset[str] = frozenset(CATEGORIES)
 
 
 class ArticleCategories(BaseModel):
     index: int
-    categories: list[Category]
+    # Deliberately list[str], not list[Category]. A Literal here makes the
+    # whole batch fail validation when the model returns one label outside
+    # the taxonomy, discarding every correctly-classified article alongside
+    # it. That happened in production on 2026-08-20: the model answered
+    # "Education" for a single article and pydantic rejected the entire
+    # 50-article ClassificationBatch, losing 49 good classifications.
+    #
+    # An LLM occasionally inventing a plausible label is ordinary behaviour,
+    # not an exceptional condition, so unknown labels get filtered out after
+    # parsing (see _valid_categories) rather than being allowed to fail the
+    # request. The prompt still lists the 13 categories, so the model is
+    # still aimed at them; this only changes what happens when it misses.
+    categories: list[str]
 
 
 class ClassificationBatch(BaseModel):
@@ -144,7 +157,33 @@ def _classify_one_batch(model, articles: list[dict]) -> dict[int, list[str]]:
     if result is None:
         print(f"[news_classify] batch of {len(articles)} returned no result")
         return {}
-    return {item.index: list(item.categories) for item in result.items}
+    return _valid_categories(result)
+
+
+def _valid_categories(result: ClassificationBatch) -> dict[int, list[str]]:
+    """Drops labels the model invented that aren't in the taxonomy, keeping
+    everything else. An article left with no valid labels keeps an empty
+    list -- same as the model saying nothing applies.
+
+    Rejected labels are logged rather than silently discarded, because they
+    are useful signal in their own right: a label the model keeps reaching
+    for is a gap in the taxonomy. "Education" is what surfaced this, and the
+    13 categories in Category are explicitly a v1 (see the module docstring)
+    meant to be revised against real classified data."""
+    categories: dict[int, list[str]] = {}
+    rejected: set[str] = set()
+    for item in result.items:
+        kept = []
+        for name in item.categories:
+            if name in _CATEGORY_SET:
+                kept.append(name)
+            else:
+                rejected.add(name)
+        categories[item.index] = kept
+    if rejected:
+        print(f"[news_classify] dropped {len(rejected)} label(s) outside the "
+              f"taxonomy: {', '.join(sorted(rejected))}")
+    return categories
 
 
 def classify_articles(model, articles: list[dict]) -> dict[int, list[str]]:
