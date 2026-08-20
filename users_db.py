@@ -285,8 +285,14 @@ def get_active_categories() -> list[tuple[str, str]]:
 
 def resolve_category_name(name: str) -> str | None:
     """Follows `merged_into` so a name stored on an article cached before a
-    merge still resolves to the surviving category. Returns None for a name
-    that isn't in the taxonomy at all."""
+    merge still resolves to the surviving category.
+
+    Returns None for a name that isn't in the taxonomy, and also for a
+    merge cycle -- which should be impossible, since a merge targets an
+    active category and an active category has no merged_into. If one
+    exists the data is corrupt, so it is logged rather than sharing the
+    ordinary not-found path silently: both make an article's category
+    vanish from every filter, and only one of them is a bug."""
     seen = set()
     with _connect() as conn:
         while name and name not in seen:
@@ -300,6 +306,7 @@ def resolve_category_name(name: str) -> str | None:
             if status != "merged" or not merged_into:
                 return name
             name = merged_into
+    print(f"[users_db] merge cycle resolving category {name!r} -- taxonomy is corrupt")
     return None
 
 

@@ -11,13 +11,16 @@ elsewhere (see docs/plans/local-news-cache-plan.md's resolved "classification
 model" question) -- docs/plans/model-portability-plan.md's cheaper per-stage
 routing can swap this later without a redesign.
 
-The taxonomy below is an explicit v1, not a final answer -- see the plan
-doc's "Category taxonomy" section for the reasoning (cheap to revise
-later against real classified data, not worth blocking on getting it
-perfect up front).
+The taxonomy is no longer defined here. It lives in the `categories`
+table (see users_db.SEED_CATEGORIES for what a fresh database starts
+with, and docs/plans/taxonomy-and-admin-plan.md for the design), and is
+passed in as a Taxonomy so this module keeps no database dependency. It
+is explicitly revisable: the whole point of moving it was that changing
+it should be a data change, not a redeploy.
 """
 
 from dataclasses import dataclass
+from functools import cached_property
 
 from pydantic import BaseModel
 
@@ -48,7 +51,14 @@ class Taxonomy:
         return tuple(name for name, _ in self.entries)
 
     def __contains__(self, name: object) -> bool:
-        return name in set(self.names)
+        return name in self._name_set
+
+    @cached_property
+    def _name_set(self) -> frozenset[str]:
+        """Built once. `entries` is frozen, so rebuilding a set per lookup
+        would be pure waste -- negligible at a chunk of 50 articles, but
+        there is no reason to pay it."""
+        return frozenset(self.names)
 
     def prompt_fragment(self) -> str:
         return "\n".join(f"- {name}: {description}" for name, description in self.entries)
@@ -66,8 +76,8 @@ class ArticleCategories(BaseModel):
     # An LLM occasionally inventing a plausible label is ordinary behaviour,
     # not an exceptional condition, so unknown labels get filtered out after
     # parsing (see _valid_categories) rather than being allowed to fail the
-    # request. The prompt still lists the 13 categories, so the model is
-    # still aimed at them; this only changes what happens when it misses.
+    # request. The prompt still lists the active categories, so the model
+    # is still aimed at them; this only changes what happens when it misses.
     categories: list[str]
 
 
@@ -121,7 +131,7 @@ def classify_interests(model, interests: list[str], taxonomy: Taxonomy) -> dict[
     empty list is a real answer ("no category applies") and gets cached
     forever, while a failure has to be retried. Collapsing the two is what
     poisoned the live cache during the classification outage -- "AI" ended
-    up cached as [] even though AI is one of the 13 categories, and an
+    up cached as [] even though AI is itself one of the categories, and an
     empty mapping matches every article, so those subscribers were being
     sent completely unfiltered news."""
     if not interests:
@@ -182,9 +192,10 @@ def _valid_categories(result: ClassificationBatch, taxonomy: Taxonomy) -> dict[i
 
     Rejected labels are logged rather than silently discarded, because they
     are useful signal in their own right: a label the model keeps reaching
-    for is a gap in the taxonomy. "Education" is what surfaced this, and the
-    13 categories in Category are explicitly a v1 (see the module docstring)
-    meant to be revised against real classified data."""
+    for is a gap in the taxonomy. "Education" is what surfaced this. The
+    taxonomy is explicitly revisable -- see
+    docs/plans/taxonomy-and-admin-plan.md, where these labels become the
+    evidence an admin decides on."""
     categories: dict[int, list[str]] = {}
     rejected: set[str] = set()
     for item in result.items:
