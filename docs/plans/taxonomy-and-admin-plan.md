@@ -1,6 +1,6 @@
 # Plan: DB-backed taxonomy, admin-in-the-loop growth, and an admin console
 
-Status: **A1 and A2 built (2026-08-20); A3 onward not started.**
+Status: **A1, A2, and A3 built (2026-08-20); A4 onward not started.**
 
 - **A1 — schema.** Done. `categories` and `category_sightings` exist in
   `users_db.py`, seeded with the original 13 from `SEED_CATEGORIES`.
@@ -8,9 +8,15 @@ Status: **A1 and A2 built (2026-08-20); A3 onward not started.**
   passed in; the prompt is generated from active rows. Verified
   behaviour-neutral by diffing the generated prompt against the constant it
   replaced, character for character.
-- **A3 — recording sightings.** Not started. `record_category_sighting`
-  and friends exist and are tested but nothing calls them yet; wiring them
-  into `_valid_categories` is A3's job.
+- **A3 — recording sightings.** Done. `_valid_categories` reports an
+  unknown label via an `on_unknown_label(label, article)` callback rather
+  than writing the DB itself, keeping `news_classify` free of a DB
+  dependency; `news_ingest.run_ingestion_cycle` wires that callback to
+  `users_db.record_category_sighting`, prunes sightings on the same tick
+  as the article cache, and prints a per-cycle summary of accumulated
+  proposals. Still no admin interaction — that's A4 — and the alert
+  threshold in A4 remains an unreplaced placeholder pending the real
+  distribution this step exists to collect.
 - **A4, A5, B** — not started.
 
 Two related pieces:
@@ -559,9 +565,15 @@ a side effect of `detail` being a free-form JSON column.
    against a reconstructed pre-change database: non-destructive,
    idempotent, and a retired category is not resurrected by re-running
    `init_db()`.
-2. **A3** — proposals table, populate it from rejected labels. Still no
+2. ~~**A3** — proposals table, populate it from rejected labels. Still no
    admin interaction; just accumulate evidence and see what the threshold
-   should actually be, from real data rather than a guess.
+   should actually be, from real data rather than a guess.~~
+   **Done 2026-08-20.** `record_category_sighting` is now called from
+   `news_ingest`, sightings are pruned by the same 30-day retention as the
+   article cache, and each cycle prints how many times each proposed
+   label has recurred. `CATEGORY_PROPOSAL_THRESHOLD` in A4 is still a
+   placeholder guessed from one observation ("Education") — this step
+   exists to collect the real distribution before that number is chosen.
 3. **A4 + A5** — the admin loop and interest-cache invalidation.
 4. **B2** — the read-only commands (`/categories`, `/proposals`, `/users`)
    before the mutating ones.
