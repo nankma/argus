@@ -159,3 +159,24 @@ def test_classify_articles_chunk_failure_is_not_silent(capsys):
 
     out = capsys.readouterr().out
     assert "news_classify" in out and "failed" in out
+
+
+def test_classify_articles_handles_a_model_returning_none():
+    """A structured-output call can come back None rather than raising --
+    tools/claude_cli_model.py's shim documents doing exactly that when a
+    reply fails schema validation. classify_articles must treat it the same
+    as any other chunk failure: fail open, leave those articles
+    uncategorized, and say so rather than going silent. The silent version
+    of this hid a three-day outage."""
+    class NoneReturningModel:
+        def with_structured_output(self, schema):
+            return self
+
+        def invoke(self, messages):
+            return None
+
+    result = news_classify.classify_articles(
+        NoneReturningModel(), [{"title": "Some article", "summary": None}]
+    )
+
+    assert result == {}

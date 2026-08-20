@@ -177,3 +177,40 @@ def test_cleanup_still_deletes_when_no_archive_is_configured(isolated_news_cache
     path = news_cache.write_article("bbc_business", _article(), [], now - timedelta(hours=72))
     assert news_cache.cleanup_expired(now, ttl_hours=48) == 1
     assert not path.exists()
+
+
+def test_corrupt_file_is_archived_into_the_epoch_bucket(isolated_news_cache, monkeypatch, tmp_path):
+    """A file whose YAML won't parse has no usable fetched_at to file it
+    under. It must still leave the active cache, and must NOT land in
+    today's bucket -- whatever later reads the archive to build a corpus
+    would otherwise see corrupt data dated as fresh."""
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(news_cache, "ARCHIVE_DIR", str(archive))
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    bad = isolated_news_cache / "bbc_business-deadbeef.yaml"
+    isolated_news_cache.mkdir(parents=True, exist_ok=True)
+    bad.write_text("{{{ not yaml at all", encoding="utf-8")
+
+    assert news_cache.cleanup_expired(now, ttl_hours=48) == 1
+
+    assert not bad.exists()
+    assert (archive / "1970-01-01" / bad.name).exists()
+    assert not (archive / "2026-08-15").exists()
+
+
+def test_archived_files_do_not_come_back_through_read_all(isolated_news_cache, monkeypatch, tmp_path):
+    """The archive exists to accumulate a corpus, not to extend the bot's
+    working set. read_all globs the cache directory only, so an archived
+    article must stay invisible to ingestion and push selection -- the TTL
+    still governs what counts as current news."""
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(news_cache, "ARCHIVE_DIR", str(archive))
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    news_cache.write_article("bbc_business", _article(link="https://example.com/old"),
+                             [], now - timedelta(hours=72))
+    news_cache.write_article("bbc_business", _article(link="https://example.com/fresh"),
+                             [], now - timedelta(hours=1))
+
+    news_cache.cleanup_expired(now, ttl_hours=48)
+
+    assert [a["link"] for a in news_cache.read_all()] == ["https://example.com/fresh"]

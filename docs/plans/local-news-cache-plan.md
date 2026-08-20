@@ -479,6 +479,24 @@ check, and per-subscriber isolation (one subscriber's exception doesn't
 stop the cycle) are all unchanged from the live-fetch version — only
 *where* the candidate articles come from changed.
 
+> **Correction, 2026-08-19.** The paragraph above is no longer true of the
+> first two items, and is left in place rather than rewritten so the change
+> is visible. `pushed_links` is no longer a *fallback* for unparsed dates —
+> it is the **sole** "already seen" filter, checked unconditionally on every
+> path. And the `since`/`last_push_at` recency check no longer filters at
+> all: `published_dt` now only **ranks** (newest first), with
+> `MAX_ARTICLE_AGE_HOURS` as a separate quality gate against genuinely
+> ancient content.
+>
+> Filtering on the date was wrong for a specific reason worth keeping: an
+> article that lost one cycle's `max_per_topic` cut was excluded
+> permanently, even though nobody had ever seen it. GNews publishes ~12 h
+> behind, so 227 of its cached articles could never reach any digest. A
+> date says what is most worth showing; it can't say what has been read.
+>
+> Per-subscriber isolation is unchanged. See `news_push.py`'s module
+> docstring and `select_candidate_articles` for the current rules.
+
 ## Open questions — all resolved, implementation cleared to start
 
 1. ~~**Pull interval.**~~ **Resolved**: per-source, not one global
