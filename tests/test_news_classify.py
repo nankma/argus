@@ -180,3 +180,53 @@ def test_classify_articles_handles_a_model_returning_none():
     )
 
     assert result == {}
+
+
+def test_one_invented_label_does_not_discard_the_rest_of_the_batch():
+    """Regression test for a real production failure. The model answered
+    "Education" for one article in a 50-article batch; ArticleCategories
+    used list[Category], so pydantic rejected the whole ClassificationBatch
+    and all 50 articles lost their categories -- including 49 classified
+    correctly.
+
+    An LLM occasionally inventing a plausible label is ordinary behaviour,
+    not an error. The unknown label is dropped and everything else
+    survives."""
+    class InventsALabel:
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, messages):
+            return self.schema.model_validate({
+                "items": [
+                    {"index": 0, "categories": ["AI", "Software"]},
+                    {"index": 1, "categories": ["Research", "Education"]},
+                    {"index": 2, "categories": ["Crypto"]},
+                ]
+            })
+
+    articles = [{"title": f"Article {i}", "summary": None} for i in range(3)]
+    result = news_classify.classify_articles(InventsALabel(), articles)
+
+    assert result[0] == ["AI", "Software"]
+    assert result[1] == ["Research"], "the valid label survives, Education is dropped"
+    assert result[2] == ["Crypto"]
+
+
+def test_an_article_whose_labels_are_all_invalid_gets_an_empty_list():
+    """Not a failure -- indistinguishable from the model saying nothing
+    applies, which the prompt explicitly allows."""
+    class AllInvalid:
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, messages):
+            return self.schema.model_validate(
+                {"items": [{"index": 0, "categories": ["Education", "Sports"]}]}
+            )
+
+    result = news_classify.classify_articles(AllInvalid(), [{"title": "A", "summary": None}])
+
+    assert result == {0: []}
