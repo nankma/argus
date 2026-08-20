@@ -228,66 +228,154 @@ so a vague one silently degrades classification from then on. The model
 should draft it from the example articles and the admin edit rather than
 face a blank field.
 
-### A5. Lifecycle operations, and what each one touches
+### A5a. Lifecycle operations, and what each one touches
 
 Three stores hold category names: the `categories` table, the
-`interest_categories` cache, and the cached article YAML files. Every
+`interest_categories` mappings, and the cached article YAML files. Every
 operation has to account for all three.
 
 | Operation | `categories` | `interest_categories` | Article files |
 |---|---|---|---|
 | **Propose** | insert `proposed` | — | — |
-| **Activate** | → `active`, set description | **delete all rows** | — |
+| **Activate** | → `active`, set description | re-map every interest (1 LLM call) | — |
 | **Reject** | → `rejected` | — | — |
-| **Merge A→B** | A → `merged`, `merged_into='B'` | rewrite A→B, dedupe | untouched; resolved on read |
-| **Retire** | → `retired` | **re-resolve affected** | untouched |
+| **Merge A→B** | A → `merged`, `merged_into='B'` | rewrite A→B, dedupe (**no LLM call**) | untouched; resolved on read |
+| **Retire** | → `retired` | re-map affected interests | untouched |
 | **Delete** | hard delete | — | — |
 
-#### Activate: invalidate the whole interest cache
+Each of these is an **explicit migration**, not an invalidation. A5
+explains why that distinction matters; the short version is that
+invalidating and letting a background job refill spreads an unpredictable
+cost across the next push cycle, can fail there invisibly, and leaves no
+record of which subscribers got re-mapped and which didn't.
 
-`get_cached_interest_categories` treats any existing row as a hit, so a
-newly active category is invisible to every already-cached interest until
-those rows are gone. Adding a category therefore **deletes every row in
-`interest_categories`**; the next push cycle re-resolves them via
-`resolve_interest_categories`.
-
-**Use the LLM for this, and don't optimise it.** That table currently
-holds **8 rows**. Re-classifying every interest is one batched call. The
-API cost that motivated the embedding work in
+**The LLM calls here are not worth optimising away.** The mapping table
+holds **8 rows**. Re-mapping every interest is one batched call. The API
+cost that motivated the embedding work in
 `docs/analysis/cluster-measurements.md` is about *articles* — thousands
 per day and growing — not interests, which are a dozen strings of stable
-vocabulary. Avoiding an LLM call here optimises the wrong term.
+vocabulary.
 
-#### Merge: rewrite interests, resolve articles on read
 
-`interest_categories` rows are rewritten (`A` → `B`, deduplicated within
-each row's JSON list) rather than invalidated — the mapping is known, so
-there is nothing to re-derive and no reason to pay for a call.
+### A5. Interest→category mappings are derived state, not a cache
 
-Article files are left alone. A read path resolves a name through
-`merged_into` before matching. The alternative — rewriting every cached
-YAML file — is a bulk operation over the whole cache for a rename, and the
-tombstone costs one dictionary lookup per match. If merges turn out to be
-frequent, revisit; a batch rewrite may become simpler than carrying the
-indirection.
+This section replaces an earlier draft that treated `interest_categories`
+as a cache to be invalidated. That framing was wrong, and the difference
+is not cosmetic — it is what licensed the bug fixed on 2026-08-20.
 
-#### Retire: the hazard worth designing around
+**A cache may be discarded, because it can always be recomputed.** That
+property is what made "absent" and "failed" look interchangeable: a
+classification failure produced no row, an absent row meant "recompute
+next time", and the code duly filled it with `[]` — a wrong answer that
+was nonetheless *present*, so it was never recomputed. Six subscribers
+received entirely unfiltered news for days.
 
-Retiring a category removes it from every interest that mapped to it. If
-that leaves an interest with an **empty** list, that interest now matches
-**every** article, because `select_candidate_articles` treats an empty
-mapping as unrestricted (deliberately — an unclassified topic shouldn't be
-starved).
+**Derived state must be maintained.** It is computed when its input
+changes, persisted, and migrated deliberately when the schema it derives
+from changes. It is never silently rebuilt as a side effect of some
+unrelated background job.
 
-So retiring a category can silently turn a subscriber's filter off. This
-is not hypothetical: it is the same shape as the bug fixed on 2026-08-20,
-where cached classification *failures* were stored as `[]` and six
-subscribers were receiving entirely unfiltered news.
+The mapping is derived state. Three rules follow.
 
-Retire therefore does not simply strip the name. It **re-resolves** every
-interest that mapped to the retired category, and if re-resolution leaves
-one empty, the admin is told which interests and which subscribers before
-the retire commits.
+#### Rule 1: compute at write time, while the user is there
+
+The mapping is computed when the interest is **set**, in
+`agent.dispatch_settings`'s `set_interest` branch, immediately after
+`users_db.add_interest`. Not lazily during a push cycle.
+
+The reason is where the failure surfaces. Computing it in the push job
+means a failure happens hours later, in a scheduled background task, with
+nobody watching — and its symptom is a subscriber quietly receiving
+unfiltered news, which looks like the system working. Computing it at
+write time means the failure happens while the subscriber is in an active
+conversation, where it can be retried, reported, or recorded as pending.
+
+Route B already has a model in hand (it uses one to translate the
+confirmation message), so no new plumbing is needed to make the call.
+
+#### Rule 2: a category change triggers an explicit migration
+
+Merging, retiring, or activating a category does **not** invalidate rows
+and wait for something to refill them. It runs a migration that reads
+every stored interest, recomputes what needs recomputing, and writes the
+result back, in one pass with a known cost and a verifiable outcome.
+
+| Change | Migration |
+|---|---|
+| **Activate** | Re-map every interest (a new category may now apply). One batched LLM call. |
+| **Merge A→B** | Rewrite `A` → `B` in every mapping, deduplicate. **No LLM call** — the mapping is known, there is nothing to re-derive. |
+| **Retire** | Re-map every interest that referenced the retired category. LLM, but only for the affected subset. |
+
+The invalidate-and-refill alternative spreads an unpredictable cost across
+the next push cycle, can fail there invisibly, and leaves the system in a
+state where some subscribers have fresh mappings and others don't, with
+nothing recording which.
+
+#### Rule 3: the in-memory layer loads, it never computes
+
+Any process-level cache exists only to avoid re-reading SQLite on every
+push cycle. It is populated by reading the table, never by calling a
+model. A restart therefore costs zero LLM calls — the answers are already
+in the database.
+
+This is the concrete test for whether the design has drifted back into
+cache thinking: *if restarting the service can trigger a classification
+call, it is wrong.*
+
+#### Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS interest_categories (
+    interest        TEXT PRIMARY KEY,   -- normalized; see below
+    display_text    TEXT NOT NULL,      -- as the subscriber typed it
+    categories      TEXT NOT NULL,      -- JSON list of category names
+    status          TEXT NOT NULL,      -- 'mapped' | 'pending' | 'failed'
+    computed_at     TEXT NOT NULL,
+    taxonomy_version INTEGER NOT NULL   -- bumped on any category change
+);
+```
+
+**`status` exists because "no categories" has two meanings**, and
+conflating them is precisely the 2026-08-20 bug. `mapped` with an empty
+list means the model looked and nothing applied — a real answer.
+`pending`/`failed` means we don't know yet. `select_candidate_articles`
+treats an empty mapping as unrestricted (matches every article), which is
+the right fail-open behaviour for a genuine empty but is dangerous for an
+unknown, so the two must be distinguishable at the point of use.
+
+**`taxonomy_version`** makes a stale mapping detectable rather than
+assumed-fresh. If a migration is interrupted halfway, the rows that were
+missed are identifiable by a version mismatch instead of being
+indistinguishable from up-to-date ones.
+
+**Keyed by interest text, not by `chat_id`.** "AI" means the same
+categories regardless of who typed it, so a global row is one row and one
+LLM call no matter how many subscribers share the interest. Per-subscriber
+rows would duplicate identical work, and the category-change migration
+would have to walk every subscriber's JSON list instead of scanning one
+table. `display_text` keeps whatever the subscriber actually typed, since
+that is what gets shown back to them.
+
+**Normalization is needed and currently missing.** The live table today
+holds `Robotics → ["Robotics"]` and `robotics → ["Robotics"]` as separate
+rows: two rows, two LLM calls, and two things that can drift apart. The
+primary key should be a normalized form (casefolded, trimmed) with
+`display_text` preserving the original. `users_db._is_duplicate_topic`
+already does fuzzy matching for the interest list itself and is the
+natural place to align this with.
+
+#### Failure at write time
+
+If the mapping call fails while the subscriber is setting the interest,
+the interest is still saved — refusing to store it because a classifier
+hiccuped would be worse — but the row is written with `status='pending'`
+and no categories, and a retry runs on the next cycle.
+
+A `pending` row must **not** be silently treated as unrestricted. That is
+the exact failure mode this whole section exists to prevent. The
+options — hold pushes for that interest, push unfiltered but tell the
+subscriber, or alert the admin — are a product decision, not a technical
+one, and are called out in the open questions rather than assumed here.
 
 #### Delete: only for categories that were never active
 
