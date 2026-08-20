@@ -1,6 +1,12 @@
 from unittest.mock import MagicMock
 
 import news_classify
+import users_db
+
+# The same 13 categories users_db seeds, so these tests exercise the
+# real taxonomy without needing a database -- Taxonomy is a parameter
+# precisely so this is possible (see its docstring).
+TAXONOMY = news_classify.Taxonomy.from_rows(users_db.SEED_CATEGORIES)
 
 
 def _fake_structured_model(return_value) -> MagicMock:
@@ -25,7 +31,7 @@ def test_classify_articles_maps_index_to_categories():
         {"title": "New LLM released", "summary": None},
     ]
 
-    result = news_classify.classify_articles(model, articles)
+    result = news_classify.classify_articles(model, articles, TAXONOMY)
 
     assert result == {0: ["IT", "Hardware", "Finance", "Stock"], 1: ["AI"]}
     model.with_structured_output.assert_called_once_with(news_classify.ClassificationBatch)
@@ -33,14 +39,14 @@ def test_classify_articles_maps_index_to_categories():
 
 def test_classify_articles_empty_input_returns_empty_without_calling_model():
     model = MagicMock()
-    assert news_classify.classify_articles(model, []) == {}
+    assert news_classify.classify_articles(model, [], TAXONOMY) == {}
     model.with_structured_output.assert_not_called()
 
 
 def test_classify_articles_fails_open_on_model_error():
     model = MagicMock()
     model.with_structured_output.side_effect = RuntimeError("boom")
-    result = news_classify.classify_articles(model, [{"title": "x", "summary": None}])
+    result = news_classify.classify_articles(model, [{"title": "x", "summary": None}], TAXONOMY)
     assert result == {}
 
 
@@ -53,14 +59,27 @@ def test_classify_articles_handles_missing_index_gracefully():
         )
     )
     articles = [{"title": "a"}, {"title": "b"}, {"title": "c"}]
-    result = news_classify.classify_articles(model, articles)
+    result = news_classify.classify_articles(model, articles, TAXONOMY)
     assert result == {1: ["Crypto"]}
 
 
-def test_categories_list_matches_the_literal_type():
-    assert "Stock" in news_classify.CATEGORIES
-    assert "Robotics" in news_classify.CATEGORIES
-    assert len(news_classify.CATEGORIES) == 13
+def test_seed_taxonomy_is_the_thirteen_categories():
+    """The taxonomy moved from a Literal in this module to the categories
+    table (docs/plans/taxonomy-and-admin-plan.md A1/A2). users_db.SEED_CATEGORIES
+    is what a fresh database starts with, and this pins that the move was
+    behaviour-neutral -- same names, same count."""
+    assert "Stock" in TAXONOMY.names
+    assert "Robotics" in TAXONOMY.names
+    assert len(TAXONOMY.names) == 13
+
+
+def test_taxonomy_prompt_fragment_lists_every_category_with_its_description():
+    """The fragment goes into the classifier prompt verbatim, so a category
+    silently missing from it would be one the model is never offered."""
+    fragment = TAXONOMY.prompt_fragment()
+
+    for name, description in users_db.SEED_CATEGORIES:
+        assert f"- {name}: {description}" in fragment
 
 
 def test_classify_interests_maps_interest_text_to_categories():
@@ -73,7 +92,7 @@ def test_classify_interests_maps_interest_text_to_categories():
         )
     )
 
-    result = news_classify.classify_interests(model, ["機器人科技", "AAOI"])
+    result = news_classify.classify_interests(model, ["機器人科技", "AAOI"], TAXONOMY)
 
     assert result == {"機器人科技": ["Robotics"], "AAOI": ["Stock", "Hardware"]}
 
@@ -86,7 +105,7 @@ def test_classify_interests_omits_an_interest_the_classifier_failed_on():
     news. Omission is what lets the caller tell the two apart."""
     model = _fake_structured_model(news_classify.ClassificationBatch(items=[]))
 
-    result = news_classify.classify_interests(model, ["some obscure ticker"])
+    result = news_classify.classify_interests(model, ["some obscure ticker"], TAXONOMY)
 
     assert result == {}
 
@@ -99,14 +118,14 @@ def test_classify_interests_keeps_a_genuinely_empty_classification():
         items=[news_classify.ArticleCategories(index=0, categories=[])]
     ))
 
-    result = news_classify.classify_interests(model, ["some obscure ticker"])
+    result = news_classify.classify_interests(model, ["some obscure ticker"], TAXONOMY)
 
     assert result == {"some obscure ticker": []}
 
 
 def test_classify_interests_empty_input_returns_empty_without_calling_model():
     model = MagicMock()
-    assert news_classify.classify_interests(model, []) == {}
+    assert news_classify.classify_interests(model, [], TAXONOMY) == {}
     model.with_structured_output.assert_not_called()
 
 
@@ -131,7 +150,7 @@ def test_classify_articles_chunks_large_batches():
     model = MagicMock()
     model.with_structured_output.return_value = structured
 
-    result = news_classify.classify_articles(model, articles)
+    result = news_classify.classify_articles(model, articles, TAXONOMY)
 
     assert len(calls) == 3, f"120 articles at 50/call should be 3 calls, got {calls}"
     assert max(calls) <= news_classify.MAX_ARTICLES_PER_CALL
@@ -159,7 +178,7 @@ def test_classify_articles_one_failed_chunk_does_not_lose_the_others():
     model = MagicMock()
     model.with_structured_output.return_value = structured
 
-    result = news_classify.classify_articles(model, articles)
+    result = news_classify.classify_articles(model, articles, TAXONOMY)
 
     # first 50 lost, second 50 kept -- and they carry the caller's indexes
     assert set(result) == set(range(50, 100))
@@ -173,7 +192,7 @@ def test_classify_articles_chunk_failure_is_not_silent(capsys):
     model = MagicMock()
     model.with_structured_output.return_value = structured
 
-    news_classify.classify_articles(model, articles)
+    news_classify.classify_articles(model, articles, TAXONOMY)
 
     out = capsys.readouterr().out
     assert "news_classify" in out and "failed" in out
@@ -194,7 +213,7 @@ def test_classify_articles_handles_a_model_returning_none():
             return None
 
     result = news_classify.classify_articles(
-        NoneReturningModel(), [{"title": "Some article", "summary": None}]
+        NoneReturningModel(), [{"title": "Some article", "summary": None}], TAXONOMY
     )
 
     assert result == {}
@@ -225,7 +244,7 @@ def test_one_invented_label_does_not_discard_the_rest_of_the_batch():
             })
 
     articles = [{"title": f"Article {i}", "summary": None} for i in range(3)]
-    result = news_classify.classify_articles(InventsALabel(), articles)
+    result = news_classify.classify_articles(InventsALabel(), articles, TAXONOMY)
 
     assert result[0] == ["AI", "Software"]
     assert result[1] == ["Research"], "the valid label survives, Education is dropped"
@@ -245,6 +264,29 @@ def test_an_article_whose_labels_are_all_invalid_gets_an_empty_list():
                 {"items": [{"index": 0, "categories": ["Education", "Sports"]}]}
             )
 
-    result = news_classify.classify_articles(AllInvalid(), [{"title": "A", "summary": None}])
+    result = news_classify.classify_articles(
+        AllInvalid(), [{"title": "A", "summary": None}], TAXONOMY
+    )
 
     assert result == {0: []}
+
+
+def test_generated_prompt_preserves_the_curated_category_order():
+    """The seed order is curated, not incidental, and this pins it.
+
+    Ordering the taxonomy by name instead alphabetizes the list, which
+    separates Stock from Finance -- and Stock's own description reads
+    "distinct from Finance, which covers business news generally", a
+    cross-reference that only makes sense when they are adjacent. Moving
+    the taxonomy into the database silently introduced exactly that
+    reordering (all 13 categories present, identical text, wrong order),
+    and it was caught by diffing the generated prompt against the constant
+    it replaced rather than by any test passing.
+    """
+    fragment = TAXONOMY.prompt_fragment()
+    lines = [line.split(":")[0].removeprefix("- ") for line in fragment.split("\n")]
+
+    assert lines == [name for name, _ in users_db.SEED_CATEGORIES]
+    assert lines.index("Stock") == lines.index("Finance") + 1, (
+        "Stock's description cross-references Finance and must follow it"
+    )

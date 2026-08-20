@@ -119,7 +119,8 @@ def resolve_interest_categories(model, interests: list[str]) -> dict[str, list[s
     resolved = users_db.get_cached_interest_categories(interests)
     missing = [i for i in interests if i not in resolved]
     if missing:
-        newly_classified = news_classify.classify_interests(model, missing)
+        taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+        newly_classified = news_classify.classify_interests(model, missing, taxonomy)
         failed = [i for i in missing if i not in newly_classified]
         for interest, categories in newly_classified.items():
             users_db.set_interest_categories(interest, categories)

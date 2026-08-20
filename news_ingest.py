@@ -298,7 +298,13 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
         )
         return
 
-    categories_by_index = news_classify.classify_articles(model, [a for _, a in fetched])
+    # Loaded once per cycle, not per chunk: the taxonomy must not change
+    # underneath a batch, or the prompt and the validation set would
+    # disagree about what a valid answer is.
+    taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+    categories_by_index = news_classify.classify_articles(
+        model, [a for _, a in fetched], taxonomy
+    )
     for i, (source_key, article) in enumerate(fetched):
         news_cache.write_article(source_key, article, categories_by_index.get(i, []), now)
 

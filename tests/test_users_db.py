@@ -537,3 +537,110 @@ def test_set_restricted_sources_enabled_upserts_for_unknown_chat(isolated_subscr
     assert users_db.get_status(42) is None
     users_db.set_restricted_sources_enabled(42, True)
     assert users_db.get_restricted_sources_enabled(42) is True
+
+
+# --- categories taxonomy (docs/plans/taxonomy-and-admin-plan.md A1) -------
+
+
+def test_init_seeds_the_thirteen_categories_as_active(isolated_subscribers_db):
+    active = users_db.get_active_categories()
+
+    assert len(active) == 13
+    assert dict(active)["Stock"].startswith("stock price moves")
+
+
+def test_seeding_is_idempotent_and_does_not_resurrect_a_retired_category(
+    isolated_subscribers_db,
+):
+    """INSERT OR IGNORE rather than a count check: an admin who retires a
+    category must not find it back after the next restart."""
+    with users_db._connect() as conn:
+        conn.execute("UPDATE categories SET status = 'retired' WHERE name = 'Crypto'")
+
+    users_db.init_db()
+
+    names = [name for name, _ in users_db.get_active_categories()]
+    assert "Crypto" not in names
+    assert len(names) == 12
+
+
+def test_get_active_categories_excludes_non_active_statuses(isolated_subscribers_db):
+    users_db.record_category_sighting("Education", datetime(2026, 8, 20, tzinfo=timezone.utc))
+
+    names = [name for name, _ in users_db.get_active_categories()]
+    assert "Education" not in names, "a proposed category is not offered to the classifier"
+
+
+def test_active_category_order_is_stable(isolated_subscribers_db):
+    """The prompt is built from this order, so an unstable one would change
+    the prompt string between runs for no reason."""
+    assert users_db.get_active_categories() == users_db.get_active_categories()
+
+
+def test_recording_a_sighting_creates_a_proposed_category(isolated_subscribers_db):
+    now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+
+    users_db.record_category_sighting("Education", now, "https://e.com/a", "A title")
+
+    assert users_db.count_recent_sightings(now) == {"Education": 1}
+
+
+def test_a_sighting_does_not_resurrect_a_decided_category(isolated_subscribers_db):
+    """Evidence must not overturn a decision someone already made. A
+    rejected label keeps accumulating sightings -- they answer "was
+    rejecting this right?" later -- but never returns to 'proposed'."""
+    now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now)
+    with users_db._connect() as conn:
+        conn.execute("UPDATE categories SET status = 'rejected' WHERE name = 'Education'")
+
+    users_db.record_category_sighting("Education", now)
+
+    with users_db._connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM categories WHERE name = 'Education'"
+        ).fetchone()[0]
+    assert status == "rejected"
+    assert users_db.count_recent_sightings(now) == {}, "rejected never alerts again"
+
+
+def test_sightings_outside_the_window_do_not_count(isolated_subscribers_db):
+    """The threshold asks "how often recently", not "how often ever" -- a
+    counter column could not express that, which is why sightings are a log."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now - timedelta(days=60))
+    users_db.record_category_sighting("Education", now - timedelta(days=2))
+
+    assert users_db.count_recent_sightings(now, days=30) == {"Education": 1}
+
+
+def test_pruning_drops_only_sightings_past_retention(isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now - timedelta(days=60))
+    users_db.record_category_sighting("Education", now - timedelta(days=2))
+
+    assert users_db.prune_category_sightings(now, days=30) == 1
+    assert users_db.count_recent_sightings(now, days=30) == {"Education": 1}
+
+
+def test_resolve_category_name_follows_a_merge(isolated_subscribers_db):
+    """An article cached before a merge still carries the old name; it must
+    resolve to the survivor rather than dropping out of every filter."""
+    with users_db._connect() as conn:
+        conn.execute(
+            "UPDATE categories SET status = 'merged', merged_into = 'Finance' "
+            "WHERE name = 'Stock'"
+        )
+
+    assert users_db.resolve_category_name("Stock") == "Finance"
+    assert users_db.resolve_category_name("Finance") == "Finance"
+    assert users_db.resolve_category_name("Nonexistent") is None
+
+
+def test_resolve_category_name_survives_a_merge_cycle(isolated_subscribers_db):
+    """A merge chain that loops would otherwise hang the push cycle."""
+    with users_db._connect() as conn:
+        conn.execute("UPDATE categories SET status='merged', merged_into='Finance' WHERE name='Stock'")
+        conn.execute("UPDATE categories SET status='merged', merged_into='Stock' WHERE name='Finance'")
+
+    assert users_db.resolve_category_name("Stock") is None
