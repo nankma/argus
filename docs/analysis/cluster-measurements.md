@@ -378,3 +378,50 @@ and 87× faster encoding (0.2 s vs 17.4 s for the full corpus).
 conda activate myfirstagent
 python docs/analysis/tools/bench_embeddings.py
 ```
+
+## Correction: peak-RSS was measuring the wrong workload
+
+The table above measured peak RSS while batch-encoding all 2,262 articles.
+That is not the production workload. The intended split is:
+
+1. Build the taxonomy **offline on a dev machine** — encode the corpus,
+   cluster, prune. Memory is free here.
+2. Store the resulting centroids. A 35-cluster taxonomy is **54 KB**
+   (35 × 384 float32) — trivially a DB row or a checked-in file.
+3. On the VM, encode **each incoming article** and take the nearest
+   centroid. That is a 384-vector against a 35 × 384 matrix.
+
+Step 3 is genuinely light *in work*. It is not light *in residency*, and
+that distinction is what actually decides the backend: the model has to be
+loaded in RAM to encode anything at all, and that fixed cost does not
+shrink with batch size. Re-measured with the two costs separated:
+
+| backend | FIXED (import + load) | MARGINAL (all encoding) | total resident | per article | separation |
+|---|---|---|---|---|---|
+| model2vec | **84 MB** (1.1 s) | 7 MB | **91 MB** | **0.2 ms** | +0.155 |
+| fastembed bge-small | **152 MB** (0.5 s) | 20 MB | **172 MB** | 96–300 ms | +0.195 |
+| sentence-transformers | **398 MB** (14.6 s) | 90 MB | **488 MB** | 11–21 ms | +0.299 |
+
+Against the VM's 420 MB available: model2vec leaves 329 MB, fastembed
+leaves 248 MB, sentence-transformers overruns by 68 MB — and would overrun
+on the fixed cost alone if anything else on the box moved.
+
+**The earlier fastembed number was wrong.** It was recorded at 855 MB peak
+and 8 docs/s, and both figures were artifacts of `TextEmbedding.embed()`
+forking parallel workers by default. Pinned to `threads=1, parallel=0`, its
+fixed cost is 152 MB — a factor of 5.6 lower, and the difference between
+"disqualified" and "viable". Worth flagging as a measurement lesson: a
+default that spawns workers will misreport both memory and throughput on a
+single-core target.
+
+fastembed is nonetheless the **slowest** per article of the three, ONNX and
+int8 notwithstanding — 96–300 ms against sentence-transformers' 11–21 ms,
+because single-threaded int8 gets no benefit from the BLAS paths torch
+uses. That is tolerable for a background ingestion job (200 articles ≈ 19 s
+here, more on 1 OCPU) and irrelevant to user-facing latency, but it rules
+fastembed out of anything synchronous.
+
+**Two viable candidates**, then: model2vec (cheapest, fastest, weakest
+separation) and fastembed (2× the memory, ~1000× the latency, better
+separation). sentence-transformers stays the offline quality reference and
+cannot be deployed to this VM.

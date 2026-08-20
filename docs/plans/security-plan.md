@@ -36,7 +36,7 @@ limiting** (finding 3) — worth fixing, not an active exploit today.
 | 17 | Phoenix telemetry access control | Resolved | **Done and verified live** — native auth, network isolation, Vault-stored API key, see below |
 | 18 | Docs written under a private-repo assumption, published unreviewed | Resolved | **Caught before the public push** — VM IPs and key paths redacted, see below |
 | 19 | Assistant tool-call leaked `DEEPSEEK_API_KEY` into session output | Resolved | **Rotated same-day** — new key, new OCI Vault secret version, verified live, old key revoked — see below |
-| 20 | News-source API keys logged in plaintext on every failed fetch | **High** | **Code fixed; keys need rotating** — GNews + Perigon keys found in `docker logs`, see below |
+| 20 | News-source API keys logged in plaintext on every failed fetch | **High** | **Done** — redaction landed; both GNews and Perigon keys rotated 2026-08-19 |
 
 ## Findings
 
@@ -640,22 +640,37 @@ Verified against the two exact strings that leaked (with fake key values),
 plus regression tests in `tests/test_news_sources.py` asserting the key is
 absent from both the raised exception and the telemetry attribute.
 
-**Still outstanding: rotate both keys.** The code fix stops future leaks;
-it does not un-log what has already been written. Both keys are in this
-VM's `docker logs` history and were surfaced into a chat transcript.
-GNews: <https://gnews.io/dashboard>. Perigon: its own console. Rotating
-Perigon is needed regardless — see the 403 in finding 21 below.
+**Both keys were rotated on 2026-08-19 — this finding is closed.** The
+code fix stops future leaks but does not un-log what was already written,
+so rotation was the only thing that actually invalidated the exposed
+values. Both had appeared in this VM's `docker logs` history and in a chat
+transcript. GNews: <https://gnews.io/dashboard>. Perigon: its own console.
 
-### 21. Perigon has been failing every request (403) and NewsAPI is near-dead
+### 21. Perigon exhausted its free-tier quota; NewsAPI is near-dead
 
 Not a security finding, recorded here because it was found in the same
-investigation and the fix overlaps with rotating the key above.
+investigation and the fix overlapped with rotating the key above.
 
-- **Perigon**: every fetch returns `403 Forbidden`. **0 articles in the
-  cache.** The key is invalid, expired, or the free tier was revoked.
+- **Perigon**: every fetch returned `403 Forbidden` and **0 articles
+  reached the cache**. The cause was **quota exhaustion, not a bad key** —
+  the account had spent its full free-tier allowance of 150 requests:
+  49 on 2026-08-13, 72 on 2026-08-14, 25 on 2026-08-15, then nothing left.
+  Worth being precise about, because "403" reads like an auth failure and
+  the obvious response is to rotate the key, which does not get the quota
+  back. The 8-14 spike lines up with the ingestion changes in
+  `docs/plans/local-news-cache-plan.md` item 7 that raised per-source
+  caps — this source is metered per *request*, so a cap raise spends it
+  faster.
 - **NewsAPI**: 1 article cached, 69 h behind the freshest article. It is
   pulled once per 24 h and its free tier delays articles 24–36 h
   (measured 2026-08-16), so it contributes almost nothing.
+
+**Open:** nothing in the code distinguishes "this source is misconfigured"
+from "this source is out of quota", and nothing tracks request budget
+against a per-source allowance. A metered source silently going dark is
+exactly the failure shape as the classification outage in
+`docs/plans/local-news-cache-plan.md` — fails open, logs nothing anyone
+reads, stays broken for days.
 
 Both are in `news_sources.RESTRICTED_SOURCES`, so they are excluded from
 non-admin digests by design anyway — meaning this had no subscriber-visible
