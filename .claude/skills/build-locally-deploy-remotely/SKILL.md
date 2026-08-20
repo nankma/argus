@@ -293,6 +293,35 @@ exists" -- the looser version was already passing before this fix, since
 a `MessageHandler` genuinely was registered, just not one `/start` could
 ever match.
 
+## Editing a live `/data` file directly (e.g. a targeted DB row purge)
+
+Sometimes the task isn't a code deploy at all but a direct edit to a file
+living in the `/data` volume (`subscribers.db` is the recurring case) —
+e.g. purging specific poisoned rows after a bug fix ships, where the
+newly-deployed code would otherwise immediately regenerate them. The
+container has no Python, so the shape is: `docker cp` the file out to the
+VM host, edit it there with the host's own `python3`, `docker cp` it back
+in.
+
+**Always stop the container before the `docker cp` out**, not just back
+it up — a copy taken while the process might still write to the file
+mid-copy risks a torn read, and the whole point is a clean edit.
+
+**Watch out for ownership after copying back in.** Real incident,
+2026-08-20: `docker cp <container>:/data/subscribers.db /tmp/...` followed
+by editing as the SSH user and `docker cp`-ing back in left the file
+owned by that SSH user's numeric uid (e.g. `1001:1001`), not the
+container's actual runtime user (`mambauser`, a much larger uid like
+`57439` — `mambaorg/micromamba` base image convention). Mode stayed
+`rw-r--r--`, so the file was silently unwritable by the bot process the
+moment it restarted — no crash, no error, just a process that could no
+longer persist new state to the file it had just been handed back. Fixed
+with `docker exec -u root <container> chown mambauser:mambauser
+/data/<file>` immediately after the `docker cp` back in, **before**
+restarting the container — and verify with `ls -la` inside the container
+(not on the host) that the owner is `mambauser`, not a numeric uid, before
+trusting the restart.
+
 ## When this doesn't apply
 
 - Source-only changes that don't need a new image (e.g. editing docs) —
