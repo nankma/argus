@@ -78,8 +78,26 @@ def test_classify_interests_maps_interest_text_to_categories():
     assert result == {"機器人科技": ["Robotics"], "AAOI": ["Stock", "Hardware"]}
 
 
-def test_classify_interests_missing_index_defaults_to_empty_list():
+def test_classify_interests_omits_an_interest_the_classifier_failed_on():
+    """This previously asserted the failed interest came back as [], which
+    pinned a real bug: the caller caches whatever it gets, permanently, so a
+    failure became an answer that never got retried. An empty mapping also
+    matches every article, so the subscriber silently received unfiltered
+    news. Omission is what lets the caller tell the two apart."""
     model = _fake_structured_model(news_classify.ClassificationBatch(items=[]))
+
+    result = news_classify.classify_interests(model, ["some obscure ticker"])
+
+    assert result == {}
+
+
+def test_classify_interests_keeps_a_genuinely_empty_classification():
+    """The other half of the distinction: the model DID answer, and its
+    answer is "no category applies". That is a real result, not a failure,
+    and the caller should cache it rather than re-paying for it forever."""
+    model = _fake_structured_model(news_classify.ClassificationBatch(
+        items=[news_classify.ArticleCategories(index=0, categories=[])]
+    ))
 
     result = news_classify.classify_interests(model, ["some obscure ticker"])
 

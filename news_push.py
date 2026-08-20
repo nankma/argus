@@ -103,15 +103,30 @@ def resolve_interest_categories(model, interests: list[str]) -> dict[str, list[s
     """Stage-1 setup: maps each interest to its category tags, using
     users_db's persistent cache and classifying only what's missing --
     interest text is stable vocabulary (unlike article content), so this
-    should be a cache hit for any interest that's been pushed before."""
+    should be a cache hit for any interest that's been pushed before.
+
+    An interest the classifier FAILED on is left out of the cache entirely,
+    so the next cycle retries it. Only a real answer gets cached -- including
+    a genuinely empty one, which is a valid classification and should not be
+    re-paid for every cycle.
+
+    Caching failures as [] is what poisoned the live cache during the
+    2026-08-17 classification outage: "AI", "Bitcoin", "機器人科技" and
+    others were all stored as [], permanently, with no retry. An empty
+    mapping matches every article (see select_candidate_articles), so those
+    subscribers were receiving entirely unfiltered news -- the exact failure
+    the category filter exists to prevent."""
     resolved = users_db.get_cached_interest_categories(interests)
     missing = [i for i in interests if i not in resolved]
     if missing:
         newly_classified = news_classify.classify_interests(model, missing)
-        for interest in missing:
-            categories = newly_classified.get(interest, [])
+        failed = [i for i in missing if i not in newly_classified]
+        for interest, categories in newly_classified.items():
             users_db.set_interest_categories(interest, categories)
             resolved[interest] = categories
+        if failed:
+            print(f"[news_push] could not classify {len(failed)} interest(s), "
+                  f"will retry next cycle: {', '.join(failed)}")
     return resolved
 
 
