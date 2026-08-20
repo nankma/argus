@@ -1,7 +1,17 @@
 # Plan: DB-backed taxonomy, admin-in-the-loop growth, and an admin console
 
-Status: **proposed, not started.** Written 2026-08-20 from a design
-conversation. Nothing here is built.
+Status: **A1 and A2 built (2026-08-20); A3 onward not started.**
+
+- **A1 — schema.** Done. `categories` and `category_sightings` exist in
+  `users_db.py`, seeded with the original 13 from `SEED_CATEGORIES`.
+- **A2 — classifier reads from the DB.** Done. `news_classify.Taxonomy` is
+  passed in; the prompt is generated from active rows. Verified
+  behaviour-neutral by diffing the generated prompt against the constant it
+  replaced, character for character.
+- **A3 — recording sightings.** Not started. `record_category_sighting`
+  and friends exist and are tested but nothing calls them yet; wiring them
+  into `_valid_categories` is A3's job.
+- **A4, A5, B** — not started.
 
 Two related pieces:
 
@@ -544,9 +554,11 @@ a side effect of `detail` being a free-form JSON column.
 
 ## Sequencing
 
-1. **A1 + A2** — schema, seed the 13, classifier reads from DB. No
-   behaviour change; the taxonomy is identical, it just lives elsewhere.
-   This is the risky migration, so it lands alone and gets verified alone.
+1. ~~**A1 + A2** — schema, seed the 13, classifier reads from DB.~~
+   **Done 2026-08-20.** Landed alone as planned. Migration verified
+   against a reconstructed pre-change database: non-destructive,
+   idempotent, and a retired category is not resurrected by re-running
+   `init_db()`.
 2. **A3** — proposals table, populate it from rejected labels. Still no
    admin interaction; just accumulate evidence and see what the threshold
    should actually be, from real data rather than a guess.

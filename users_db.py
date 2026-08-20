@@ -166,6 +166,202 @@ def init_db() -> None:
             )
             """
         )
+        # The article taxonomy -- see docs/plans/taxonomy-and-admin-plan.md.
+        # `name` is the primary key rather than an integer id because cached
+        # article files store category NAMES as strings, and that cache is a
+        # separate store (YAML on a volume, not rows). An id would mean
+        # rewriting every cached file on a rename, or a join the file store
+        # can't do.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS categories (
+                name TEXT PRIMARY KEY,
+                description TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                decided_at TEXT,
+                decided_by TEXT,
+                merged_into TEXT,
+                centroid BLOB,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        # One row per time the classifier reached for a label outside the
+        # taxonomy. A log rather than a counter on the category row because a
+        # counter can't expire: three sightings in January and two in June
+        # reads as "5", which is noise spread over six months rather than a
+        # trend. Same reasoning as PUSHED_LINK_RETENTION_HOURS -- prune by
+        # age, not by count.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS category_sightings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                seen_at TEXT NOT NULL,
+                article_link TEXT,
+                article_title TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS category_sightings_name_at "
+            "ON category_sightings (name, seen_at)"
+        )
+        # For a database created before sort_order existed. Without this the
+        # curated order is lost and the prompt alphabetizes, which separates
+        # Stock from Finance even though Stock's description cross-references
+        # it -- see get_active_categories.
+        _ensure_column(conn, "categories", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _seed_categories(conn)
+
+
+# The taxonomy the classifier started with, moved here from
+# news_classify.Category. Seeded once on an empty table; after that the
+# table is authoritative and this list is history, not configuration --
+# editing it will not change a database that has already been seeded.
+#
+# Descriptions are load-bearing: they go into the classifier prompt
+# verbatim, so wording here directly affects how every article is
+# classified. Kept exactly as they read in the original prompt so seeding
+# is behaviour-neutral.
+SEED_CATEGORIES: list[tuple[str, str]] = [
+    ("AI", "AI models, research, agents, LLMs"),
+    ("Software", "software products, dev tools, programming"),
+    ("Hardware", "chips, semiconductors, devices, infrastructure hardware"),
+    ("IT", "enterprise IT, cloud, infrastructure, enterprise software"),
+    ("Startups", "funding rounds, new companies, venture capital"),
+    ("Finance", "business/financial industry news, economics, corporate deals"),
+    ("Stock", "stock price moves, market reactions specifically -- distinct "
+              "from Finance, which covers business news generally"),
+    ("Policy", "regulation, government, legal, antitrust"),
+    ("Security", "cybersecurity, breaches, vulnerabilities"),
+    ("Research", "academic papers, science"),
+    ("Consumer", "consumer gadgets, reviews, product launches for individual users"),
+    ("Robotics", "robotics specifically"),
+    ("Crypto", "cryptocurrency/blockchain"),
+]
+
+CATEGORY_SIGHTING_RETENTION_DAYS = 30
+
+
+def _seed_categories(conn) -> None:
+    """Populates the taxonomy on first run only. INSERT OR IGNORE rather
+    than a count check so a category an admin later retired or renamed
+    doesn't silently reappear on the next restart."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        "INSERT OR IGNORE INTO categories "
+        "(name, description, status, created_at, created_by, sort_order) "
+        "VALUES (?, ?, 'active', ?, 'seed', ?)",
+        [(name, description, now, i) for i, (name, description) in enumerate(SEED_CATEGORIES)],
+    )
+
+
+def get_active_categories() -> list[tuple[str, str]]:
+    """The (name, description) pairs the classifier should offer, in
+    `sort_order`.
+
+    The order is curated, not incidental. Ordering by name instead
+    alphabetizes the list, which separates Stock from Finance -- and
+    Stock's description reads "distinct from Finance, which covers business
+    news generally", a cross-reference that only works when they are
+    adjacent. A stable order also keeps the prompt string identical between
+    runs, so classification differences are attributable to the input
+    rather than to row ordering.
+
+    Returned rather than read inside news_classify so that module stays
+    free of a database dependency and its tests can pass a taxonomy
+    directly, same reasoning as build_agent taking its model as a
+    parameter (see CLAUDE.md)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT name, description FROM categories WHERE status = 'active' "
+            "ORDER BY sort_order, name"
+        ).fetchall()
+    return [(name, description or "") for name, description in rows]
+
+
+def resolve_category_name(name: str) -> str | None:
+    """Follows `merged_into` so a name stored on an article cached before a
+    merge still resolves to the surviving category.
+
+    Returns None for a name that isn't in the taxonomy, and also for a
+    merge cycle -- which should be impossible, since a merge targets an
+    active category and an active category has no merged_into. If one
+    exists the data is corrupt, so it is logged rather than sharing the
+    ordinary not-found path silently: both make an article's category
+    vanish from every filter, and only one of them is a bug."""
+    seen = set()
+    with _connect() as conn:
+        while name and name not in seen:
+            seen.add(name)
+            row = conn.execute(
+                "SELECT status, merged_into FROM categories WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None:
+                return None
+            status, merged_into = row
+            if status != "merged" or not merged_into:
+                return name
+            name = merged_into
+    print(f"[users_db] merge cycle resolving category {name!r} -- taxonomy is corrupt")
+    return None
+
+
+def record_category_sighting(name: str, seen_at: datetime, link: str | None = None,
+                             title: str | None = None) -> None:
+    """Logs that the classifier reached for `name`, which isn't active, and
+    creates the proposed row if this is the first time.
+
+    INSERT OR IGNORE on the category, not an upsert: if the row already
+    exists as rejected, retired or merged, that decision stands. A sighting
+    is evidence, and evidence does not resurrect a decision someone
+    already made."""
+    ts = seen_at.isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO categories "
+            "(name, status, created_at, created_by, sort_order) "
+            "VALUES (?, 'proposed', ?, 'model', "
+            "(SELECT COALESCE(MAX(sort_order), 0) + 1 FROM categories))",
+            (name, ts),
+        )
+        conn.execute(
+            "INSERT INTO category_sightings (name, seen_at, article_link, article_title) "
+            "VALUES (?, ?, ?, ?)",
+            (name, ts, link, title),
+        )
+
+
+def count_recent_sightings(now: datetime, days: int = CATEGORY_SIGHTING_RETENTION_DAYS
+                           ) -> dict[str, int]:
+    """{proposed category name: sightings inside the window}. Only
+    'proposed' rows are counted -- a rejected category keeps accumulating
+    sightings (they answer "was rejecting this right?" later) but must
+    never trigger the admin prompt again."""
+    cutoff = (now - timedelta(days=days)).isoformat()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT s.name, COUNT(*) FROM category_sightings s "
+            "JOIN categories c ON c.name = s.name "
+            "WHERE c.status = 'proposed' AND s.seen_at >= ? "
+            "GROUP BY s.name",
+            (cutoff,),
+        ).fetchall()
+    return {name: count for name, count in rows}
+
+
+def prune_category_sightings(now: datetime,
+                             days: int = CATEGORY_SIGHTING_RETENTION_DAYS) -> int:
+    """Drops sightings outside the window. Returns how many. Keeps the
+    threshold question answerable as "how often recently" rather than
+    "how often ever"."""
+    cutoff = (now - timedelta(days=days)).isoformat()
+    with _connect() as conn:
+        cursor = conn.execute("DELETE FROM category_sightings WHERE seen_at < ?", (cutoff,))
+        return cursor.rowcount
 
 
 def try_consume_api_budget(source: str, daily_cap: int, today: str) -> bool:

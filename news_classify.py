@@ -11,34 +11,57 @@ elsewhere (see docs/plans/local-news-cache-plan.md's resolved "classification
 model" question) -- docs/plans/model-portability-plan.md's cheaper per-stage
 routing can swap this later without a redesign.
 
-The taxonomy below is an explicit v1, not a final answer -- see the plan
-doc's "Category taxonomy" section for the reasoning (cheap to revise
-later against real classified data, not worth blocking on getting it
-perfect up front).
+The taxonomy is no longer defined here. It lives in the `categories`
+table (see users_db.SEED_CATEGORIES for what a fresh database starts
+with, and docs/plans/taxonomy-and-admin-plan.md for the design), and is
+passed in as a Taxonomy so this module keeps no database dependency. It
+is explicitly revisable: the whole point of moving it was that changing
+it should be a data change, not a redeploy.
 """
 
-from typing import Literal
+from dataclasses import dataclass
+from functools import cached_property
 
 from pydantic import BaseModel
 
-Category = Literal[
-    "AI",
-    "Software",
-    "Hardware",
-    "IT",
-    "Startups",
-    "Finance",
-    "Stock",
-    "Policy",
-    "Security",
-    "Research",
-    "Consumer",
-    "Robotics",
-    "Crypto",
-]
 
-CATEGORIES: list[str] = list(Category.__args__)
-_CATEGORY_SET: frozenset[str] = frozenset(CATEGORIES)
+@dataclass(frozen=True)
+class Taxonomy:
+    """The categories the classifier may use, for one run.
+
+    Passed in rather than read from the database here, so this module has
+    no database dependency and its tests can hand it a two-category
+    taxonomy instead of standing up SQLite -- the same reasoning as
+    build_agent taking its model as a parameter (see CLAUDE.md). Callers
+    build it from users_db.get_active_categories().
+
+    Frozen because the prompt text is derived from it: a taxonomy that
+    changed underneath a batch would mean the prompt and the validation set
+    disagreed about what a valid answer is.
+    """
+
+    entries: tuple[tuple[str, str], ...]   # (name, description), prompt order
+
+    @classmethod
+    def from_rows(cls, rows) -> "Taxonomy":
+        return cls(entries=tuple((name, description) for name, description in rows))
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(name for name, _ in self.entries)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._name_set
+
+    @cached_property
+    def _name_set(self) -> frozenset[str]:
+        """Built once. `entries` is frozen, so rebuilding a set per lookup
+        would be pure waste -- negligible at a chunk of 50 articles, but
+        there is no reason to pay it."""
+        return frozenset(self.names)
+
+    def prompt_fragment(self) -> str:
+        return "\n".join(f"- {name}: {description}" for name, description in self.entries)
 
 
 class ArticleCategories(BaseModel):
@@ -53,8 +76,8 @@ class ArticleCategories(BaseModel):
     # An LLM occasionally inventing a plausible label is ordinary behaviour,
     # not an exceptional condition, so unknown labels get filtered out after
     # parsing (see _valid_categories) rather than being allowed to fail the
-    # request. The prompt still lists the 13 categories, so the model is
-    # still aimed at them; this only changes what happens when it misses.
+    # request. The prompt still lists the active categories, so the model
+    # is still aimed at them; this only changes what happens when it misses.
     categories: list[str]
 
 
@@ -62,29 +85,22 @@ class ClassificationBatch(BaseModel):
     items: list[ArticleCategories]
 
 
-_CLASSIFY_PROMPT = (
-    "You are a strict classifier, not an assistant. Below is a numbered "
-    "list of news article titles (and summaries, where available). For "
-    "EACH article, assign every category from this list that plausibly "
-    "applies -- most articles need more than one:\n\n"
-    "- AI: AI models, research, agents, LLMs\n"
-    "- Software: software products, dev tools, programming\n"
-    "- Hardware: chips, semiconductors, devices, infrastructure hardware\n"
-    "- IT: enterprise IT, cloud, infrastructure, enterprise software\n"
-    "- Startups: funding rounds, new companies, venture capital\n"
-    "- Finance: business/financial industry news, economics, corporate deals\n"
-    "- Stock: stock price moves, market reactions specifically -- distinct "
-    "from Finance, which covers business news generally\n"
-    "- Policy: regulation, government, legal, antitrust\n"
-    "- Security: cybersecurity, breaches, vulnerabilities\n"
-    "- Research: academic papers, science\n"
-    "- Consumer: consumer gadgets, reviews, product launches for individual users\n"
-    "- Robotics: robotics specifically\n"
-    "- Crypto: cryptocurrency/blockchain\n\n"
-    "Return one entry per article, using its exact index number from the "
-    "list below. If nothing applies, return an empty categories list for "
-    "that index rather than guessing or omitting the entry."
-)
+def _classify_prompt(taxonomy: Taxonomy) -> str:
+    """Built per call from the taxonomy rather than being a module constant,
+    so activating a category takes effect without a redeploy. The category
+    list and the set used to validate the reply come from the same object,
+    which is the point: a prompt offering categories the validator would
+    then reject is a silent classification failure."""
+    return (
+        "You are a strict classifier, not an assistant. Below is a numbered "
+        "list of news article titles (and summaries, where available). For "
+        "EACH article, assign every category from this list that plausibly "
+        "applies -- most articles need more than one:\n\n"
+        f"{taxonomy.prompt_fragment()}\n\n"
+        "Return one entry per article, using its exact index number from the "
+        "list below. If nothing applies, return an empty categories list for "
+        "that index rather than guessing or omitting the entry."
+    )
 
 
 def _format_batch(articles: list[dict]) -> str:
@@ -99,7 +115,7 @@ def _format_batch(articles: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def classify_interests(model, interests: list[str]) -> dict[str, list[str]]:
+def classify_interests(model, interests: list[str], taxonomy: Taxonomy) -> dict[str, list[str]]:
     """Classifies subscriber-stated interest strings (e.g. "機器人科技",
     "AAOI") into the same category taxonomy as articles -- the stage-1
     filter news_push.py uses to narrow the shared cache to a subscriber's
@@ -115,13 +131,13 @@ def classify_interests(model, interests: list[str]) -> dict[str, list[str]]:
     empty list is a real answer ("no category applies") and gets cached
     forever, while a failure has to be retried. Collapsing the two is what
     poisoned the live cache during the classification outage -- "AI" ended
-    up cached as [] even though AI is one of the 13 categories, and an
+    up cached as [] even though AI is itself one of the categories, and an
     empty mapping matches every article, so those subscribers were being
     sent completely unfiltered news."""
     if not interests:
         return {}
     articles = [{"title": interest, "summary": None} for interest in interests]
-    result = classify_articles(model, articles)
+    result = classify_articles(model, articles, taxonomy)
     return {interest: result[i] for i, interest in enumerate(interests) if i in result}
 
 
@@ -149,14 +165,14 @@ def classify_interests(model, interests: list[str]) -> dict[str, list[str]]:
 MAX_ARTICLES_PER_CALL = 50
 
 
-def _classify_one_batch(model, articles: list[dict]) -> dict[int, list[str]]:
+def _classify_one_batch(model, articles: list[dict], taxonomy: Taxonomy) -> dict[int, list[str]]:
     """One structured-output call. Returns {} on any failure -- see
     classify_articles for the fail-open reasoning."""
     try:
         structured = model.with_structured_output(ClassificationBatch)
         result = structured.invoke(
             [
-                {"role": "system", "content": _CLASSIFY_PROMPT},
+                {"role": "system", "content": _classify_prompt(taxonomy)},
                 {"role": "user", "content": _format_batch(articles)},
             ]
         )
@@ -166,25 +182,26 @@ def _classify_one_batch(model, articles: list[dict]) -> dict[int, list[str]]:
     if result is None:
         print(f"[news_classify] batch of {len(articles)} returned no result")
         return {}
-    return _valid_categories(result)
+    return _valid_categories(result, taxonomy)
 
 
-def _valid_categories(result: ClassificationBatch) -> dict[int, list[str]]:
+def _valid_categories(result: ClassificationBatch, taxonomy: Taxonomy) -> dict[int, list[str]]:
     """Drops labels the model invented that aren't in the taxonomy, keeping
     everything else. An article left with no valid labels keeps an empty
     list -- same as the model saying nothing applies.
 
     Rejected labels are logged rather than silently discarded, because they
     are useful signal in their own right: a label the model keeps reaching
-    for is a gap in the taxonomy. "Education" is what surfaced this, and the
-    13 categories in Category are explicitly a v1 (see the module docstring)
-    meant to be revised against real classified data."""
+    for is a gap in the taxonomy. "Education" is what surfaced this. The
+    taxonomy is explicitly revisable -- see
+    docs/plans/taxonomy-and-admin-plan.md, where these labels become the
+    evidence an admin decides on."""
     categories: dict[int, list[str]] = {}
     rejected: set[str] = set()
     for item in result.items:
         kept = []
         for name in item.categories:
-            if name in _CATEGORY_SET:
+            if name in taxonomy:
                 kept.append(name)
             else:
                 rejected.add(name)
@@ -195,7 +212,7 @@ def _valid_categories(result: ClassificationBatch) -> dict[int, list[str]]:
     return categories
 
 
-def classify_articles(model, articles: list[dict]) -> dict[int, list[str]]:
+def classify_articles(model, articles: list[dict], taxonomy: Taxonomy) -> dict[int, list[str]]:
     """Returns {index: categories} for every article in `articles` that the
     model actually returned an entry for, where the index is into
     `articles` as given.
@@ -225,7 +242,7 @@ def classify_articles(model, articles: list[dict]) -> dict[int, list[str]]:
     for start in range(0, len(articles), MAX_ARTICLES_PER_CALL):
         chunk = articles[start:start + MAX_ARTICLES_PER_CALL]
         total_chunks += 1
-        result = _classify_one_batch(model, chunk)
+        result = _classify_one_batch(model, chunk, taxonomy)
         if not result:
             failed_chunks += 1
         for local_index, cats in result.items():

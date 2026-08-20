@@ -209,9 +209,9 @@ def test_resolve_interest_categories_uses_cache_when_available(monkeypatch):
     classify.assert_not_called()
 
 
-def test_resolve_interest_categories_classifies_and_caches_misses(monkeypatch):
+def test_resolve_interest_categories_classifies_and_caches_misses(monkeypatch, isolated_subscribers_db):
     monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
-    monkeypatch.setattr(news_push.news_classify, "classify_interests", lambda model, interests: {"AAOI": ["Stock"]})
+    monkeypatch.setattr(news_push.news_classify, "classify_interests", lambda model, interests, taxonomy: {"AAOI": ["Stock"]})
     set_categories = MagicMock()
     monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
 
@@ -221,13 +221,13 @@ def test_resolve_interest_categories_classifies_and_caches_misses(monkeypatch):
     set_categories.assert_called_once_with("AAOI", ["Stock"])
 
 
-def test_resolve_interest_categories_caches_a_genuinely_empty_result(monkeypatch):
+def test_resolve_interest_categories_caches_a_genuinely_empty_result(monkeypatch, isolated_subscribers_db):
     """The model answered "no category applies". That is a real answer and
     belongs in the cache -- re-classifying it every cycle would just re-pay
     for the same conclusion."""
     monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
     monkeypatch.setattr(news_push.news_classify, "classify_interests",
-                        lambda model, interests: {"Some obscure ticker": []})
+                        lambda model, interests, taxonomy: {"Some obscure ticker": []})
     set_categories = MagicMock()
     monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
 
@@ -237,7 +237,7 @@ def test_resolve_interest_categories_caches_a_genuinely_empty_result(monkeypatch
     set_categories.assert_called_once_with("Some obscure ticker", [])
 
 
-def test_resolve_interest_categories_does_not_cache_a_failure(monkeypatch):
+def test_resolve_interest_categories_does_not_cache_a_failure(monkeypatch, isolated_subscribers_db):
     """Regression test for a live bug. classify_interests omits an interest
     it failed on; caching that as [] made the failure permanent, and an
     empty mapping matches every article, so affected subscribers were sent
@@ -246,7 +246,7 @@ def test_resolve_interest_categories_does_not_cache_a_failure(monkeypatch):
     being one of the 13 categories."""
     monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
     monkeypatch.setattr(news_push.news_classify, "classify_interests",
-                        lambda model, interests: {})
+                        lambda model, interests, taxonomy: {})
     set_categories = MagicMock()
     monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
 
