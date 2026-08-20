@@ -347,3 +347,42 @@ def test_traced_fetch_redacts_the_key_before_it_reaches_telemetry(monkeypatch):
         pass
     assert "LEAKYVALUE999" not in recorded.get("error", "")
     assert "<redacted>" in recorded.get("error", "")
+
+
+# --- registry breadth -----------------------------------------------------
+
+
+def test_general_tech_and_business_feeds_are_registered():
+    """Added 2026-08-20 to widen a registry that measured 28.6% of its cache
+    coming from feeds that structurally cannot produce anything but AI
+    content (openai_blog, huggingface_blog, arxiv, techcrunch_ai,
+    venturebeat_ai) -- see docs/analysis/cluster-measurements.md. RSS gives
+    no history, so breadth has to come from more sources rather than from
+    reaching further back."""
+    names = {name for name, *_ in news_sources.SOURCE_REGISTRY}
+
+    assert {"ars_technica", "techcrunch", "cnbc"} <= names
+
+
+def test_techcrunch_general_feed_is_separate_from_the_ai_one():
+    """Two different feeds, not a rename. The AI-only one stays; the point
+    of the general one is that it isn't AI-only."""
+    assert news_sources.fetch_techcrunch is not news_sources.fetch_techcrunch_ai
+
+
+def test_new_sources_need_no_api_key():
+    """Plain RSS, so no key, no quota, no budget tracking -- unlike Perigon,
+    which is metered per request and burned a month's allowance in three
+    days (docs/plans/security-plan.md finding 21)."""
+    required = {name: env for name, _fn, env, _cls in news_sources.SOURCE_REGISTRY}
+
+    for name in ("ars_technica", "techcrunch", "cnbc"):
+        assert required[name] is None
+
+
+def test_new_sources_are_not_restricted():
+    """They go to subscribers, unlike newsapi/perigon. That's the whole
+    reason these three were picked over the general-news feeds: they sit
+    inside the product's stated technology-industry scope."""
+    for name in ("ars_technica", "techcrunch", "cnbc"):
+        assert name not in news_sources.RESTRICTED_SOURCES

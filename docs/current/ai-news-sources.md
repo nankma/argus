@@ -239,6 +239,38 @@ posture, recurring cost) than anything on this page.
 | **Engadget** | rss | `https://www.engadget.com/rss.xml` | Consumer gadgets/entertainment tech. |
 | **TechRadar** | rss | `https://www.techradar.com/rss` (redirects to `/feeds.xml`) | **Blocks the default `python-requests` User-Agent with `403`** — confirmed live. Fixed by sending a self-identifying User-Agent (`_REQUEST_HEADERS` in `news_sources.py`), applied to every source for consistency rather than as a TechRadar-only special case. |
 
+
+### Added 2026-08-20 — widening away from AI-only feeds
+
+| Source | Class | Endpoint | Notes |
+|---|---|---|---|
+| **Ars Technica** | rss | `https://feeds.arstechnica.com/arstechnica/index` | Technology, science and policy. The registry had nothing in this register — deeper than the gadget feeds, broader than the AI-only ones. |
+| **TechCrunch** | rss | `https://techcrunch.com/feed/` | The **general** feed, deliberately alongside `techcrunch_ai` rather than replacing it. The AI-only one stays; the point of this one is that it isn't AI-only. |
+| **CNBC** | rss | `https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114` | Markets, business, economics. Feeds the Finance/Stock categories, which several subscribers' interests map to (AAOI, Bitcoin, 科技財經). |
+
+**Why these three and not a broader news bundle.** The registry was
+measured at **28.6% of its cache** coming from feeds that structurally
+cannot produce anything but AI content — `openai_blog`,
+`huggingface_blog`, `arxiv`, `techcrunch_ai`, `venturebeat_ai` — rising to
+**47%** counting `hackernews`, which is heavily AI-skewed in practice. See
+`docs/analysis/cluster-measurements.md`.
+
+These three sit inside the product's stated scope
+(`agent.LAYER1_IDENTITY`: "a technology industry analyst... covering AI as
+well as the broader tech industry"), so they can go straight to
+subscribers. General-news feeds (NPR, CBS, CNN, PBS, Politico, The Hill)
+would widen the corpus further but mostly produce articles the classifier
+tags with nothing, `select_candidate_articles` then filters out, and the
+output guardrail would flag — so if they are added later they belong in
+`RESTRICTED_SOURCES`, contributing to the corpus and to taxonomy-building
+without changing what subscribers receive.
+
+**Breadth, not history.** RSS serves only its current window, so there is
+no way to reach backwards — the only lever for a bigger corpus *now*,
+rather than after a month of accumulation, is more sources. Each of these
+returns 20–30 items per pull against a 200 cap, so the cap is not the
+binding constraint here; the number of feeds is.
+
 ## User-Agent
 
 Every fetch sends `Mozilla/5.0 (compatible; ArgusNewsBot/1.0; +https://github.com/nankma/argus)`
