@@ -542,11 +542,16 @@ def test_set_restricted_sources_enabled_upserts_for_unknown_chat(isolated_subscr
 # --- categories taxonomy (docs/plans/taxonomy-and-admin-plan.md A1) -------
 
 
-def test_init_seeds_the_thirteen_categories_as_active(isolated_subscribers_db):
-    active = users_db.get_active_categories()
+def test_init_seeds_the_taxonomy_as_active(isolated_subscribers_db):
+    """Counts the seed rather than hardcoding a number: the taxonomy is data
+    now, and a test asserting "13" turns every future category addition into
+    a test failure that says nothing useful."""
+    active = dict(users_db.get_active_categories())
 
-    assert len(active) == 13
-    assert dict(active)["Stock"].startswith("stock price moves")
+    # everything seeded except Policy, which _migrate_split_policy retires
+    expected = {name for name, _ in users_db.SEED_CATEGORIES} - {"Policy"}
+    assert set(active) == expected
+    assert active["Stock"].startswith("stock price moves")
 
 
 def test_seeding_is_idempotent_and_does_not_resurrect_a_retired_category(
@@ -561,7 +566,6 @@ def test_seeding_is_idempotent_and_does_not_resurrect_a_retired_category(
 
     names = [name for name, _ in users_db.get_active_categories()]
     assert "Crypto" not in names
-    assert len(names) == 12
 
 
 def test_get_active_categories_excludes_non_active_statuses(isolated_subscribers_db):
@@ -644,3 +648,45 @@ def test_resolve_category_name_survives_a_merge_cycle(isolated_subscribers_db):
         conn.execute("UPDATE categories SET status='merged', merged_into='Stock' WHERE name='Finance'")
 
     assert users_db.resolve_category_name("Stock") is None
+
+
+# --- Policy split (2026-08-20) --------------------------------------------
+
+
+def test_policy_is_retired_and_replaced_by_its_four_parts(isolated_subscribers_db):
+    """Policy's description was literally "regulation, government, legal,
+    antitrust" -- a bundle of four things, measured absorbing 65% of every
+    category assignment on a general-news probe."""
+    active = {name for name, _ in users_db.get_active_categories()}
+
+    assert "Policy" not in active
+    assert {"Regulation", "Government", "Legal", "Antitrust"} <= active
+
+
+def test_retired_policy_still_resolves(isolated_subscribers_db):
+    """Articles cached before the split carry the Policy label and must not
+    silently resolve to nothing -- that would drop them out of every filter."""
+    assert users_db.resolve_category_name("Policy") == "Policy"
+
+
+def test_split_does_not_re_retire_a_deliberately_reactivated_policy(
+    isolated_subscribers_db,
+):
+    """The migration is guarded by a marker, not by Policy's own status. An
+    admin who reactivates Policy on purpose must not find it retired again
+    after the next restart -- the same resurrection problem _seed_categories'
+    INSERT OR IGNORE avoids in the other direction."""
+    with users_db._connect() as conn:
+        conn.execute("UPDATE categories SET status = 'active' WHERE name = 'Policy'")
+
+    users_db.init_db()
+
+    assert "Policy" in {name for name, _ in users_db.get_active_categories()}
+
+
+def test_split_is_recorded_as_a_migration_not_an_admin_decision(isolated_subscribers_db):
+    with users_db._connect() as conn:
+        row = conn.execute(
+            "SELECT status, decided_by FROM categories WHERE name = 'Policy'"
+        ).fetchone()
+    assert row == ("retired", "migration")
