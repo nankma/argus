@@ -41,138 +41,289 @@ Concretely, measured (see `docs/analysis/cluster-measurements.md`):
 
 ### A1. Schema
 
+One table for the taxonomy, with a status enum, plus a separate log of
+sightings.
+
 ```sql
 CREATE TABLE IF NOT EXISTS categories (
-    name         TEXT PRIMARY KEY,     -- the label the classifier emits
-    description  TEXT NOT NULL,        -- the one-line gloss in the prompt
-    created_at   TEXT NOT NULL,
-    created_by   TEXT,                 -- 'seed' | 'admin:<chat_id>'
-    active       INTEGER NOT NULL DEFAULT 1,
-    merged_into  TEXT,                 -- set when merged, points at survivor
-    centroid     BLOB                  -- optional, see A5
+    name          TEXT PRIMARY KEY,   -- the label the classifier emits
+    description   TEXT,               -- one-line gloss; goes in the prompt.
+                                      -- NULL while merely proposed
+    status        TEXT NOT NULL,      -- see the state machine below
+    created_at    TEXT NOT NULL,
+    created_by    TEXT NOT NULL,      -- 'seed' | 'model' | 'admin:<chat_id>'
+    decided_at    TEXT,               -- when an admin last changed status
+    decided_by    TEXT,
+    merged_into   TEXT REFERENCES categories(name),
+    centroid      BLOB                -- reserved; see A6
 );
 
-CREATE TABLE IF NOT EXISTS category_proposals (
-    label        TEXT PRIMARY KEY,     -- an out-of-taxonomy label the model used
-    hits         INTEGER NOT NULL,     -- how many times it's been proposed
-    first_seen   TEXT NOT NULL,
-    last_seen    TEXT NOT NULL,
-    examples     TEXT,                 -- JSON list of a few article titles
-    status       TEXT NOT NULL         -- 'pending' | 'accepted' | 'rejected'
+CREATE TABLE IF NOT EXISTS category_sightings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL,      -- the proposed label, not a FK:
+                                      -- sightings can precede the row
+    seen_at       TEXT NOT NULL,
+    article_link  TEXT,               -- one example, for the admin prompt
+    article_title TEXT
 );
+CREATE INDEX IF NOT EXISTS category_sightings_name_at
+    ON category_sightings (name, seen_at);
 ```
 
-**Name as primary key, not an integer id.** Cached article files store
-category *names* as strings, and the cache is a separate store from the
-DB (files on a volume, not rows). An integer id would mean either
-rewriting every cached article on a rename, or a join the file store
-can't do. Names are stable enough — a rename is a merge, which A4 handles.
+#### Why one table rather than a separate proposals table
 
-**`merged_into` rather than deleting.** An article cached last week
-carries the old name. Keeping a tombstone that points at the survivor lets
-reads resolve the old name instead of silently dropping those articles out
-of every filter.
+An earlier draft of this plan had `categories` and `category_proposals` as
+separate tables. Approving a proposal then meant *migrating a row*:
+duplicating the name, inventing a description, and either copying or
+abandoning the sighting history. One table with a status makes approval a
+single field update, and the sighting history stays attached to the thing
+it is evidence about.
 
-**`centroid` is reserved now, unused at first.** The measurements in
-`cluster-measurements.md` point at eventually classifying with embeddings
-(nearest centroid, no API cost) instead of an LLM call per batch. Whether
-or not that happens, the taxonomy is shared infrastructure between both
-designs — only the classifier changes. Adding the column now is free;
-migrating a live table later is not.
+#### Why `status` and not an `active` boolean
+
+`active = 0` would have to mean two opposite things: "proposed, not yet
+approved" and "was approved, now retired". They need opposite handling —
+a retired category must never be re-proposed, while a proposed one should
+keep accumulating evidence. One boolean cannot carry that.
+
+```
+                    model emits an unknown label
+                                │
+                                ▼
+                          ┌───────────┐
+        admin rejects ◄───│ proposed  │───► admin approves
+              │           └───────────┘             │
+              ▼                                     ▼
+        ┌──────────┐                          ┌──────────┐
+        │ rejected │                          │  active  │◄── 'seed'
+        └──────────┘                          └────┬─────┘
+     never re-proposed,                            │
+     sightings still counted                admin retires │ admin merges
+     silently (see A4)                            ▼       ▼
+                                          ┌──────────┐ ┌──────────┐
+                                          │ retired  │ │  merged  │
+                                          └──────────┘ └──────────┘
+                                        not offered to    reads resolve
+                                        the classifier,   to merged_into
+                                        old articles keep
+                                        the label
+```
+
+Only `status='active'` rows are offered to the classifier. Everything else
+exists so the system can remember a decision instead of re-litigating it.
+
+#### Why `name` is the primary key
+
+Cached article files store category **names** as strings, and that cache
+is a separate store from the DB — YAML files on a volume, not rows. An
+integer id would mean either rewriting every cached file when a name
+changes, or a join the file store cannot perform. Names are stable enough:
+a rename is a merge, which A5 handles.
+
+#### Why sightings are a log, not a counter on the category row
+
+A counter cannot expire. `Education` proposed three times in January and
+twice in June reads as "5" — but that is six months of noise, not a
+trend. What the threshold needs to ask is *"how often in the last 30
+days"*, which requires timestamps.
+
+This is the same reasoning `users_db.PUSHED_LINK_RETENTION_HOURS` already
+follows: prune by age, not by count. That constant replaced a
+count-based cap for a related reason — truncating by count let a busy
+period silently evict entries that still mattered.
+
+Retention: prune `category_sightings` older than
+`CATEGORY_SIGHTING_RETENTION_DAYS = 30` on each ingestion cycle, alongside
+the existing cache cleanup.
 
 ### A2. The classifier reads the taxonomy from the DB
 
-`news_classify` currently builds both the prompt and the validation set
-from the `Category` Literal. Both become DB reads:
+`news_classify` builds both the prompt and the validation set from the
+`Category` Literal today. Both become reads of `status='active'`:
 
-- `_CLASSIFY_PROMPT`'s category list is generated from `categories` rows
-  (`name` + `description`), cached per process with an explicit
-  invalidation on write.
-- `_CATEGORY_SET` (already used for filtering, added 2026-08-20) reads
-  from the same place.
+- The category list in `_CLASSIFY_PROMPT` is generated from `name` +
+  `description`.
+- `_CATEGORY_SET`, already used for filtering since 2026-08-20, reads the
+  same rows.
 
-**This is already half-done.** `ArticleCategories.categories` was changed
-from `list[Category]` to `list[str]` on 2026-08-20 for an unrelated
-reason — a single invented label was failing whole batches. That change
-removed the static Literal from the schema, which is exactly the thing
-that would have blocked a dynamic taxonomy. What remains is swapping the
-constant for a query.
+**Half of this is already done, by accident.** `ArticleCategories.categories`
+was changed from `list[Category]` to `list[str]` on 2026-08-20 to fix an
+unrelated bug — one invented label was failing whole 50-article batches.
+That change removed the static Literal from the structured-output schema,
+which is exactly what would otherwise block a dynamic taxonomy. What
+remains is swapping a module constant for a query.
 
-The 13 current categories are seeded on first run, `created_by='seed'`.
+Both reads are cached per process and invalidated on any write to
+`categories`. The bot is a single long-running process, so an uncached
+read per classification batch would also be fine; the cache is for the
+prompt string, which is rebuilt from every active row.
 
-### A3. Noticing a category is missing
+The 13 current categories are seeded on first run with
+`status='active', created_by='seed'`.
 
-**Not per-article.** 1,866 of 2,266 cached articles currently have no
-categories. Even with the backlog fixed, a normal cycle of ~276 articles
-produces some that legitimately have none — sports, weather, off-topic
-noise. An alert per uncategorized article is hundreds a day and would be
-muted within a week. "Has no category" does not mean "needs a new
-category"; it usually means "isn't relevant."
+### A3. Recording a sighting
 
-Two signals that *do* mean it, both already available:
+When `_valid_categories` drops a label that isn't in the active set, it
+now also records it:
 
-1. **Rejected labels.** When the model emits a label outside the
-   taxonomy, that is the model stating what it wanted. `_valid_categories`
-   already drops and logs these; instead it upserts into
-   `category_proposals` and increments `hits`. `Education` is the first
-   real instance.
-2. **Cohesive clusters of uncategorized articles.** Run the clustering
-   from `docs/analysis/tools/build_taxonomy.py` over articles with no
-   categories. A cluster of ≥8 with coherence well above the random-pair
-   baseline is a topic with no home. This is a batch job, not per-cycle.
+1. `INSERT INTO category_sightings (name, seen_at, article_link, article_title)`.
+2. `INSERT OR IGNORE INTO categories (name, status, created_at, created_by)
+   VALUES (?, 'proposed', ?, 'model')` — so the first sighting also creates
+   the proposed row, with a NULL description until an admin supplies one.
 
-Alert when `hits` crosses a threshold (start at 5, tune from data), not on
-first sight. One label proposed once is a model slip; the same label five
-times is a gap.
+Step 2 is `OR IGNORE` rather than an upsert on purpose: if the row already
+exists as `rejected`, `retired`, or `merged`, that decision stands. A
+sighting never resurrects a decided category.
 
-### A4. The admin loop
+**Not per-article alerting.** 1,866 of 2,266 cached articles currently
+have no categories, and even with the backlog fixed a normal ~276-article
+cycle produces some that legitimately have none — sports, weather,
+off-topic noise. "Has no category" almost always means "isn't relevant",
+not "needs a new category". The two signals that *do* mean it are the
+out-of-taxonomy labels recorded here, and (separately, as a batch job)
+cohesive clusters among uncategorized articles using
+`docs/analysis/tools/build_taxonomy.py`.
 
-On threshold, the admin bot sends:
+### A4. Threshold and the admin prompt
 
-> The classifier has proposed **Education** 5 times and it isn't in the
-> taxonomy. Examples:
+On each ingestion cycle, after recording sightings:
+
+```sql
+SELECT c.name, COUNT(s.id) AS hits
+FROM categories c
+JOIN category_sightings s ON s.name = c.name
+WHERE c.status = 'proposed'
+  AND s.seen_at >= :window_start
+GROUP BY c.name
+HAVING hits >= :threshold;
+```
+
+`CATEGORY_PROPOSAL_THRESHOLD` starts at **5 within 30 days** and is
+explicitly a guess to be replaced. `Education` is currently a sample of
+one, and choosing a threshold from one data point is not a decision, it is
+a placeholder. Step 2 of the sequencing below exists to collect the
+distribution first.
+
+A `rejected` category keeps accumulating sightings but never alerts. That
+is deliberate: it costs one row per sighting and it answers "was rejecting
+this right?" later. If a rejected label keeps appearing at ten times the
+threshold, that is worth knowing.
+
+The admin bot then sends, reusing the `CallbackQueryHandler` it already
+uses for approve/deny:
+
+> The classifier has proposed **Education** 7 times in the last 30 days.
+> Recent examples:
 > · "Stanford launches free AI curriculum for high schools"
 > · "How universities are rewriting CS degrees around LLMs"
 >
-> Current categories: AI, Software, Hardware, IT, Startups, Finance,
-> Stock, Policy, Security, Research, Consumer, Robotics, Crypto
+> Active categories: AI, Software, Hardware, IT, Startups, Finance, Stock,
+> Policy, Security, Research, Consumer, Robotics, Crypto
 >
-> [ Add as new ] [ Merge into… ] [ Reject ]
+> [ Activate ] [ Merge into… ] [ Reject ]
 
-Reuses `CallbackQueryHandler`, which `admin_bot.py` already uses for
-approve/deny — no new interaction pattern.
+**Activate** prompts for a description before flipping status — the
+description goes into the classifier prompt for every subsequent article,
+so a vague one silently degrades classification from then on. The model
+should draft it from the example articles and the admin edit rather than
+face a blank field.
 
-- **Add as new** → prompts for a one-line description (it goes in the
-  classifier prompt, so it matters), inserts the row.
-- **Merge into…** → shows existing categories, sets `merged_into`.
-- **Reject** → `status='rejected'`, stop proposing it.
+### A5. Lifecycle operations, and what each one touches
 
-### A5. Propagating a new category
+Three stores hold category names: the `categories` table, the
+`interest_categories` cache, and the cached article YAML files. Every
+operation has to account for all three.
 
-Adding a category has two consequences, and the second is the one that
-gets forgotten.
+| Operation | `categories` | `interest_categories` | Article files |
+|---|---|---|---|
+| **Propose** | insert `proposed` | — | — |
+| **Activate** | → `active`, set description | **delete all rows** | — |
+| **Reject** | → `rejected` | — | — |
+| **Merge A→B** | A → `merged`, `merged_into='B'` | rewrite A→B, dedupe | untouched; resolved on read |
+| **Retire** | → `retired` | **re-resolve affected** | untouched |
+| **Delete** | hard delete | — | — |
 
-**Interests must be re-mapped.** `interest_categories` caches
-interest→categories, and `get_cached_interest_categories` treats any row
-as a hit. A new category is invisible to every already-cached interest
-until the cache is invalidated. So: **adding a category deletes every row
-in `interest_categories`**, and the next push cycle re-resolves them.
+#### Activate: invalidate the whole interest cache
 
-**Use the LLM for this; don't optimise it.** The table currently holds
-**8 rows**. Re-classifying every interest is one batched call. The API
-cost that motivated the embedding work in `cluster-measurements.md` is
-about *articles* — thousands per day, growing — not interests, which are
-a dozen strings of stable vocabulary. Spending design effort avoiding an
-LLM call here is optimising the wrong term.
+`get_cached_interest_categories` treats any existing row as a hit, so a
+newly active category is invisible to every already-cached interest until
+those rows are gone. Adding a category therefore **deletes every row in
+`interest_categories`**; the next push cycle re-resolves them via
+`resolve_interest_categories`.
 
-**Past articles are not re-classified.** A new category applies going
-forward. Back-filling would mean re-classifying the whole cache on every
-category addition, which is the expensive direction. (Separately, there
-*is* an unresolved backlog problem — articles cached during the
-2026-08-17 outage have no categories and are never retried. That needs
-distinguishing "never classified" from "classified as nothing applies",
-which today are both `categories: []`. Tracked as its own item, not part
-of this plan.)
+**Use the LLM for this, and don't optimise it.** That table currently
+holds **8 rows**. Re-classifying every interest is one batched call. The
+API cost that motivated the embedding work in
+`docs/analysis/cluster-measurements.md` is about *articles* — thousands
+per day and growing — not interests, which are a dozen strings of stable
+vocabulary. Avoiding an LLM call here optimises the wrong term.
+
+#### Merge: rewrite interests, resolve articles on read
+
+`interest_categories` rows are rewritten (`A` → `B`, deduplicated within
+each row's JSON list) rather than invalidated — the mapping is known, so
+there is nothing to re-derive and no reason to pay for a call.
+
+Article files are left alone. A read path resolves a name through
+`merged_into` before matching. The alternative — rewriting every cached
+YAML file — is a bulk operation over the whole cache for a rename, and the
+tombstone costs one dictionary lookup per match. If merges turn out to be
+frequent, revisit; a batch rewrite may become simpler than carrying the
+indirection.
+
+#### Retire: the hazard worth designing around
+
+Retiring a category removes it from every interest that mapped to it. If
+that leaves an interest with an **empty** list, that interest now matches
+**every** article, because `select_candidate_articles` treats an empty
+mapping as unrestricted (deliberately — an unclassified topic shouldn't be
+starved).
+
+So retiring a category can silently turn a subscriber's filter off. This
+is not hypothetical: it is the same shape as the bug fixed on 2026-08-20,
+where cached classification *failures* were stored as `[]` and six
+subscribers were receiving entirely unfiltered news.
+
+Retire therefore does not simply strip the name. It **re-resolves** every
+interest that mapped to the retired category, and if re-resolution leaves
+one empty, the admin is told which interests and which subscribers before
+the retire commits.
+
+#### Delete: only for categories that were never active
+
+Hard delete is allowed only from `proposed` or `rejected`, and only when
+no article file or interest row references the name. Anything that has
+ever been `active` can be `retired` or `merged`, never deleted — deleting
+it would leave orphaned names in article files that resolve to nothing and
+silently drop those articles out of every filter.
+
+### A6. The `centroid` column
+
+Reserved, unused at first. The measurements in
+`docs/analysis/cluster-measurements.md` point at eventually classifying by
+nearest centroid over embeddings — no API cost per article — rather than
+an LLM call per batch. The taxonomy is shared infrastructure between both
+designs; only the classifier changes. Adding a nullable BLOB now is free,
+and migrating a live table later is not.
+
+If that lands, `Activate` gains one step: compute the centroid from the
+sighted articles' embeddings and store it. Everything else in this design
+is unchanged.
+
+### A7. What is deliberately not solved here
+
+**Articles classified before a category existed do not get it.** A new
+category applies going forward. Backfilling would mean re-classifying the
+whole cache on every activation, which is the expensive direction and
+would grow with the cache.
+
+Separately and unresolved: articles cached during the 2026-08-17 outage
+have no categories and are **never retried**, because nothing distinguishes
+"never classified" from "classified as nothing applies" — both are
+`categories: []`. That is the same root cause as the interest-cache bug
+fixed on 2026-08-20, on the article side, and it needs a `classified_at`
+field on the cached record. Tracked separately; it is not part of this
+plan and blocks the current 17% categorization rate from improving.
 
 ---
 
