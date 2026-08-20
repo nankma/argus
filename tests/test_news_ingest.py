@@ -393,3 +393,123 @@ def test_run_ingestion_cycle_all_articles_already_cached_skips_classification_ca
     news_ingest.run_ingestion_cycle(model, now)
 
     model.with_structured_output.assert_not_called()
+
+
+# --- A3: taxonomy gaps recorded from a real cycle -------------------------
+
+
+def test_ingestion_records_a_sighting_for_a_label_outside_the_taxonomy(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """End-to-end: the classifier reaches for a label the taxonomy doesn't
+    have, and the cycle leaves evidence in the database rather than only a
+    log line nobody greps for. The three-day classification outage was
+    invisible for exactly that reason."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    article = _article("https://s.edu/a", title="Stanford launches AI curriculum")
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [article])])
+
+    model = _fake_classifying_model({0: ["AI", "Education"]})
+    news_ingest.run_ingestion_cycle(model, now)
+
+    assert users_db.count_recent_sightings(now) == {"Education": 1}
+    # the valid label still lands on the article
+    assert news_cache.read_all()[0]["categories"] == ["AI"]
+
+
+def test_ingestion_prunes_sightings_past_retention(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now - timedelta(days=60))
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    assert users_db.count_recent_sightings(now) == {}
+
+
+def test_a_sighting_does_not_make_the_label_usable(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """A proposed category must not start being offered to the classifier
+    just because it was seen. Only an admin activating it does that."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    article = _article("https://s.edu/a", title="Stanford launches AI curriculum")
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [article])])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Education"]}), now)
+
+    assert "Education" not in [name for name, _ in users_db.get_active_categories()]
+
+
+def test_proposals_are_reported_even_on_a_cycle_with_nothing_new(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, capsys
+):
+    """Regression test. The report call sat after `if not fetched: return`,
+    so a quiet cycle pruned the accumulated evidence but never showed it --
+    exactly the "it's in the logs if you go looking" failure this reporting
+    exists to avoid."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now - timedelta(days=1))
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    assert "Education x1" in capsys.readouterr().out
+
+
+def test_a_cycle_does_not_resurrect_a_rejected_category(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """End-to-end version of the users_db unit test. An admin's rejection
+    has to survive the classifier reaching for that label again -- otherwise
+    the same proposal comes back every cycle and the admin re-litigates a
+    decision they already made.
+
+    Worth having at this level rather than only on record_category_sighting:
+    the two bugs already fixed on this branch were both in how the pieces
+    joined up, not in the pieces."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now - timedelta(days=1))
+    with users_db._connect() as conn:
+        conn.execute("UPDATE categories SET status = 'rejected' WHERE name = 'Education'")
+
+    article = _article("https://s.edu/a", title="Stanford launches AI curriculum")
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [article])])
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Education"]}), now)
+
+    with users_db._connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM categories WHERE name = 'Education'"
+        ).fetchone()[0]
+    assert status == "rejected"
+    assert users_db.count_recent_sightings(now) == {}, "and it never alerts again"
+
+
+def test_a_cycle_survives_an_out_of_range_index_from_the_model(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """The out-of-range guard and the sighting write are tested separately;
+    this is the seam between them. news_ingest's callback does
+    article.get("link"), so it receives the empty dict the guard produces
+    and must record a sighting with no example rather than raising."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    article = _article("https://example.com/1", title="Real article")
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [article])])
+
+    news_ingest.run_ingestion_cycle(
+        _fake_classifying_model({0: ["AI"], 99: ["Education"]}), now
+    )
+
+    assert users_db.count_recent_sightings(now) == {"Education": 1}
+    with users_db._connect() as conn:
+        link, title = conn.execute(
+            "SELECT article_link, article_title FROM category_sightings"
+        ).fetchone()
+    assert (link, title) == (None, None)
+    assert news_cache.read_all()[0]["categories"] == ["AI"], "the good article is unaffected"

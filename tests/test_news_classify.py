@@ -290,3 +290,125 @@ def test_generated_prompt_preserves_the_curated_category_order():
     assert lines.index("Stock") == lines.index("Finance") + 1, (
         "Stock's description cross-references Finance and must follow it"
     )
+
+
+# --- A3: reporting labels outside the taxonomy ----------------------------
+
+
+def _model_returning(items):
+    class _M:
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, messages):
+            return self.schema.model_validate({"items": items})
+
+    return _M()
+
+
+def test_an_unknown_label_is_reported_with_its_example_article():
+    """The admin prompt needs an example -- a bare label with no article to
+    look at is much harder to decide about. This is why the callback carries
+    the article rather than just the name."""
+    seen = []
+    articles = [{"title": "Stanford launches free AI curriculum", "link": "https://s.edu/a",
+                 "summary": None}]
+
+    news_classify.classify_articles(
+        _model_returning([{"index": 0, "categories": ["AI", "Education"]}]),
+        articles, TAXONOMY, on_unknown_label=lambda label, art: seen.append((label, art)),
+    )
+
+    assert len(seen) == 1
+    label, article = seen[0]
+    assert label == "Education"
+    assert article["link"] == "https://s.edu/a"
+
+
+def test_a_repeated_unknown_label_is_reported_once_per_batch():
+    """Once per batch, not once per article. The same gap appearing five
+    times in one chunk is one observation of that gap, and counting it five
+    times would make a single batch look like a trend."""
+    seen = []
+    articles = [{"title": f"A{i}", "summary": None} for i in range(3)]
+
+    news_classify.classify_articles(
+        _model_returning([{"index": i, "categories": ["Education"]} for i in range(3)]),
+        articles, TAXONOMY, on_unknown_label=lambda label, art: seen.append(label),
+    )
+
+    assert seen == ["Education"]
+
+
+def test_known_labels_are_never_reported():
+    seen = []
+    news_classify.classify_articles(
+        _model_returning([{"index": 0, "categories": ["AI", "Robotics"]}]),
+        [{"title": "A", "summary": None}], TAXONOMY,
+        on_unknown_label=lambda label, art: seen.append(label),
+    )
+    assert seen == []
+
+
+def test_an_out_of_range_index_does_not_lose_the_batch():
+    """The index comes from the model, so a malformed reply can point past
+    the end of the chunk. That must not take down classification for the
+    articles that were fine."""
+    seen = []
+    result = news_classify.classify_articles(
+        _model_returning([
+            {"index": 0, "categories": ["AI"]},
+            {"index": 99, "categories": ["Education"]},
+        ]),
+        [{"title": "A", "summary": None}], TAXONOMY,
+        on_unknown_label=lambda label, art: seen.append((label, art)),
+    )
+
+    assert result[0] == ["AI"]
+    assert seen == [("Education", {})], "reported with no example rather than crashing"
+
+
+def test_classification_works_without_a_callback():
+    """on_unknown_label is optional -- classify_interests doesn't pass one."""
+    result = news_classify.classify_articles(
+        _model_returning([{"index": 0, "categories": ["AI", "Education"]}]),
+        [{"title": "A", "summary": None}], TAXONOMY,
+    )
+    assert result == {0: ["AI"]}
+
+
+def test_a_malformed_entry_does_not_block_a_later_good_example():
+    """Regression test. `rejected` used to gate both the log-line dedup and
+    the callback, so whichever entry mentioned a label FIRST won. A
+    malformed one (index past the end, no article) arriving before a valid
+    one meant the admin got the label with no example, even though a
+    perfectly good example was in the same batch.
+
+    The suite was green with that bug: the existing out-of-range test
+    happened to use the other ordering."""
+    seen = []
+    articles = [{"title": "Stanford AI curriculum", "link": "https://s.edu/a", "summary": None}]
+
+    news_classify.classify_articles(
+        _model_returning([
+            {"index": 99, "categories": ["Education"]},   # malformed, comes first
+            {"index": 0, "categories": ["Education"]},    # the real example
+        ]),
+        articles, TAXONOMY, on_unknown_label=lambda label, art: seen.append((label, art)),
+    )
+
+    assert len(seen) == 1, "still reported once per batch"
+    assert seen[0][1].get("link") == "https://s.edu/a"
+
+
+def test_a_label_seen_only_on_a_malformed_entry_is_still_reported():
+    """A sighting with no example is still evidence. Dropping it would be
+    worse than showing the admin a label with nothing attached."""
+    seen = []
+    news_classify.classify_articles(
+        _model_returning([{"index": 99, "categories": ["Education"]}]),
+        [{"title": "A", "summary": None}], TAXONOMY,
+        on_unknown_label=lambda label, art: seen.append((label, art)),
+    )
+    assert seen == [("Education", {})]
