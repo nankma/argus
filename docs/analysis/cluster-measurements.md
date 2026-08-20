@@ -425,3 +425,145 @@ fastembed out of anything synchronous.
 separation) and fastembed (2× the memory, ~1000× the latency, better
 separation). sentence-transformers stays the offline quality reference and
 cannot be deployed to this VM.
+
+---
+
+# Rough taxonomy from embeddings, both candidates, 2026-08-19
+
+Built with `docs/analysis/tools/build_taxonomy.py` on the same 2,262
+article snapshot. The pipeline is the three-step design: encode and
+cluster offline, keep the centroids, classify new articles against them at
+runtime with no LLM call.
+
+Cluster labels come from **c-TF-IDF** — pool each cluster's documents into
+one pseudo-document, then TF-IDF across clusters, so terms frequent *in* a
+cluster but rare *across* clusters win. Plain centroid-nearest-terms gave
+labels like "ai, new, hn" because it just surfaces whatever is globally
+common.
+
+## The finding that unblocked fastembed: anisotropy
+
+Run as-is, fastembed produced **2 clusters and 2 noise points from 2,262
+articles** — one undifferentiated blob. The cause is visible in one number:
+its **random-pair cosine baseline is 0.502**. Two unrelated articles are
+already 50% similar, so a density-based clusterer has no contrast to grip.
+model2vec's baseline is 0.120.
+
+This is the well-known anisotropy of BERT-family embeddings — they occupy a
+narrow cone rather than filling the sphere. Subtracting the corpus mean
+before normalizing fixes it completely: baseline 0.502 → 0.001, and 2 raw
+clusters → 75.
+
+**Centering is not optional for either backend, and it must use the build
+set's mean, not the whole corpus's.** Getting that wrong is subtle and was
+a real bug here: centering the build subset by a mean computed over a
+superset leaves a residual offset that re-introduces the anisotropy, and it
+collapsed the model2vec holdout run from 40 clusters to 2. It also matters
+practically — at build time only the build set exists. The mean is stored
+with the centroids and must be applied to every article classified later,
+or runtime vectors land in a different space than the taxonomy.
+
+## The derived categories
+
+Both produce plausible topic sets, but with a consistent difference in
+grain. Selected, by size:
+
+| model2vec (36 kept) | fastembed (38 kept) |
+|---|---|
+| bitcoin, btc, price | bitcoin, price |
+| chatgpt, chatgpt work, codex | openai, safety, frontier |
+| cyber, cybersecurity | codex, openai, gpt |
+| unitree, robot, humanoid | unitree, humanoid, robot |
+| hugging face, inference providers | hugging face, face inference |
+| apple, iphone, airpods | **gpu, kernels, cuda** |
+| stocks, chinese, hong kong | **transformers, ocr, transformers js** |
+| battery, batteries, nuclear, ev | **trl, batching, continuous batching** |
+| trump, canada, tariffs | **lerobot v0, agents** |
+| blockchain, sec | **embedding, sentence, supervised** |
+| climate, planes, warming | **leaderboard, evaluation, asr** |
+| headphones, garmin, trackers | trump, canada, tariffs |
+
+**fastembed resolves finer technical distinctions** — CUDA kernels,
+continuous batching, ASR evaluation, late-interaction embeddings are all
+separate topics for it, where model2vec keeps them inside broader
+"ai"/"coding" clusters. For a technology-news product that grain is worth
+something.
+
+Both keep a legitimate "google, spirit airlines" cluster. That is a real
+story (Google bought Spirit's data at a bankruptcy auction), not the
+word-attractor failure TF-IDF had — the earlier problem was *EmbeddingGemma*
+landing in it, and neither dense backend does that.
+
+**Coverage is the honest weak point: only 25–30% of articles fall into any
+kept cluster.** HDBSCAN leaves 670–873 as noise and the coherence prune
+removes about half the rest. A taxonomy that classifies a quarter of the
+corpus is not yet a replacement for the 13 LLM categories; it is a
+high-precision signal over part of the feed.
+
+## Absorbing unseen articles (build on older 60%, classify newer 40%)
+
+| | model2vec | fastembed |
+|---|---|---|
+| raw clusters → kept | 40 → 20 | 40 → 20 |
+| build-set coverage | 28% | 23% |
+| absorbed at sim ≥ 0.30 | 40.9% | **58.8%** |
+| absorbed at sim ≥ 0.40, margin ≥ 0.02 | 20.9% | **33.0%** |
+| median best-match | 0.265 | **0.336** |
+| vs a random cluster | −0.010 | −0.003 |
+
+fastembed absorbs unseen articles substantially better — 58.8% against
+40.9% at the loose threshold, and a higher median match throughout. Both
+score ~0 against a random cluster, so the matches are real.
+
+## Hot news via fine clusters
+
+Second pass inside each rough cluster, single-linkage at cosine ≥ 0.75 —
+a rough cluster is a *topic*, a fine cluster should be one *event*.
+
+This works, and the standout is the same story for both backends:
+
+| story | model2vec | fastembed |
+|---|---|---|
+| **Unitree humanoid-robot IPO** | 11 articles, 3 sources | **15 articles, 4 sources** |
+| Strategy / Bitcoin purchases | 4 articles, 1 source | 5 articles, 1 source |
+| Hugging Face inference providers | 2 articles, 1 source | 5 articles, 1 source |
+| Apple camera AirPods leak | **5 articles, 4 sources** | not surfaced |
+| Claude text watermarking | not surfaced | **3 articles, 3 sources** |
+| ChatGPT for Teens | 4 articles, 3 sources | — |
+
+The Unitree IPO is exactly the intended signal: 15 articles across gnews,
+BBC, Guardian and Nikkei, all covering one event, on a day it was genuinely
+the biggest story in the feed. Cluster size plus **source count** is the
+usable metric — size alone rewards a single outlet publishing a series, as
+with the four `openai_blog` "ChatGPT Work" posts, which are not hot news.
+
+fastembed found the larger cross-source groups; model2vec found more groups
+overall (13 vs 7 on the holdout build) but skewed single-source.
+
+## Where this leaves the two candidates
+
+| | model2vec | fastembed |
+|---|---|---|
+| resident memory | **91 MB** | 172 MB |
+| per article | **0.2 ms** | 96–300 ms |
+| category grain | broad | **finer, more technical** |
+| absorption of unseen | 40.9% | **58.8%** |
+| cross-source hot news | weaker | **better** |
+
+Both fit the VM. fastembed is better at the job on every quality axis
+measured; model2vec is roughly 500x cheaper per article and half the
+memory. Neither is disqualified, and the choice is a product call about
+whether the finer grain justifies the cost.
+
+## Reproducing
+
+```powershell
+conda activate myfirstagent
+python docs/analysis/tools/build_taxonomy.py --backend model2vec --center --save
+python docs/analysis/tools/build_taxonomy.py --backend fastembed --center --save
+python docs/analysis/tools/build_taxonomy.py --backend fastembed --center --holdout
+```
+
+`--save` writes the centroids, the stored mean, and the coherence cutoff to
+`docs/analysis/data/`. That file is what a runtime classifier would load;
+it is ~50-100 KB.
