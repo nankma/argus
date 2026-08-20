@@ -245,6 +245,18 @@ SEED_CATEGORIES: list[tuple[str, str]] = [
 
 CATEGORY_SIGHTING_RETENTION_DAYS = 30
 
+# Written by the code, never chosen by the model. It marks "the classifier
+# looked and nothing applied", which needs to be distinguishable from "the
+# classifier never ran" -- collapsing those two is what hid a three-day
+# outage, since `categories: []` looked identical either way.
+#
+# Deliberately NOT offered to the model. status='system' keeps it out of
+# get_active_categories(), and therefore out of the prompt: give an LLM
+# classifier a catch-all option and it stops working for the answer,
+# reaching for the escape hatch instead of deciding between Finance and
+# Policy. The model still just returns an empty list; the code translates.
+UNCLASSIFIABLE = "Other"
+
 
 def _seed_categories(conn) -> None:
     """Populates the taxonomy on first run only. INSERT OR IGNORE rather
@@ -256,6 +268,15 @@ def _seed_categories(conn) -> None:
         "(name, description, status, created_at, created_by, sort_order) "
         "VALUES (?, ?, 'active', ?, 'seed', ?)",
         [(name, description, now, i) for i, (name, description) in enumerate(SEED_CATEGORIES)],
+    )
+    # status='system', so get_active_categories() -- and therefore the
+    # classifier prompt -- never sees it. It exists as a row so it resolves
+    # like any other name and an admin can count how big the bucket is.
+    conn.execute(
+        "INSERT OR IGNORE INTO categories "
+        "(name, description, status, created_at, created_by, sort_order) "
+        "VALUES (?, ?, 'system', ?, 'seed', ?)",
+        (UNCLASSIFIABLE, "the classifier found nothing applicable", now, len(SEED_CATEGORIES)),
     )
 
 

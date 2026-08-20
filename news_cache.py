@@ -84,7 +84,8 @@ def _parse_iso(raw: str | None) -> datetime | None:
     return datetime.fromisoformat(raw) if raw else None
 
 
-def write_article(source_key: str, article: dict, categories: list[str], fetched_at: datetime) -> Path:
+def write_article(source_key: str, article: dict, categories: list[str] | None,
+                  fetched_at: datetime) -> Path:
     """`source_key` is the registry key (e.g. "bbc_business", matching
     SOURCE_REGISTRY in news_sources.py), not the article's own "source"
     field (a display name like "BBC Business") -- the filename needs the
@@ -104,7 +105,12 @@ def write_article(source_key: str, article: dict, categories: list[str], fetched
         "published": article.get("published"),
         "published_dt": _iso(article.get("published_dt")),
         "fetched_at": _iso(fetched_at),
-        "categories": list(categories),
+        # None, not [], when the article was never classified. The two are
+        # different facts -- "nothing applied" versus "we don't know" -- and
+        # writing [] for both is what made a three-day classification outage
+        # indistinguishable from normal operation. news_ingest writes
+        # users_db.UNCLASSIFIABLE for the first case.
+        "categories": list(categories) if categories is not None else None,
     }
     path = _file_path(source_key, link)
     with open(path, "w", encoding="utf-8") as f:
