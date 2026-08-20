@@ -26,11 +26,37 @@ repeat what's already written down.
 
 # Workflow
 
+0. **Check CI before you build.** `gh run list --limit 3`. If the head
+   commit's run failed — or hasn't finished — stop and report that
+   instead of deploying. A red CI is a diagnosis to hand back, not
+   something to work around.
+
+   Do **not** substitute a local `pytest` run for this. On 2026-08-19 a
+   deploy went out on top of two failed CI runs because local pytest was
+   green: three analysis scripts under `docs/analysis/tools/` were named
+   `test_*.py`, so pytest collected them, and they imported `numpy` /
+   `sklearn`, which the dev machine had from unrelated work and CI's
+   `environment.yml` deliberately does not. Same command, same repo,
+   opposite results — CI's environment is the one that resembles the
+   image, and a dev machine's does not.
+
+   If CI is red for something genuinely not in the image (`docs/`,
+   `pytest.ini`, `tools/` — check the `Dockerfile`'s `COPY` line, which
+   is an explicit file list), say so explicitly in your report rather
+   than deploying quietly past it. The caller decides.
+
 1. **Build.** `docker build -t myfirstagent-bot .`, then
    `docker run --rm myfirstagent-bot python -c "import combined_bot"` as
    a sanity check. If a new `.py` module was added since the last
    deploy, confirm it's in the `Dockerfile`'s `COPY` line first — this
    has broken a deploy before.
+
+   Note the inverse too: a commit that touches nothing in that `COPY`
+   list changes nothing in the image. Check
+   `git diff --name-only <deployed-sha>..HEAD -- <the COPY'd files>`
+   before rebuilding; if it's empty, the running container already has
+   the right code and the honest answer is "no deploy needed", not a
+   redundant rebuild.
 2. **Transfer and restart.** `docker save | ssh ... docker load`, then
    restart with the same flags as `local-infra/infrastructure.yaml`'s
    `vm_bot.docker_run.command`. Wait for `docker logs` to show "Both bots
@@ -40,6 +66,22 @@ repeat what's already written down.
      `PYTHONUNBUFFERED` incident in the preloaded skill).
    - `python tools/run_smoke_tests.py` passes.
    - `python tools/check_telemetry.py` passes, if `PHOENIX_ENABLED` is set.
+   - `python tools/check_data_persistence.py` passes — every directory
+     meant to outlive a restart resolves inside `/data`.
+
+   That last one exists because the failure is invisible. `NEWS_CACHE_DIR`
+   was unset for weeks: the container started fine, logged nothing
+   unusual, and wrote its article cache to `/app/news_cache` on the
+   container filesystem, which every redeploy then destroyed. 2,271
+   articles survived only because nothing happened to restart for three
+   days. An env var that silently falls back to a working-but-ephemeral
+   default produces no error to notice, so it has to be asserted.
+
+   **Introducing a new volume-backed directory?** Copy the existing data
+   out of the old container *before* stopping it
+   (`docker exec <old> cp -r /app/<dir> /data/<dir>`), or the first deploy
+   that fixes the path is also the one that discards everything the old
+   path had accumulated.
 
 # If something fails: diagnose, don't just report FAIL
 
