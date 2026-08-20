@@ -36,12 +36,18 @@ for f in *.yaml; do
   s=$(grep -m1 '^source_key:' "$f" | cut -d' ' -f2)
   d=$(grep -m1 '^published_dt:' "$f" | cut -d' ' -f2 | tr -d "'")
   a=$(grep -m1 '^fetched_at:' "$f" | cut -d' ' -f2 | tr -d "'")
-  # `categories` is a YAML list and always the last key, written either
-  # inline ("categories: []") or as a block of "- Name" lines. Take
-  # everything from that key to EOF, join it onto one line, and reduce it
-  # to a comma-separated list.
+  # `categories` is always the last key, written inline ("categories: []",
+  # "categories: null") or as a block of "- Name" lines. Take everything
+  # from that key to EOF, join it onto one line, and reduce it to a
+  # comma-separated list.
+  #
+  # The "null" substitution matters: since 2026-08-20 a never-classified
+  # article is written as `categories: null`, distinct from Other meaning
+  # the classifier found nothing applicable. Without blanking it, "null"
+  # survives as a literal string and every consumer of this TSV counts a
+  # category by that name.
   c=$(sed -n '/^categories:/,$p' "$f" | tr '\n' ' ' \
-      | sed "s/^categories: *//; s/\[//g; s/\]//g; s/- */,/g; s/  */ /g; s/^ *//; s/ *$//; s/^,//")
+      | sed "s/^categories: *//; s/^null *$//; s/\[//g; s/\]//g; s/- */,/g; s/  */ /g; s/^ *//; s/ *$//; s/^,//")
   t=$(grep -m1 '^title:' "$f" | sed 's/^title: //' | tr -d '\t')
   u=$(grep -m1 '^summary:' "$f" | sed 's/^summary: //' | cut -c1-300 | tr -d '\t')
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s" "$d" "$a" "$c" "$t" "$u"

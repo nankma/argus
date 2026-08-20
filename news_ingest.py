@@ -340,8 +340,21 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
             label, now, article.get("link"), article.get("title")
         ),
     )
+    unclassified = 0
     for i, (source_key, article) in enumerate(fetched):
-        news_cache.write_article(source_key, article, categories_by_index.get(i, []), now)
+        # Three distinct outcomes, three distinct records. `.get(i)` is None
+        # when the chunk this article was in failed, which is NOT the same as
+        # the model saying nothing applied -- writing [] for both is what let
+        # a three-day classification outage look like normal operation.
+        categories = categories_by_index.get(i)
+        if categories is not None and not categories:
+            categories = [users_db.UNCLASSIFIABLE]
+        if categories is None:
+            unclassified += 1
+        news_cache.write_article(source_key, article, categories, now)
+    if unclassified:
+        print(f"[news_ingest] {unclassified} of {len(fetched)} article(s) cached "
+              f"WITHOUT being classified -- the classifier failed for them")
 
     # The new/duplicate split here is logged specifically so the RSS cap
     # (MAX_RESULTS_PER_SOURCE_RSS) can be tuned later from real data rather

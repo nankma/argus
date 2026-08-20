@@ -159,6 +159,13 @@ def select_candidate_articles(
     match against -- this is the exact mechanism that would have kept
     the Nikkei Asia earthquake/society articles out of a digest, since
     neither classifies into any of the 13 tech-industry categories.
+
+    Since 2026-08-20 the cache distinguishes "the classifier found nothing
+    applicable" (users_db.UNCLASSIFIABLE) from "never classified" (None).
+    This function deliberately still treats them alike -- neither has a
+    category that can match a topic, so both are excluded the same way --
+    but the distinction now exists in the data for anything that needs it,
+    which is how a silent classification outage becomes detectable.
     Known, accepted overlap with a separate case this can't distinguish:
     an article left uncategorized because news_classify.classify_articles
     failed for its whole ingestion batch (fails open, see that

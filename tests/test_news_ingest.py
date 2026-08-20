@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import news_cache
 import news_ingest
+import news_push
 import news_sources
 import users_db
 
@@ -513,3 +514,80 @@ def test_a_cycle_survives_an_out_of_range_index_from_the_model(
         ).fetchone()
     assert (link, title) == (None, None)
     assert news_cache.read_all()[0]["categories"] == ["AI"], "the good article is unaffected"
+
+
+# --- three distinct classification outcomes -------------------------------
+#
+# `categories: []` used to mean two different things, and that ambiguity is
+# what let a three-day classification outage look exactly like normal
+# operation. Each of these pins one of the three states apart.
+
+
+def test_an_article_the_model_found_no_category_for_is_marked_Other(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """The model answered, and its answer was "nothing applies". That is a
+    real result, so it gets a real marker rather than an empty list."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [_article("https://e.com/1")])])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: []}), now)
+
+    assert news_cache.read_all()[0]["categories"] == [users_db.UNCLASSIFIABLE]
+
+
+def test_an_article_the_classifier_never_reached_is_recorded_as_unknown(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, capsys
+):
+    """The chunk failed, so nothing is known about this article. None, not
+    an empty list -- and said out loud, because the silent version of this
+    is precisely what hid the outage."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [_article("https://e.com/1")])])
+
+    failing = MagicMock()
+    failing.with_structured_output.return_value.invoke.side_effect = RuntimeError("boom")
+    news_ingest.run_ingestion_cycle(failing, now)
+
+    assert news_cache.read_all()[0]["categories"] is None
+    assert "WITHOUT being classified" in capsys.readouterr().out
+
+
+def test_Other_is_never_offered_to_the_classifier(isolated_subscribers_db):
+    """Give an LLM classifier a catch-all and it stops working for the
+    answer. "Other" is assigned by code, never chosen by the model, so it
+    must not appear in the prompt."""
+    names = [name for name, _ in users_db.get_active_categories()]
+
+    assert users_db.UNCLASSIFIABLE not in names
+    taxonomy = news_ingest.news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+    assert users_db.UNCLASSIFIABLE not in taxonomy.prompt_fragment()
+
+
+def test_Other_still_exists_as_a_row(isolated_subscribers_db):
+    """Not active, but present -- so it resolves like any other name and an
+    admin can count how big the bucket has become."""
+    with users_db._connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM categories WHERE name = ?", (users_db.UNCLASSIFIABLE,)
+        ).fetchone()
+    assert status == ("system",)
+
+
+def test_Other_does_not_widen_what_a_subscriber_receives(
+    isolated_subscribers_db, isolated_news_cache
+):
+    """Behaviour must be unchanged at the one place that reads categories:
+    an "Other" article is excluded from a topic with real categories,
+    exactly as an empty list was."""
+    article = {"link": "https://e.com/1", "categories": [users_db.UNCLASSIFIABLE],
+               "published_dt": None, "fetched_at": None, "source_key": "bbc_business",
+               "title": "t", "summary": None, "source": "s"}
+
+    result = news_push.select_candidate_articles(
+        [article], ["AI"], {"AI": ["AI", "Research"]}, None, set()
+    )
+
+    assert result == []

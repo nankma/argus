@@ -256,8 +256,12 @@ def classify_articles(model, articles: list[dict], taxonomy: Taxonomy,
     costs one chunk's categories instead of the entire cycle's.
 
     Fails open on any error (model call failure, malformed response) by
-    omitting that chunk's indexes -- callers treat a missing index as "no
-    categories assigned" and still cache the article uncategorized, same
+    omitting that chunk's indexes. A missing index means UNCLASSIFIED --
+    nothing is known about that article -- which callers must keep distinct
+    from an index that IS present with an empty list, meaning the model
+    looked and nothing applied. news_ingest records the first as null and
+    the second as users_db.UNCLASSIFIABLE; collapsing them is what made a
+    three-day outage look like normal operation. Same
     reasoning as guardrails.classify_message: a classification hiccup
     shouldn't block caching the article, it should just make it harder to
     find via category filtering until a later cycle reclassifies it.
@@ -286,6 +290,7 @@ def classify_articles(model, articles: list[dict], taxonomy: Taxonomy,
     if failed_chunks:
         print(
             f"[news_classify] {failed_chunks} of {total_chunks} chunk(s) failed -- "
-            f"{len(articles) - len(categories)} article(s) left uncategorized"
+            f"{len(articles) - len(categories)} article(s) left UNCLASSIFIED "
+            f"(nothing known about them -- not the same as having no category)"
         )
     return categories

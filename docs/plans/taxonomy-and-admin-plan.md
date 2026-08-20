@@ -125,6 +125,25 @@ keep accumulating evidence. One boolean cannot carry that.
                                         the label
 ```
 
+There is a sixth value, deliberately outside that diagram:
+**`system`**, held by exactly one row — `Other`.
+
+`Other` marks "the classifier looked and nothing applied", which has to be
+distinguishable from "the classifier never ran" (recorded as
+`categories: null`). Collapsing those two is what let a three-day
+classification outage look identical to normal operation. It is assigned
+by `news_ingest`, never chosen by the model: an LLM given a catch-all
+option stops working for the answer and reaches for the escape hatch, so
+it must stay out of the prompt.
+
+**Why not reuse `retired`**, which also means "not offered to the
+classifier, old articles keep the label": `retired` is a state an admin
+put a category into and can take it back out of. Listing `Other` among
+retired categories would offer it for reactivation, and activating it is
+exactly the thing that must never happen — it would enter the prompt. A
+separate value says "this is not an admin decision" without relying on
+anyone remembering the exception.
+
 Only `status='active'` rows are offered to the classifier. Everything else
 exists so the system can remember a decision instead of re-litigating it.
 
