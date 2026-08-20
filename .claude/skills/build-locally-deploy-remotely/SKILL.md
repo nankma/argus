@@ -46,6 +46,19 @@ image.
    command). `docker load` replaces the `myfirstagent-bot:latest` tag but
    doesn't restart anything using the old image automatically.
 
+   **If the deploy request asks you to confirm some DB row count is
+   "unchanged" by the deploy** (a subscriber count, a table's row count,
+   etc.), read that count from the *old* container before this stop/rm,
+   not just from the new one after. Real gap, 2026-08-20: a deploy report
+   was asked to confirm the subscriber count was unchanged, but the count
+   was only read post-restart (47, against a stale 43 recorded from two
+   deploys earlier) — with no pre-restart baseline from *this specific*
+   deploy, "unchanged" could only be argued from the code diff (neither
+   changed file touches that table) rather than actually measured. A
+   single post-hoc snapshot answers "what is the count now", not "did
+   this deploy change it" — those are different claims, and the report
+   should say which one it's actually making.
+
 ## After every deploy: check `docker logs` actually has output
 
 **Step 3.5, before the smoke test below:** run
