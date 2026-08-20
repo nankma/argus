@@ -393,3 +393,53 @@ def test_run_ingestion_cycle_all_articles_already_cached_skips_classification_ca
     news_ingest.run_ingestion_cycle(model, now)
 
     model.with_structured_output.assert_not_called()
+
+
+# --- A3: taxonomy gaps recorded from a real cycle -------------------------
+
+
+def test_ingestion_records_a_sighting_for_a_label_outside_the_taxonomy(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """End-to-end: the classifier reaches for a label the taxonomy doesn't
+    have, and the cycle leaves evidence in the database rather than only a
+    log line nobody greps for. The three-day classification outage was
+    invisible for exactly that reason."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    article = _article("https://s.edu/a", title="Stanford launches AI curriculum")
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [article])])
+
+    model = _fake_classifying_model({0: ["AI", "Education"]})
+    news_ingest.run_ingestion_cycle(model, now)
+
+    assert users_db.count_recent_sightings(now) == {"Education": 1}
+    # the valid label still lands on the article
+    assert news_cache.read_all()[0]["categories"] == ["AI"]
+
+
+def test_ingestion_prunes_sightings_past_retention(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now - timedelta(days=60))
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    assert users_db.count_recent_sightings(now) == {}
+
+
+def test_a_sighting_does_not_make_the_label_usable(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """A proposed category must not start being offered to the classifier
+    just because it was seen. Only an admin activating it does that."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    article = _article("https://s.edu/a", title="Stanford launches AI curriculum")
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [article])])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Education"]}), now)
+
+    assert "Education" not in [name for name, _ in users_db.get_active_categories()]

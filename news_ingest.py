@@ -174,6 +174,26 @@ def _queries_for_source(source_key: str, now: datetime, interests: list[str]) ->
     return interests
 
 
+def _report_category_proposals(now: datetime) -> None:
+    """Prints what the classifier has been asking for that the taxonomy
+    doesn't have.
+
+    Deliberately only a log line for now. The threshold that decides when
+    this becomes an admin prompt (docs/plans/taxonomy-and-admin-plan.md A4)
+    is currently a placeholder of 5-in-30-days picked from a single
+    observation of "Education", and choosing it properly needs the real
+    distribution first. Accumulating visibly and deciding later beats
+    guessing a threshold now and then tuning it against alerts nobody
+    trusts."""
+    proposals = users_db.count_recent_sightings(now)
+    if not proposals:
+        return
+    ranked = sorted(proposals.items(), key=lambda kv: -kv[1])
+    summary = ", ".join(f"{name} x{count}" for name, count in ranked[:8])
+    print(f"[news_ingest] taxonomy gaps proposed by the classifier "
+          f"(last {users_db.CATEGORY_SIGHTING_RETENTION_DAYS}d): {summary}")
+
+
 def run_ingestion_cycle(model, now: datetime | None = None) -> None:
     """One scheduler tick. Every outcome is printed -- same reasoning as
     news_push.py's run_push_cycle: a silent per-source/per-cycle failure
@@ -190,6 +210,10 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
 
     deleted = news_cache.cleanup_expired(now)
     print(f"[news_ingest] tick at {now.isoformat()}: cleaned up {deleted} expired cache entr{'y' if deleted == 1 else 'ies'}")
+    # Sightings age out on the same tick as the cache, so the threshold
+    # question stays "how often recently" rather than "how often ever" --
+    # see users_db.CATEGORY_SIGHTING_RETENTION_DAYS.
+    users_db.prune_category_sightings(now)
 
     interests = users_db.list_all_interests()
     fetched: list[tuple[str, dict]] = []
@@ -303,8 +327,12 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
     # disagree about what a valid answer is.
     taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
     categories_by_index = news_classify.classify_articles(
-        model, [a for _, a in fetched], taxonomy
+        model, [a for _, a in fetched], taxonomy,
+        on_unknown_label=lambda label, article: users_db.record_category_sighting(
+            label, now, article.get("link"), article.get("title")
+        ),
     )
+    _report_category_proposals(now)
     for i, (source_key, article) in enumerate(fetched):
         news_cache.write_article(source_key, article, categories_by_index.get(i, []), now)
 

@@ -165,7 +165,8 @@ def classify_interests(model, interests: list[str], taxonomy: Taxonomy) -> dict[
 MAX_ARTICLES_PER_CALL = 50
 
 
-def _classify_one_batch(model, articles: list[dict], taxonomy: Taxonomy) -> dict[int, list[str]]:
+def _classify_one_batch(model, articles: list[dict], taxonomy: Taxonomy,
+                        on_unknown_label=None) -> dict[int, list[str]]:
     """One structured-output call. Returns {} on any failure -- see
     classify_articles for the fail-open reasoning."""
     try:
@@ -182,20 +183,33 @@ def _classify_one_batch(model, articles: list[dict], taxonomy: Taxonomy) -> dict
     if result is None:
         print(f"[news_classify] batch of {len(articles)} returned no result")
         return {}
-    return _valid_categories(result, taxonomy)
+    return _valid_categories(result, taxonomy, articles, on_unknown_label)
 
 
-def _valid_categories(result: ClassificationBatch, taxonomy: Taxonomy) -> dict[int, list[str]]:
+def _valid_categories(result: ClassificationBatch, taxonomy: Taxonomy,
+                      articles: list[dict], on_unknown_label=None
+                      ) -> dict[int, list[str]]:
     """Drops labels the model invented that aren't in the taxonomy, keeping
     everything else. An article left with no valid labels keeps an empty
     list -- same as the model saying nothing applies.
 
-    Rejected labels are logged rather than silently discarded, because they
-    are useful signal in their own right: a label the model keeps reaching
-    for is a gap in the taxonomy. "Education" is what surfaced this. The
-    taxonomy is explicitly revisable -- see
-    docs/plans/taxonomy-and-admin-plan.md, where these labels become the
-    evidence an admin decides on."""
+    Rejected labels are reported rather than silently discarded, because
+    they are useful signal in their own right: a label the model keeps
+    reaching for is a gap in the taxonomy. "Education" is what surfaced
+    this. See docs/plans/taxonomy-and-admin-plan.md, where these labels
+    become the evidence an admin decides on.
+
+    `on_unknown_label(label, article)` is how they leave this module. A
+    callback rather than a database write here, and rather than a richer
+    return type, for two reasons: it keeps this module free of a database
+    dependency (the same reason Taxonomy is a parameter), and it carries
+    the example article along, which the admin prompt needs -- a bare label
+    with no example is much harder to make a decision about.
+
+    The first article seen for a label is passed, not all of them: this
+    runs per 50-article chunk many times a day, and the admin prompt shows
+    two or three examples, so accumulating every one would grow a table
+    nobody reads to the bottom of."""
     categories: dict[int, list[str]] = {}
     rejected: set[str] = set()
     for item in result.items:
@@ -203,8 +217,14 @@ def _valid_categories(result: ClassificationBatch, taxonomy: Taxonomy) -> dict[i
         for name in item.categories:
             if name in taxonomy:
                 kept.append(name)
-            else:
+            elif name not in rejected:
                 rejected.add(name)
+                if on_unknown_label is not None:
+                    # index is the model's, so it can be out of range if the
+                    # reply is malformed -- don't let that lose the batch
+                    article = (articles[item.index]
+                               if 0 <= item.index < len(articles) else {})
+                    on_unknown_label(name, article)
         categories[item.index] = kept
     if rejected:
         print(f"[news_classify] dropped {len(rejected)} label(s) outside the "
@@ -212,7 +232,8 @@ def _valid_categories(result: ClassificationBatch, taxonomy: Taxonomy) -> dict[i
     return categories
 
 
-def classify_articles(model, articles: list[dict], taxonomy: Taxonomy) -> dict[int, list[str]]:
+def classify_articles(model, articles: list[dict], taxonomy: Taxonomy,
+                      on_unknown_label=None) -> dict[int, list[str]]:
     """Returns {index: categories} for every article in `articles` that the
     model actually returned an entry for, where the index is into
     `articles` as given.
@@ -242,7 +263,7 @@ def classify_articles(model, articles: list[dict], taxonomy: Taxonomy) -> dict[i
     for start in range(0, len(articles), MAX_ARTICLES_PER_CALL):
         chunk = articles[start:start + MAX_ARTICLES_PER_CALL]
         total_chunks += 1
-        result = _classify_one_batch(model, chunk, taxonomy)
+        result = _classify_one_batch(model, chunk, taxonomy, on_unknown_label)
         if not result:
             failed_chunks += 1
         for local_index, cats in result.items():
