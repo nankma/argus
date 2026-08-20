@@ -697,3 +697,90 @@ degraded: Perigon is 403ing on an exhausted monthly quota (see
 a 24–36 h free-tier delay. **The niche-interest gap is an ingestion
 problem wearing a retrieval problem's clothes**, and no amount of
 classifier work addresses it.
+
+---
+
+# Does human-merging the categories help? 2026-08-19
+
+First a distinction that matters for the question: **kNN and BM25 do not
+produce categories.** They are retrieval — given a query, they rank
+articles. Categories come from the clustering step. But there is a real
+design where a human writes the category list and retrieval fills it, so
+both were measured:
+
+- **A — discover then merge**: cluster, then a human merges fragments into
+  real categories (`trump/iran` + `trump/tariffs` + `abc/disney/fcc` →
+  Politics).
+- **B — name then retrieve**: a human writes the category names first and
+  each category's members are whatever kNN returns for its name. No
+  clustering in the path.
+
+Measured with `docs/analysis/tools/test_merged_categories.py`, merging the
+36 model2vec clusters into 8 categories.
+
+## Merging fixes exactly one of the three failure modes
+
+| interest | relevant | unmerged cluster | **A: merged** | B: named category | direct kNN on the interest |
+|---|---|---|---|---|---|
+| robotics | 104 | 12% | **36%** | 90% | **90%** |
+| Bitcoin | 70 | 81% | **83%** | 91% | **97%** |
+| semiconductors | 38 | 8% | 8% | 24% | **74%** |
+| quantum computing | 36 | 0% | 0% | 11% | **100%** |
+| 光通訊 | 7 | 14% | **0%** | 14% | **71%** |
+
+Merging does what it was predicted to do and nothing more:
+
+- **Fragmentation: fixed.** Robotics tripled, 12% → 36%, because the two
+  sibling clusters (`robotics, autonomous` and `unitree, robot, humanoid`)
+  became one bucket. This is real and it is the whole benefit.
+- **The coverage ceiling: unchanged.** 629/2262 articles are in a merged
+  category — 28%, the same 28% as before. Merging combines buckets; it
+  adds no articles to them. The 72% HDBSCAN discarded as noise are still
+  unreachable.
+- **Short-query routing: made worse.** 光通訊 went 14% → **0%**, routed to
+  "Energy". A merged centroid is the average of a broad mixture, which is
+  *harder* for a short string to match than a specific cluster centroid,
+  not easier. Quantum computing routes to "Health". Merging widens the
+  buckets and blurs exactly the signal a two-word query needs.
+
+## Any category layer between the interest and the articles costs recall
+
+The last two columns are the finding. Design B (name the category, then
+retrieve for that name) beats merged clusters everywhere — but querying
+with the **subscriber's own interest string** beats B everywhere too, and
+by a lot: 100% vs 11% on quantum computing, 74% vs 24% on semiconductors,
+71% vs 14% on 光通訊.
+
+The reason is structural. The interest *is* the query. Routing it through
+a category first replaces a specific query with a general one, and
+whatever specificity distinguished "quantum computing" from "semiconductors"
+is discarded at that step. No later stage can recover it.
+
+## So what are categories still for?
+
+Not retrieval. Three things the measurements do support:
+
+1. **Browsing.** A subscriber who doesn't know what to ask needs a list to
+   pick from. That is a display need, and 28% coverage is acceptable for
+   it in a way it is not for retrieval.
+2. **Hot-news detection.** Fine clusters inside a rough cluster found the
+   Unitree IPO at 15 articles across 4 sources. That signal needs the
+   grouping.
+3. **Digest diversity.** Spreading a push across categories, once they
+   exist.
+
+One caveat even for browsing: the merged categories are badly lopsided —
+**AI & ML holds 364 of 629 articles (58%)** — because the corpus is (see
+the source-composition finding above: 47% of articles come from
+AI-only or AI-skewed feeds). A human merge inherits that skew; it does not
+correct it.
+
+## What this implies for the month-long collection
+
+More data raises the ceiling — HDBSCAN's `min_cluster_size=8` is why
+semiconductors (13 articles) and optical (6) can't form clusters today,
+and 30× the corpus fixes that arithmetic. It does **not** change the
+finding that a category layer is lossy for retrieval, since that is
+structural rather than a sample-size artifact. Expect the month of data to
+improve browsing categories and hot-news detection, and to leave
+"retrieve with the interest string directly" as the right retrieval path.

@@ -90,3 +90,90 @@ def test_write_article_preserves_none_summary(isolated_news_cache):
     now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
     news_cache.write_article("hackernews", _article(summary=None), [], now)
     assert news_cache.read_all()[0]["summary"] is None
+
+
+def test_cleanup_archives_instead_of_deleting_when_an_archive_is_configured(
+    isolated_news_cache, monkeypatch, tmp_path
+):
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(news_cache, "ARCHIVE_DIR", str(archive))
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    fetched = now - timedelta(hours=72)
+    path = news_cache.write_article("bbc_business", _article(), ["Finance"], fetched)
+
+    assert news_cache.cleanup_expired(now, ttl_hours=48) == 1
+
+    assert not path.exists(), "the file must leave the active cache"
+    assert news_cache.read_all() == [], "and must not come back from read_all"
+    # filed under the day it was fetched, not the day it expired
+    archived = archive / "2026-08-12" / path.name
+    assert archived.exists()
+
+
+def test_archived_article_keeps_its_content(isolated_news_cache, monkeypatch, tmp_path):
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(news_cache, "ARCHIVE_DIR", str(archive))
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    fetched = now - timedelta(hours=72)
+    news_cache.write_article("bbc_business", _article(title="Archived title"),
+                             ["Finance"], fetched)
+    news_cache.cleanup_expired(now, ttl_hours=48)
+
+    # The whole point is building a corpus later, so the archived record has
+    # to still parse into the same shape read_all produces.
+    import yaml
+    files = list((archive / "2026-08-12").glob("*.yaml"))
+    assert len(files) == 1
+    record = yaml.safe_load(files[0].read_text(encoding="utf-8"))
+    assert record["title"] == "Archived title"
+    assert record["categories"] == ["Finance"]
+    assert record["source_key"] == "bbc_business"
+
+
+def test_re_expiring_the_same_link_replaces_the_archived_copy(
+    isolated_news_cache, monkeypatch, tmp_path
+):
+    """The filename is a hash of the link, so a collision in the archive
+    means the same article was fetched and expired twice. Keeping the newer
+    copy dedupes the corpus by link for free."""
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(news_cache, "ARCHIVE_DIR", str(archive))
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    fetched = now - timedelta(hours=72)
+
+    news_cache.write_article("bbc_business", _article(title="First"), [], fetched)
+    news_cache.cleanup_expired(now, ttl_hours=48)
+    news_cache.write_article("bbc_business", _article(title="Second"), [], fetched)
+    news_cache.cleanup_expired(now, ttl_hours=48)
+
+    import yaml
+    files = list((archive / "2026-08-12").glob("*.yaml"))
+    assert len(files) == 1, "same link must not accumulate copies"
+    assert yaml.safe_load(files[0].read_text(encoding="utf-8"))["title"] == "Second"
+
+
+def test_unarchivable_file_is_deleted_rather_than_left_in_the_cache(
+    isolated_news_cache, monkeypatch, tmp_path
+):
+    """If the archive can't be written to, the file must still leave the
+    active cache -- otherwise it stays an expiry candidate forever and the
+    failure repeats on every single ingestion cycle."""
+    monkeypatch.setattr(news_cache, "ARCHIVE_DIR", str(tmp_path / "archive"))
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    fetched = now - timedelta(hours=72)
+    path = news_cache.write_article("bbc_business", _article(), [], fetched)
+
+    def boom(self, target):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(news_cache.Path, "replace", boom)
+    assert news_cache.cleanup_expired(now, ttl_hours=48) == 1
+    assert not path.exists()
+
+
+def test_cleanup_still_deletes_when_no_archive_is_configured(isolated_news_cache, monkeypatch):
+    monkeypatch.setattr(news_cache, "ARCHIVE_DIR", None)
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    path = news_cache.write_article("bbc_business", _article(), [], now - timedelta(hours=72))
+    assert news_cache.cleanup_expired(now, ttl_hours=48) == 1
+    assert not path.exists()

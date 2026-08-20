@@ -30,9 +30,40 @@ import yaml
 CACHE_DIR = os.environ.get("NEWS_CACHE_DIR", "news_cache")
 DEFAULT_TTL_HOURS = 48
 
+# Where expired articles go instead of being deleted. Unset (the default)
+# keeps the original behaviour -- cleanup_expired unlinks them.
+#
+# The point of archiving is corpus size. Every clustering and retrieval
+# measurement in docs/analysis/cluster-measurements.md ran against ~2,262
+# articles, which is a 48-hour window, and several conclusions were limited
+# by it: HDBSCAN needs 8 articles to form a cluster at all, so topics real
+# subscribers follow (semiconductors: 13 articles, optical: 6, AAOI: 0)
+# could never produce one. A month of accumulation is roughly 33,000
+# articles at the current rate -- about 130 MB, against 33 GB free on the
+# VM, so disk is not a consideration.
+#
+# IMPORTANT: both this and NEWS_CACHE_DIR must point INSIDE the mounted
+# volume (/data on the deployed container). They don't by default, and
+# that is not a theoretical risk: as of 2026-08-19 the live cache sat at
+# /app/news_cache, on the container filesystem, so every redeploy silently
+# destroyed it. 2,202 articles existed only because the container happened
+# not to have restarted in three days.
+ARCHIVE_DIR = os.environ.get("NEWS_ARCHIVE_DIR")
+
 
 def _cache_dir() -> Path:
     path = Path(CACHE_DIR)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _archive_dir(fetched_at: datetime | None) -> Path:
+    """Archived articles land in a per-day subdirectory. A month at the
+    current ingestion rate is ~33k files; one flat directory of those is
+    slow to list and awkward to copy off the VM in pieces, and the day
+    boundary is the natural unit for both."""
+    day = (fetched_at or datetime(1970, 1, 1)).date().isoformat()
+    path = Path(ARCHIVE_DIR) / day
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -102,22 +133,54 @@ def read_all() -> list[dict]:
     return articles
 
 
+def _retire(path: Path, fetched_at: datetime | None) -> None:
+    """Removes `path` from the active cache -- by moving it to the archive
+    if one is configured, otherwise by deleting it.
+
+    A same-named file already in the archive is replaced. The filename is a
+    hash of the article's link, so a collision means the same article was
+    re-fetched and re-expired; keeping the newer record is right, and it
+    also means the archive is deduplicated by link for free, the same
+    property write_article relies on."""
+    if ARCHIVE_DIR:
+        target = _archive_dir(fetched_at) / path.name
+        try:
+            path.replace(target)
+            return
+        except OSError:
+            # Cross-device rename, a read-only archive path, a full disk.
+            # Fall through to deleting rather than leaving the file in the
+            # active cache forever, which would make it a permanent
+            # candidate and re-attempt this on every single cycle.
+            print(f"[news_cache] could not archive {path.name}, deleting instead")
+    path.unlink(missing_ok=True)
+
+
 def cleanup_expired(now: datetime, ttl_hours: int = DEFAULT_TTL_HOURS) -> int:
-    """Deletes every cached file whose fetched_at is older than ttl_hours.
-    A file with no parseable fetched_at (shouldn't happen -- we always
-    write it -- but cheap to guard) is treated as expired rather than kept
-    forever by accident."""
-    deleted = 0
+    """Retires every cached file whose fetched_at is older than ttl_hours,
+    and returns how many. A file with no parseable fetched_at (shouldn't
+    happen -- we always write it -- but cheap to guard) is treated as
+    expired rather than kept forever by accident.
+
+    "Retires" rather than "deletes" because NEWS_ARCHIVE_DIR turns this
+    into a move -- see ARCHIVE_DIR. Either way the file leaves the active
+    cache, so read_all() and everything downstream see no difference; the
+    TTL still governs what the bot considers current news."""
+    retired = 0
     for path in _cache_dir().glob("*.yaml"):
         try:
             with open(path, encoding="utf-8") as f:
                 record = yaml.safe_load(f)
         except (OSError, yaml.YAMLError):
-            path.unlink(missing_ok=True)
-            deleted += 1
+            # Unparseable: retire it, but with no usable fetched_at to file
+            # it under. It lands in the archive's epoch bucket rather than
+            # today's, so a corrupt file can't masquerade as fresh data in
+            # whatever later reads the archive.
+            _retire(path, None)
+            retired += 1
             continue
         fetched_at = _parse_iso((record or {}).get("fetched_at"))
         if fetched_at is None or (now - fetched_at).total_seconds() > ttl_hours * 3600:
-            path.unlink(missing_ok=True)
-            deleted += 1
-    return deleted
+            _retire(path, fetched_at)
+            retired += 1
+    return retired
