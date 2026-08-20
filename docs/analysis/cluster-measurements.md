@@ -567,3 +567,133 @@ python docs/analysis/tools/build_taxonomy.py --backend fastembed --center --hold
 `--save` writes the centroids, the stored mean, and the coherence cutoff to
 `docs/analysis/data/`. That file is what a runtime classifier would load;
 it is ~50-100 KB.
+
+---
+
+# Testing the rough cluster as a retrieval bucket, 2026-08-19
+
+The proposed use of the taxonomy is not "label each article". It is
+two-stage retrieval: a subscriber asks about AAOI, the interest maps to a
+rough cluster (say telecom/optical), every article in that cluster is
+pulled, and a fine step or an LLM narrows what comes back. Under that
+design the taxonomy never needs an AAOI cluster.
+
+That changes what has to be measured. Not classification accuracy —
+**coarse recall**: of the articles genuinely relevant to an interest, what
+fraction is inside the bucket we pulled? A later fine step can fix
+precision; nothing downstream can recover an article the coarse pull never
+returned.
+
+Measured with `docs/analysis/tools/test_routing.py`, model2vec, against
+keyword ground truth for real subscriber interests taken from the live DB.
+
+## Bucket routing does not work
+
+| interest | relevant | bucket recall | in **no** bucket at all |
+|---|---|---|---|
+| Bitcoin | 70 | **81%** | 17% |
+| 光通訊 | 7 | 14% | 86% |
+| robotics | 104 | 12% | 62% |
+| semiconductors | 38 | 8% | 79% |
+| AI | 726 | 3% | 61% |
+| quantum computing | 36 | **0%** | 97% |
+| AAOI | 5 | 0% | 100% |
+
+Three distinct failures, only one of which is fixable by tuning:
+
+1. **The coverage ceiling.** Only 28% of articles are in any kept bucket —
+   HDBSCAN discards the rest as noise and the coherence prune halves what
+   survives. 61–100% of every interest's relevant articles are therefore
+   in no bucket at all and are unreachable by *any* routing. This alone
+   caps the design.
+2. **Relevant articles spread across buckets.** "robotics" routes to
+   `[robotics, autonomous, world robot]` (13 articles) while the larger
+   robotics bucket is `[unitree, robot, humanoid]` (24). Top-1 routing
+   picks one of several correct answers. Fixable with top-K.
+3. **Short interest strings route to noise.** "quantum computing" routes
+   to `[comcast, motion, home, fi]` at similarity 0.134 — an argmax over
+   values that are all effectively zero. A 4-character ticker or a
+   two-word topic has too little text to match a centroid built from
+   paragraphs.
+
+## Direct kNN over articles beats it, without any clusters
+
+Same interests, same embeddings, no taxonomy — just rank every article by
+similarity to the interest string:
+
+| interest | bucket recall | kNN top-50 | kNN top-200 |
+|---|---|---|---|
+| quantum computing | 0% | **94%** (68% prec) | 100% |
+| robotics | 12% | 47% (98% prec) | **90%** |
+| Bitcoin | 81% | 67% (94% prec) | **97%** |
+| semiconductors | 8% | 55% | **74%** |
+| 光通訊 | 14% | 57% | 71% |
+
+Quantum computing is the clearest case: the bucket returns nothing, direct
+search returns 94% at 68% precision. The information was in the embeddings
+the whole time — the clustering step threw it away.
+
+**Conclusion: clusters are a good hot-news detector and a poor retrieval
+index.** They earn their place on the corroboration signal measured above
+(the Unitree IPO at 15 articles across 4 sources), not in the retrieval
+path. Retrieval should query article vectors directly.
+
+## Where BM25 belongs: it is not a tie-breaker, it is a different failure mode
+
+Top-50 recall, same ground truth:
+
+| interest | BM25 | embeddings | RRF hybrid |
+|---|---|---|---|
+| quantum computing | **100%** | 94% | **100%** |
+| Bitcoin | **71%** | 67% | **71%** |
+| robotics | 40% | 47% | **48%** |
+| semiconductors | 13% | **55%** | 45% |
+| 光通訊 | **0%** | **57%** | 57% |
+
+The two are complementary in a way that is specific and predictable:
+
+- **BM25 wins when the interest is the literal word in the article** —
+  "quantum" appears in quantum articles, so lexical match is perfect and
+  embeddings can only approximate it.
+- **Embeddings win when it isn't** — semiconductor articles say "chip",
+  "foundry", "TSMC", "wafer", not "semiconductors", and BM25 collapses to
+  13% while embeddings hold 55%.
+- **The 光通訊 row is the one that matters most for this product.** BM25
+  scores exactly 0 because the interest is Chinese and the corpus is
+  English — no shared token exists, so lexical retrieval is *structurally*
+  incapable, not merely weak. Embeddings get 57%. This project has
+  subscribers whose stored interests are `機器人科技`, `科技財經`, `光通訊`,
+  so cross-language retrieval is a live requirement, not a hypothetical.
+
+RRF hybrid takes the better of the two in four rows of five and loses ten
+points to embeddings alone on semiconductors — a reasonable trade for not
+having to know in advance which mode an interest needs.
+
+## AAOI: a retrieval result that is really an ingestion finding
+
+AAOI scores 0% by every method, including BM25, which should be its best
+case — a ticker symbol is exactly what lexical search is for. The reason
+is that **the corpus contains zero articles mentioning AAOI or Applied
+Optoelectronics**. The 5 "relevant" articles matched only on the broader
+`optical`/`transceiver` keywords.
+
+No retrieval method can return what was never fetched. Related counts in
+the same 2,262-article snapshot:
+
+| interest | articles in corpus |
+|---|---|
+| robotics | 100 |
+| Bitcoin | 60 |
+| quantum computing | 36 |
+| semiconductors | 13 |
+| 光通訊 / optical | 6 |
+| AAOI / AOI | **0** |
+| Edge AI boards | 1 |
+
+The sources that query by subscriber interest are the ones meant to cover
+exactly these low-profile topics, and they are the ones currently
+degraded: Perigon is 403ing on an exhausted monthly quota (see
+`docs/plans/security-plan.md` finding 21) and NewsAPI runs once a day with
+a 24–36 h free-tier delay. **The niche-interest gap is an ingestion
+problem wearing a retrieval problem's clothes**, and no amount of
+classifier work addresses it.
