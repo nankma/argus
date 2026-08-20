@@ -63,3 +63,31 @@ Write a change's own unit tests as part of the change, and run plain
 standards), then `qa-engineer` (matches its documented design, coverage,
 smoke suite, guardrail harness), then `deploy-engineer`. Each reports
 back pass or a diagnosis; don't advance past a failure.
+
+## Landing a change: PR only, `main` is protected
+
+`git push origin main` is **rejected** — branch protection requires the
+`test` check, and it applies to admins too. Every change goes:
+
+```powershell
+git switch -c <branch>          # never commit straight onto main
+git push -u origin <branch>
+gh pr create --fill
+gh pr checks --watch            # wait for CI; do not merge on a local green
+gh pr merge --squash --delete-branch
+```
+
+A green local `pytest` is **not** evidence about CI. On 2026-08-19 two
+pushes landed on `main` with CI red because local was green: three
+analysis scripts were named `test_*.py`, pytest collected them, and they
+imported `numpy`/`sklearn` — present on the dev machine from unrelated
+work, deliberately absent from `environment.yml`. Same command, opposite
+result. CI's environment is the one that resembles the image.
+
+(`pytest.ini` pins `testpaths = tests` now, so that specific trap is
+closed, but the general point stands: the dev machine's environment
+drifts and CI's doesn't.)
+
+If CI is genuinely wrong and the change must land, turn protection off
+explicitly rather than working around it — and say so:
+`gh api -X DELETE repos/nankma/argus/branches/main/protection`.
