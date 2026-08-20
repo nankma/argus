@@ -108,12 +108,21 @@ def classify_interests(model, interests: list[str]) -> dict[str, list[str]]:
     single-line pseudo-article (title=interest text, no summary). Callers
     are expected to cache the result (see users_db.get_cached_interest_categories/
     set_interest_categories) rather than re-classifying on every push
-    cycle -- interest text is stable vocabulary, not fresh content."""
+    cycle -- interest text is stable vocabulary, not fresh content.
+
+    Interests the classifier failed on are OMITTED from the result rather
+    than mapped to []. The caller must not cache an absent interest: an
+    empty list is a real answer ("no category applies") and gets cached
+    forever, while a failure has to be retried. Collapsing the two is what
+    poisoned the live cache during the classification outage -- "AI" ended
+    up cached as [] even though AI is one of the 13 categories, and an
+    empty mapping matches every article, so those subscribers were being
+    sent completely unfiltered news."""
     if not interests:
         return {}
     articles = [{"title": interest, "summary": None} for interest in interests]
     result = classify_articles(model, articles)
-    return {interest: result.get(i, []) for i, interest in enumerate(interests)}
+    return {interest: result[i] for i, interest in enumerate(interests) if i in result}
 
 
 # Articles per classification call. One call per ingestion cycle was the
