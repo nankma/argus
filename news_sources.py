@@ -295,6 +295,26 @@ def fetch_the_register(query: str = None, max_results: int = 5) -> list[dict]:
     return _fetch_rss("https://www.theregister.com/headlines.atom", "The Register", max_results)
 
 
+def fetch_ars_technica(query: str = None, max_results: int = 5) -> list[dict]:
+    return _fetch_rss("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica", max_results)
+
+
+def fetch_techcrunch(query: str = None, max_results: int = 5) -> list[dict]:
+    """TechCrunch's main feed, distinct from fetch_techcrunch_ai's AI-only
+    one. The registry was heavily weighted toward AI-only publications --
+    measured at 28.6% of the cache from feeds that structurally cannot
+    produce anything else (see docs/analysis/cluster-measurements.md) --
+    so the general feed is the one that widens it."""
+    return _fetch_rss("https://techcrunch.com/feed/", "TechCrunch", max_results)
+
+
+def fetch_cnbc(query: str = None, max_results: int = 5) -> list[dict]:
+    return _fetch_rss(
+        "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
+        "CNBC", max_results,
+    )
+
+
 def fetch_computerworld(query: str = None, max_results: int = 5) -> list[dict]:
     return _fetch_rss("https://www.computerworld.com/index.rss", "Computerworld", max_results)
 
@@ -444,6 +464,9 @@ SOURCE_REGISTRY = [
     ("nikkei_asia", fetch_nikkei_asia, None, "rss"),
     ("wired_business", fetch_wired_business, None, "rss"),
     ("the_register", fetch_the_register, None, "rss"),
+    ("ars_technica", fetch_ars_technica, None, "rss"),
+    ("techcrunch", fetch_techcrunch, None, "rss"),
+    ("cnbc", fetch_cnbc, None, "rss"),
     ("computerworld", fetch_computerworld, None, "rss"),
     ("zdnet", fetch_zdnet, None, "rss"),
     ("engadget", fetch_engadget, None, "rss"),
