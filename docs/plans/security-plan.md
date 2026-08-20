@@ -653,23 +653,62 @@ investigation and the fix overlapped with rotating the key above.
 
 - **Perigon**: every fetch returned `403 Forbidden` and **0 articles
   reached the cache**. The cause was **quota exhaustion, not a bad key** —
-  the account had spent its full free-tier allowance of 150 requests:
-  49 on 2026-08-13, 72 on 2026-08-14, 25 on 2026-08-15, then nothing left.
-  Worth being precise about, because "403" reads like an auth failure and
-  the obvious response is to rotate the key, which does not get the quota
-  back. The 8-14 spike lines up with the ingestion changes in
-  `docs/plans/local-news-cache-plan.md` item 7 that raised per-source
-  caps — this source is metered per *request*, so a cap raise spends it
-  faster.
+  the account had spent its full free-tier allowance of 150 requests
+  **for the month**: 49 on 2026-08-13, 72 on 2026-08-14, 25 on 2026-08-15,
+  then nothing left. Worth being precise about, because "403" reads like an
+  auth failure and the obvious response is to rotate the key, which does
+  not get the quota back.
 - **NewsAPI**: 1 article cached, 69 h behind the freshest article. It is
   pulled once per 24 h and its free tier delays articles 24–36 h
   (measured 2026-08-16), so it contributes almost nothing.
 
-**Open:** nothing in the code distinguishes "this source is misconfigured"
-from "this source is out of quota", and nothing tracks request budget
-against a per-source allowance. A metered source silently going dark is
-exactly the failure shape as the classification outage in
-`docs/plans/local-news-cache-plan.md` — fails open, logs nothing anyone
+#### What actually burned the quota
+
+Perigon's per-request budgeting (`news_ingest._SOURCE_INTERVAL_HOURS`
+= 8 h, `_DAILY_CAPS` = 3/day, and the `_queries_for_source` branch that
+gives capped sources exactly **one** query per pull) was committed
+2026-08-13 but **was not yet running on the VM on 8-13 and 8-14**. The
+`api_budget` table on the live box is the record:
+
+```
+perigon 2026-08-15  7     <- over the cap; partial day, mid-deploy
+perigon 2026-08-16  3
+perigon 2026-08-17  3
+perigon 2026-08-18  3
+perigon 2026-08-19  3
+(no rows at all for 08-13 or 08-14)
+```
+
+Before that code was live, Perigon fell through to the uncapped path and
+was queried **once per distinct subscriber interest, every ingestion
+tick** — which is exactly how a source designed for 3 calls/day makes 49
+and then 72. Since 8-16 it has held at precisely 3/day, as designed;
+3 × 30 = 90 against a 150/month allowance.
+
+So the budgeting mechanism is correct and is working. What it could not do
+is un-spend a month's quota that was already gone, which is why every
+request since has 403'd — and, because the budget is consumed *before* the
+fetch (correctly, so failures still count), it is currently spending 3
+calls a day to collect 3 more 403s until the monthly reset.
+
+**An earlier version of this finding blamed the RSS cap raise (5 → 200) in
+`docs/plans/local-news-cache-plan.md` item 7. That was wrong on both
+counts** and is corrected here rather than quietly dropped:
+`fetch_perigon` issues exactly one HTTP request and passes the cap as the
+API's `size=` parameter, so raising it asks for more articles in the *same*
+request and cannot increase request count; and that change landed 2026-08-16
+(`b54aa3a`), after the burn. The lesson is the ordinary one — a plausible
+mechanism is not a cause, and this one was falsifiable in two minutes by
+reading `fetch_perigon` and one `git log -S`.
+
+**Open:** two gaps remain. Nothing distinguishes "this source is
+misconfigured" from "this source is out of quota" — both surface as an
+HTTP error and both fail open. And budgeting is **per day only**, with no
+notion of the monthly allowance the daily number was derived from, so
+nothing would notice a month trending over, or re-check whether a
+403'ing source is worth calling at all. A metered source silently going
+dark is the same failure shape as the classification outage in
+`docs/plans/local-news-cache-plan.md`: fails open, logs nothing anyone
 reads, stays broken for days.
 
 Both are in `news_sources.RESTRICTED_SOURCES`, so they are excluded from
