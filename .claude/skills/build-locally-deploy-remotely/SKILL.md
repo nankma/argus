@@ -91,6 +91,42 @@ bot itself is unreachable (a different, more urgent problem); a `FAIL`
 at the "polling Phoenix" step with the bot reachable is the specific
 missing-env-var regression this check was built for.
 
+## After every deploy: confirm volume-backed directories actually are
+
+**Step 3.7, right after the telemetry check above, whenever the `docker
+run` command sets an env var that's meant to point inside the mounted
+`/data` volume** (e.g. `NEWS_CACHE_DIR`, `NEWS_ARCHIVE_DIR`): run
+`python tools/check_data_persistence.py --bot-vm ubuntu@<bot-vm-ip>
+--bot-key <key> --dir-env NEWS_CACHE_DIR --dir-env NEWS_ARCHIVE_DIR
+--allow-empty NEWS_ARCHIVE_DIR` and confirm it prints `OK`. Real
+incident, found 2026-08-19/20: `NEWS_CACHE_DIR` was unset on the running
+container, so `news_cache.py` fell back to its relative default
+(`news_cache`), which resolved to `/app/news_cache` — the container's
+own filesystem, not the `myfirstagent-data` volume mounted at `/data` —
+so every redeploy silently reset the whole article cache to empty, with
+nothing in `docker logs` to show for it (an unset *optional* env var
+isn't an error). 2202+ articles survived one particular deploy cycle
+purely by luck: the container hadn't been restarted in three days.
+
+Same shape of silent regression as the telemetry incident above (an
+unset optional env var that fails quietly, not loudly) — `docker
+inspect` alone only proves the var is *set*, not that the path it points
+at is actually reachable and actually holds the data that was supposed
+to survive the restart, which is what this script also checks. If it
+fails, do not consider the deploy done, same as the telemetry check. A
+new directory that's legitimately empty right after this exact deploy
+(e.g. an archive dir nothing has been retired into yet) needs
+`--allow-empty <NAME>` rather than being treated as a failure — see the
+script's own docstring/`--help` for the full check list.
+
+If this is the first deploy adding a new volume-backed directory (not
+just restoring one), remember to also migrate forward any existing data
+sitting on the *old* container's non-persistent filesystem before
+stopping it — e.g. `docker exec <old-container> cp -r /app/news_cache
+/data/news_cache` — rather than letting the new container start from
+zero. Confirmed working this way 2026-08-20: 2271 articles carried
+forward instead of resetting.
+
 ## After every deploy: run the smoke test
 
 **Step 4, always, no exceptions:** after the container is restarted on the

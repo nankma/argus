@@ -70,3 +70,15 @@ the bot VM, mounted at `/data` — survives container recreation, not
 backed up anywhere else yet (see `docs/plans/security-plan.md` finding 13).
 Phoenix's own trace data lives at `~/.phoenix/phoenix.db` on the Phoenix
 VM, outside any container.
+
+The local news article cache (`news_cache.py`) and its archive of expired
+articles are also meant to live inside that same mounted volume, via the
+`NEWS_CACHE_DIR`/`NEWS_ARCHIVE_DIR` env vars — both default to a relative
+path if unset, which resolves onto the container's own (non-persistent)
+filesystem rather than the volume. A real incident: this went unset for
+some time, so every redeploy silently reset the article cache to empty
+with no error anywhere. Anything meant to survive a container restart —
+not just `subscribers.db` — needs its env var pointed explicitly inside
+`/data`; an unset one fails silently, not loudly, so this needs verifying
+via `docker inspect` after every deploy, not assumed from "the deploy
+succeeded."
