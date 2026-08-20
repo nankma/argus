@@ -464,8 +464,18 @@ def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch, iso
 
 
 def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch, isolated_subscribers_db):
-    # Stage 2 (the model's own judgment inside write_push_digest) decided
-    # none of the stage-1 candidates were genuinely relevant.
+    """Stage 2 (the model's own judgment inside write_push_digest) decided
+    none of the stage-1 candidates were genuinely relevant, so it wrote
+    nothing. Nothing was delivered, so nothing may be recorded as seen.
+
+    This test previously asserted the opposite -- that every candidate's
+    link was recorded -- and so pinned a real bug in place. pushed_links is
+    the "already seen" filter, and an article that merely lost one cycle's
+    relevance judgment has not been seen; recording it here retired
+    articles permanently that no subscriber ever read. The three sibling
+    branches (no candidates, guardrail-blocked, delivered) all handled this
+    correctly; only this one didn't, while its comment claimed it matched
+    them."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(13)])
     record_push = MagicMock()
@@ -479,7 +489,7 @@ def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch, isolat
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
 
     send.assert_not_called()
-    record_push.assert_called_once_with(13, ["https://example.com/new"], now)
+    record_push.assert_called_once_with(13, [], now)
 
 
 def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch, isolated_subscribers_db):

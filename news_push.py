@@ -33,10 +33,17 @@ Deliberately still does NOT go through agent.py's tool-calling agent
 enough once the candidate list is already assembled in code -- there's
 nothing left for tools to do.
 
-"New" is judged two ways, per user request: primarily by published_dt
-(skip anything published at or before the user's last push), and as a
-fallback for sources whose date didn't parse, by checking against
-users_db's remembered pushed_links from recent pushes.
+"New" separates two things that were previously conflated, and the
+distinction is load-bearing -- see select_candidate_articles:
+
+- FILTERING is done by users_db's pushed_links alone. "Already seen" means
+  "we actually sent this to this subscriber", nothing else.
+- RANKING is done by published_dt, newest first, with a maximum-age gate.
+  A publish date decides what's most worth showing, never what's eligible.
+
+Filtering on the date was the earlier design and it was wrong: an article
+that lost one cycle's cut was excluded permanently, without ever having
+been seen by anyone.
 """
 
 import re
@@ -361,13 +368,21 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
 
             if not digest or not digest.strip():
                 # Stage 2 (the model's own content judgment) decided none
-                # of the stage-1 candidates were genuinely relevant --
-                # see _PUSH_DIGEST_PROMPT's explicit "write nothing"
-                # instruction. Not an error, but still advance
-                # last_push_at/pushed_links the same as the no-candidates
-                # case above, for the same reason.
+                # of the stage-1 candidates were genuinely relevant -- see
+                # _PUSH_DIGEST_PROMPT's explicit "write nothing" instruction.
+                # Not an error. last_push_at still advances (record_push does
+                # that regardless) so the next attempt is a full interval
+                # away rather than retrying every tick.
+                #
+                # Records NO links, because nothing was sent. Recording the
+                # candidates here would retire articles the subscriber never
+                # saw: pushed_links is the "already seen" filter, and an
+                # article that merely lost this cycle's relevance judgment
+                # has not been seen and must stay eligible for a later
+                # digest. Same rule as the guardrail-blocked branch below
+                # and as links_actually_sent.
                 print(f"[news_push] chat_id={chat_id}: candidates found but none judged relevant -- not sending")
-                users_db.record_push(chat_id, [a["link"] for a in new_articles], now)
+                users_db.record_push(chat_id, [], now)
                 continue
 
             # A stored interest is user-supplied, unsanitized text (see
