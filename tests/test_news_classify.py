@@ -376,3 +376,39 @@ def test_classification_works_without_a_callback():
         [{"title": "A", "summary": None}], TAXONOMY,
     )
     assert result == {0: ["AI"]}
+
+
+def test_a_malformed_entry_does_not_block_a_later_good_example():
+    """Regression test. `rejected` used to gate both the log-line dedup and
+    the callback, so whichever entry mentioned a label FIRST won. A
+    malformed one (index past the end, no article) arriving before a valid
+    one meant the admin got the label with no example, even though a
+    perfectly good example was in the same batch.
+
+    The suite was green with that bug: the existing out-of-range test
+    happened to use the other ordering."""
+    seen = []
+    articles = [{"title": "Stanford AI curriculum", "link": "https://s.edu/a", "summary": None}]
+
+    news_classify.classify_articles(
+        _model_returning([
+            {"index": 99, "categories": ["Education"]},   # malformed, comes first
+            {"index": 0, "categories": ["Education"]},    # the real example
+        ]),
+        articles, TAXONOMY, on_unknown_label=lambda label, art: seen.append((label, art)),
+    )
+
+    assert len(seen) == 1, "still reported once per batch"
+    assert seen[0][1].get("link") == "https://s.edu/a"
+
+
+def test_a_label_seen_only_on_a_malformed_entry_is_still_reported():
+    """A sighting with no example is still evidence. Dropping it would be
+    worse than showing the admin a label with nothing attached."""
+    seen = []
+    news_classify.classify_articles(
+        _model_returning([{"index": 99, "categories": ["Education"]}]),
+        [{"title": "A", "summary": None}], TAXONOMY,
+        on_unknown_label=lambda label, art: seen.append((label, art)),
+    )
+    assert seen == [("Education", {})]

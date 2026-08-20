@@ -189,6 +189,9 @@ def _report_category_proposals(now: datetime) -> None:
     if not proposals:
         return
     ranked = sorted(proposals.items(), key=lambda kv: -kv[1])
+    # Truncated because this prints every cycle and the tail is noise: a
+    # label seen once is a model slip, and the decision this feeds is about
+    # what keeps recurring. The full list is in the table.
     summary = ", ".join(f"{name} x{count}" for name, count in ranked[:8])
     print(f"[news_ingest] taxonomy gaps proposed by the classifier "
           f"(last {users_db.CATEGORY_SIGHTING_RETENTION_DAYS}d): {summary}")
@@ -214,6 +217,11 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
     # question stays "how often recently" rather than "how often ever" --
     # see users_db.CATEGORY_SIGHTING_RETENTION_DAYS.
     users_db.prune_category_sightings(now)
+    # Reported here, next to the prune, rather than after classification:
+    # both are about accumulated evidence and neither depends on whether
+    # this cycle fetched anything. Placing it after the `if not fetched`
+    # return meant a quiet cycle pruned the evidence but never showed it.
+    _report_category_proposals(now)
 
     interests = users_db.list_all_interests()
     fetched: list[tuple[str, dict]] = []
@@ -332,7 +340,6 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
             label, now, article.get("link"), article.get("title")
         ),
     )
-    _report_category_proposals(now)
     for i, (source_key, article) in enumerate(fetched):
         news_cache.write_article(source_key, article, categories_by_index.get(i, []), now)
 

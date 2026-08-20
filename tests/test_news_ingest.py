@@ -443,3 +443,19 @@ def test_a_sighting_does_not_make_the_label_usable(
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Education"]}), now)
 
     assert "Education" not in [name for name, _ in users_db.get_active_categories()]
+
+
+def test_proposals_are_reported_even_on_a_cycle_with_nothing_new(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, capsys
+):
+    """Regression test. The report call sat after `if not fetched: return`,
+    so a quiet cycle pruned the accumulated evidence but never showed it --
+    exactly the "it's in the logs if you go looking" failure this reporting
+    exists to avoid."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Education", now - timedelta(days=1))
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    assert "Education x1" in capsys.readouterr().out

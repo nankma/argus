@@ -211,24 +211,36 @@ def _valid_categories(result: ClassificationBatch, taxonomy: Taxonomy,
     two or three examples, so accumulating every one would grow a table
     nobody reads to the bottom of."""
     categories: dict[int, list[str]] = {}
-    rejected: set[str] = set()
+    # {rejected label: best example article so far}. One structure rather
+    # than a set for dedup plus a dict for examples: keeping "have we seen
+    # this label" and "do we have an example for it" in the same key made
+    # whichever entry mentioned a label FIRST win, so a malformed entry
+    # (index past the end, no article) arriving before a good one blocked
+    # the good one. Insertion-ordered, so reporting order is stable.
+    unknown: dict[str, dict] = {}
     for item in result.items:
         kept = []
+        # index is the model's, so a malformed reply can point past the end
+        # of the chunk. That must not lose the batch.
+        article = articles[item.index] if 0 <= item.index < len(articles) else None
         for name in item.categories:
             if name in taxonomy:
                 kept.append(name)
-            elif name not in rejected:
-                rejected.add(name)
-                if on_unknown_label is not None:
-                    # index is the model's, so it can be out of range if the
-                    # reply is malformed -- don't let that lose the batch
-                    article = (articles[item.index]
-                               if 0 <= item.index < len(articles) else {})
-                    on_unknown_label(name, article)
+                continue
+            if article is not None and not unknown.get(name):
+                unknown[name] = article
+            else:
+                unknown.setdefault(name, {})
         categories[item.index] = kept
-    if rejected:
-        print(f"[news_classify] dropped {len(rejected)} label(s) outside the "
-              f"taxonomy: {', '.join(sorted(rejected))}")
+    if unknown:
+        print(f"[news_classify] dropped {len(unknown)} label(s) outside the "
+              f"taxonomy: {', '.join(sorted(unknown))}")
+        if on_unknown_label is not None:
+            for name, example in unknown.items():
+                # An empty example rather than skipping: a sighting with no
+                # article attached is still evidence, and losing it would be
+                # worse than showing the admin a bare label.
+                on_unknown_label(name, example)
     return categories
 
 
