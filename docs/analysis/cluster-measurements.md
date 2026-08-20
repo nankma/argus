@@ -784,3 +784,85 @@ finding that a category layer is lossy for retrieval, since that is
 structural rather than a sample-size artifact. Expect the month of data to
 improve browsing categories and hot-news detection, and to leave
 "retrieve with the interest string directly" as the right retrieval path.
+
+---
+
+# Correction: the 28% coverage was an artifact, and it invalidates two conclusions above
+
+Everything above measured stage 1 by using **HDBSCAN's own labels as the
+article-to-category assignment**. That was wrong. HDBSCAN marking 72% of
+points as noise is a statement about *density* — it declines to say those
+points form clusters. It is not a statement about which centroid an
+article is nearest to. The centroids exist; every article can be assigned
+to its nearest one.
+
+The design being built is a funnel, and stage 1's job is completeness, not
+precision:
+
+    stage 1  rough categories -- a complete partition, like a newspaper's
+             section list. Every article gets one or several. "Other" is
+             allowed but must stay small.
+    stage 2  filter the narrowed set by the subscriber's interest, cheaply
+    stage 3  hot spots by cluster size; novelty by distance from what's
+             already selected
+
+Re-measured with nearest-centroid assignment
+(`docs/analysis/tools/test_full_partition.py`):
+
+| assignment policy | coverage | "Other" |
+|---|---|---|
+| HDBSCAN labels (what was measured above) | 27.8% | 72.2% |
+| nearest centroid, sim ≥ 0.05 | **98.1%** | **1.9%** |
+| nearest centroid, sim ≥ 0.10 | 88.3% | 11.7% |
+
+## Two conclusions above are withdrawn
+
+**"Human merging inherits the corpus skew — AI & ML holds 58%."** Also an
+artifact. Under a real partition the categories are close to balanced:
+
+| category | share | | category | share |
+|---|---|---|---|---|
+| AI & ML | 22.1% | | Entertainment & Media | 8.5% |
+| Crypto | 10.5% | | Energy & Climate | 7.5% |
+| Consumer devices | 9.8% | | Politics & Policy | 7.3% |
+| Robotics | 9.8% | | Security | 6.9% |
+| Markets & Stocks | 9.3% | | Health & Science | 6.5% |
+| | | | **Other** | **1.9%** |
+
+22% AI in a technology news feed is unremarkable. This is a usable section
+list.
+
+**"Any category layer between the interest and the articles costs recall."**
+Overstated. Stage-1 recall with a complete partition:
+
+| interest | HDBSCAN labels | nearest centroid | multi-label | routed to |
+|---|---|---|---|---|
+| Bitcoin | 83% | 99% | **100%** | Crypto |
+| robotics | 36% | 86% | **89%** | Robotics |
+| AI | 28% | 48% | **58%** | AI & ML |
+| quantum computing | 0% | 28% | **47%** | Health & Science |
+| semiconductors | 8% | 32% | **45%** | Markets & Stocks |
+| 光通訊 | 14% | 14% | 14% | Entertainment & Media |
+
+Bitcoin at 100% and robotics at 89% are fine for a first-stage filter.
+
+**Multi-label assignment earns its place**: every interest improves by
+3–19 points, at 1.61 categories per article. One story genuinely is AI and
+Software and Industry at once, and forcing a single label discards that.
+
+## What is actually still broken, and why it waits for more data
+
+The remaining failures share one cause: **there is no category for the
+topic**. 光通訊 routes to Entertainment & Media and semiconductors to
+Markets & Stocks because the taxonomy has no Telecom/Networking and no
+Hardware/Semiconductor category — and it has none because the corpus holds
+6 optical articles and 13 semiconductor ones, under HDBSCAN's
+`min_cluster_size` of 8.
+
+That is a corpus-size problem, not a method problem, and it is what the
+month of archived collection is for. Deferred until then.
+
+(The merge rules here also correct an earlier error: an ABC/Disney/FCC
+story is the entertainment industry, not politics. A regulator appearing
+in a story doesn't make the story political when the subject is who owns
+a broadcaster.)
