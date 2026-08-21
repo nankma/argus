@@ -125,7 +125,8 @@ def _clean_summary(raw: str | None, max_len: int = 300) -> str | None:
 # --- Free, no-key sources ------------------------------------------------
 
 
-def fetch_hackernews(query: str, max_results: int = 5, since: datetime | None = None) -> list[dict]:
+def fetch_hackernews(query: str, max_results: int = 5, since: datetime | None = None,
+                     section: str | None = None) -> list[dict]:
     """`since`, when given, adds Algolia's `numericFilters=created_at_i>X`
     -- confirmed live 2026-08-16 (45 hits in a 6h window for one query, all
     strictly after the cutoff) -- so news_ingest.py can ask for everything
@@ -133,11 +134,21 @@ def fetch_hackernews(query: str, max_results: int = 5, since: datetime | None = 
     is genuinely new. Omitted (server returns its default top-N) when
     `since` is None, e.g. the first-ever pull or agent.py's search_news,
     which has no "last pull" concept."""
-    params = {"query": query, "tags": "story", "hitsPerPage": max_results}
+    # `section` replaces the query for scheduled ingestion. HN's own
+    # front_page ranking is a better relevance signal than anything a query
+    # could express, and it carries no sampling bias toward what subscribers
+    # already named.
+    if section:
+        params = {"tags": section, "hitsPerPage": max_results}
+    else:
+        params = {"query": query, "tags": "story", "hitsPerPage": max_results}
     if since is not None:
         params["numericFilters"] = f"created_at_i>{int(since.timestamp())}"
+    # front_page is a RANKING; search_by_date would re-sort it into
+    # chronological order and throw away the only thing it was for.
+    endpoint = "search" if section == "front_page" else "search_by_date"
     resp = requests.get(
-        "https://hn.algolia.com/api/v1/search_by_date",
+        f"https://hn.algolia.com/api/v1/{endpoint}",
         params=params,
         timeout=10,
         headers=_REQUEST_HEADERS,
@@ -156,7 +167,8 @@ def fetch_hackernews(query: str, max_results: int = 5, since: datetime | None = 
     ]
 
 
-def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5, since: datetime | None = None) -> list[dict]:
+def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5, since: datetime | None = None,
+                section: str | None = None) -> list[dict]:
     """`since`, when given, appends a `submittedDate:[X TO 9999...]` range
     to the query -- confirmed live 2026-08-16 the syntax works. Note:
     arXiv's own indexing has a real multi-day lag (a plain, unfiltered
@@ -165,9 +177,13 @@ def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5, since: datetime 
     will often legitimately return nothing -- that's arXiv's real update
     cadence, not a bug, and no worse than before (today's flat top-N cap
     mostly re-fetches the same few papers on a source this slow)."""
-    search_query = query
+    # A section is an arXiv subject class, which is what this archive
+    # actually indexes by -- far better than free-text search, which found
+    # only 36 quantum and 6 optics articles for subscribers who follow
+    # exactly those topics.
+    search_query = f"cat:{section}" if section else query
     if since is not None:
-        search_query = f"{query} AND submittedDate:[{since.strftime('%Y%m%d%H%M')} TO 99991231235959]"
+        search_query = f"{search_query} AND submittedDate:[{since.strftime('%Y%m%d%H%M')} TO 99991231235959]"
     resp = requests.get(
         "http://export.arxiv.org/api/query",
         params={
@@ -355,7 +371,42 @@ def fetch_techradar(query: str = None, max_results: int = 5) -> list[dict]:
 #     server-side param when the client-side filter works regardless.
 
 
-def fetch_newsapi(query: str, max_results: int = 5) -> list[dict]:
+def _newsapi_articles(resp) -> list[dict]:
+    """Shared by both NewsAPI endpoints -- /v2/everything for a real search
+    and /v2/top-headlines for a section pull. Same response shape."""
+    return [
+        {
+            "title": a.get("title"),
+            "link": a.get("url"),
+            "source": (a.get("source") or {}).get("name", "NewsAPI"),
+            "summary": a.get("description"),
+            "published": a.get("publishedAt"),
+            "published_dt": _parse_iso_published(a.get("publishedAt")),
+        }
+        for a in resp.json().get("articles", [])
+    ]
+
+
+def fetch_newsapi(query: str, max_results: int = 5, section: str | None = None) -> list[dict]:
+    """A `section` switches to /v2/top-headlines, which needs no query at
+    all. That matters more here than anywhere else: this source is a
+    multilingual aggregator, so an unconstrained query returns whatever
+    matches globally. Measured 2026-08-21 -- "AOI" came back half Chinese
+    (AOI is heavily covered by the Taiwanese electronics press) plus
+    Japanese anime (AOI is also a name), and "Bitcoin" returned
+    Spanish-language finance. All 65 cached articles from this source were
+    Chinese, against 1 from every other source combined."""
+    if section:
+        params = {
+            "category": section,
+            "language": "en",
+            "pageSize": max_results,
+            "apiKey": os.environ["NEWSAPI_API_KEY"],
+        }
+        resp = requests.get("https://newsapi.org/v2/top-headlines",
+                            params=params, timeout=10)
+        _raise_for_status(resp)
+        return _newsapi_articles(resp)
     resp = requests.get(
         "https://newsapi.org/v2/everything",
         params={
@@ -383,31 +434,26 @@ def fetch_newsapi(query: str, max_results: int = 5) -> list[dict]:
         timeout=10,
     )
     _raise_for_status(resp)
-    return [
-        {
-            "title": a.get("title"),
-            "link": a.get("url"),
-            "source": (a.get("source") or {}).get("name", "NewsAPI"),
-            "summary": a.get("description"),
-            "published": a.get("publishedAt"),
-            "published_dt": _parse_iso_published(a.get("publishedAt")),
-        }
-        for a in resp.json().get("articles", [])
-    ]
+    return _newsapi_articles(resp)
 
 
-def fetch_gnews(query: str, max_results: int = 5, since: datetime | None = None) -> list[dict]:
+def fetch_gnews(query: str, max_results: int = 5, since: datetime | None = None,
+                section: str | None = None) -> list[dict]:
     """`since`, when given, adds GNews's documented `from` (ISO 8601) date
     filter -- confirmed live 2026-08-16 (30 articles in a 24h window for
     one query, all recent). Note: `max` is capped at 10/request by GNews's
     own free tier regardless of what's asked (docs/current/ai-news-sources.md), so
     news_ingest.py's generous safety cap for time-filterable sources just
     gets silently clamped here, not an error."""
-    params = {"q": query, "lang": "en", "max": max_results, "apikey": os.environ["GNEWS_API_KEY"]}
+    params = {"lang": "en", "max": max_results, "apikey": os.environ["GNEWS_API_KEY"]}
+    if section:
+        params["topic"] = section
+    else:
+        params["q"] = query
     if since is not None:
         params["from"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     resp = requests.get(
-        "https://gnews.io/api/v4/search",
+        "https://gnews.io/api/v4/top-headlines" if section else "https://gnews.io/api/v4/search",
         params=params,
         timeout=10,
     )
@@ -443,6 +489,39 @@ def fetch_perigon(query: str, max_results: int = 5) -> list[dict]:
         }
         for a in resp.json().get("articles", [])
     ]
+
+
+# Sections each query-capable source can be pulled by, INSTEAD of a search
+# query. Used only by news_ingest's scheduled pulls; agent.py's search_news
+# still passes a real user question, which is a legitimate query.
+#
+# Why this exists. Ingestion used to query these sources with subscriber
+# interest text, rotating through it one interest per pull. That makes the
+# corpus a mirror of what subscribers already asked for -- nothing can ever
+# be discovered that nobody had already named, and the sampling bias
+# compounds every cycle. It also turned out to be dirty in practice: "AOI"
+# returned Taiwanese optical-inspection news, Japanese anime (AOI is a
+# name), and half a page of Chinese-language results, while "Bitcoin"
+# returned Spanish-language finance.
+#
+# Pulling by section fixes both. A section is unambiguous, and what arrives
+# is a newsroom's front page rather than an answer to a question we asked.
+SOURCE_SECTIONS: dict[str, list[str]] = {
+    # https://newsapi.org/docs/endpoints/top-headlines -- fixed vocabulary
+    "newsapi": ["technology", "business", "science", "health"],
+    # https://gnews.io/docs/v4 -- `topic` on /top-headlines
+    "gnews": ["technology", "business", "science", "world"],
+    # arXiv subject classes. Deliberately includes quant-ph and
+    # physics.optics: subscribers follow quantum computing/sensing and
+    # optical communications, and free-text search found 36 and 6 articles
+    # for those -- too few to cluster -- while the subject classes are
+    # exactly the right handle. These are papers, not industry news, so
+    # they widen the corpus more than they feed digests.
+    "arxiv": ["cs.AI", "cs.LG", "cs.RO", "cs.CR", "quant-ph", "physics.optics"],
+    # Algolia's front_page tag is HN's own ranking, which is a better
+    # relevance signal than anything a query could express here.
+    "hackernews": ["front_page"],
+}
 
 
 # --- Registry -------------------------------------------------------------

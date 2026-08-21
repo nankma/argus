@@ -47,27 +47,44 @@ def test_is_source_due_respects_newsapi_24h_interval():
     assert news_ingest._is_source_due("newsapi", now - timedelta(hours=24), now) is True
 
 
-def test_queries_for_source_rss_class_ignores_interests():
+def test_sections_for_source_rss_class_takes_one_call_with_no_section():
+    """RSS feeds ignore anything passed to them -- one call is the whole
+    feed regardless."""
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    assert news_ingest._queries_for_source("bbc_business", now, ["bitcoin", "AI"]) == ["technology"]
+    assert news_ingest._sections_for_source("bbc_business", now) == [None]
 
 
-def test_queries_for_source_uncapped_api_class_uses_every_interest():
+def test_sections_for_source_uncapped_takes_every_section():
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    assert news_ingest._queries_for_source("hackernews", now, ["bitcoin", "AI"]) == ["bitcoin", "AI"]
+    sections = news_ingest._sections_for_source("arxiv", now)
+    assert sections == news_sources.SOURCE_SECTIONS["arxiv"]
+    assert "quant-ph" in sections and "physics.optics" in sections
 
 
-def test_queries_for_source_capped_uses_exactly_one_query():
+def test_sections_for_source_capped_takes_exactly_one():
+    """A scarce daily budget buys one section per pull."""
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    queries = news_ingest._queries_for_source("perigon", now, ["bitcoin", "AI", "robotics"])
-    assert len(queries) == 1
-    assert queries[0] in ["bitcoin", "AI", "robotics"]
+    sections = news_ingest._sections_for_source("newsapi", now)
+    assert len(sections) == 1
+    assert sections[0] in news_sources.SOURCE_SECTIONS["newsapi"]
 
 
-def test_queries_for_source_falls_back_to_default_with_no_interests():
+def test_a_capped_source_rotates_through_its_sections_over_time():
+    """The rotation is what stops one section being pulled forever. It also
+    replaces rotating through subscriber interests, which could only ever
+    retrieve answers to questions someone had already asked -- a sampling
+    bias that compounded every cycle."""
+    seen = set()
+    for day in range(1, 8):
+        now = datetime(2026, 8, day, 0, 30, tzinfo=timezone.utc)
+        seen.update(news_ingest._sections_for_source("newsapi", now))
+
+    assert seen == set(news_sources.SOURCE_SECTIONS["newsapi"])
+
+
+def test_a_source_with_no_declared_sections_takes_one_unsectioned_call():
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    assert news_ingest._queries_for_source("perigon", now, []) == ["technology"]
-    assert news_ingest._queries_for_source("hackernews", now, []) == ["technology"]
+    assert news_ingest._sections_for_source("perigon", now) == [None]
 
 
 def test_run_ingestion_cycle_fetches_classifies_and_caches(monkeypatch, isolated_subscribers_db, isolated_news_cache):
@@ -152,25 +169,46 @@ def test_run_ingestion_cycle_cleans_up_expired_entries_first(monkeypatch, isolat
     assert news_cache.read_all() == []
 
 
-def test_run_ingestion_cycle_delays_between_multi_query_calls_to_same_source(
+def test_run_ingestion_cycle_delays_between_multi_section_calls_to_same_source(
     monkeypatch, isolated_subscribers_db, isolated_news_cache
 ):
     """Real incident: GNews's 1 req/sec limit returned 429 on 5 of 7
-    back-to-back queries in one cycle. Confirms the fix without actually
-    sleeping in the test suite."""
+    back-to-back calls in one cycle. Confirms the fix without actually
+    sleeping in the test suite. The calls are per SECTION now rather than
+    per subscriber interest, but the rate limit is the same."""
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_interests(1, ["bitcoin", "AI", "robotics"])
     fetch = MagicMock(return_value=[])
-    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("arxiv", fetch)])
     sleep = MagicMock()
     monkeypatch.setattr(news_ingest.time, "sleep", sleep)
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
 
-    assert fetch.call_count == 3  # one call per distinct interest
+    n = len(news_sources.SOURCE_SECTIONS["arxiv"])
+    assert fetch.call_count == n, "one call per section"
     # delay happens BETWEEN calls, not before the first or after the last
-    assert sleep.call_count == 2
+    assert sleep.call_count == n - 1
     sleep.assert_called_with(news_ingest.REQUEST_DELAY_SECONDS)
+
+
+def test_ingestion_passes_the_section_not_a_subscriber_interest(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """The bug this replaced: scheduled pulls used subscriber interest text
+    as the query, so the corpus could only ever contain answers to
+    questions someone had already asked."""
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.set_interests(1, ["bitcoin", "AAOI"])
+    fetch = MagicMock(return_value=[])
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
+    monkeypatch.setattr(news_ingest.time, "sleep", MagicMock())
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    passed_sections = [c.kwargs.get("section") for c in fetch.call_args_list]
+    assert passed_sections == news_sources.SOURCE_SECTIONS["hackernews"]
+    for call in fetch.call_args_list:
+        assert "bitcoin" not in str(call) and "AAOI" not in str(call)
 
 
 def test_run_ingestion_cycle_no_delay_for_single_query_sources(

@@ -149,29 +149,41 @@ def _is_source_due(source_key: str, last_pulled_at: datetime | None, now: dateti
     return elapsed_hours >= _interval_hours(source_key)
 
 
-def _queries_for_source(source_key: str, now: datetime, interests: list[str]) -> list[str]:
-    """RSS-class sources ignore the query entirely (see news_sources.py) --
-    one call is enough regardless of what's passed. Capped sources (a
-    scarce daily budget) get exactly one call, using a query that rotates
-    deterministically through real subscriber interests over time rather
-    than a fixed default -- otherwise a source added specifically to cover
-    low-profile topics like the AAOI case would never actually search for
-    anything specific. Uncapped, query-capable sources (hackernews, arxiv,
-    gnews) query once per distinct interest, since their budgets can
-    absorb it."""
-    if not interests:
-        return [_DEFAULT_QUERY]
+def _sections_for_source(source_key: str, now: datetime) -> list[str | None]:
+    """Which sections to pull this source by. `[None]` means "one call, no
+    section" -- RSS feeds, which ignore anything passed to them.
 
+    Replaces querying by subscriber interest, which was a sampling-bias bug
+    hiding in plain sight: the corpus could only ever contain answers to
+    questions subscribers had already asked, so nothing new could be
+    discovered and the bias compounded every cycle. It was also dirty in
+    practice -- "AOI" pulled Taiwanese optical-inspection news, Japanese
+    anime, and half a page of Chinese, and "Bitcoin" pulled Spanish-language
+    finance.
+
+    Sections are unambiguous and they are the newsroom's own front page
+    rather than an answer to a question we asked. agent.py's search_news
+    still passes a real user question; that is a legitimate query and is
+    untouched.
+
+    Budget-capped sources get ONE section per pull, rotating
+    deterministically so the whole list is covered over a few days rather
+    than one section being pulled forever. Uncapped ones take every section
+    each cycle."""
     source_class = _SOURCE_CLASS.get(source_key)
     if source_class == "rss":
-        return [_DEFAULT_QUERY]
+        return [None]
+
+    sections = news_sources.SOURCE_SECTIONS.get(source_key)
+    if not sections:
+        return [None]
 
     if source_key in _DAILY_CAPS:
         interval_seconds = _interval_hours(source_key) * 3600
         tick_number = int(now.timestamp() // interval_seconds)
-        return [interests[tick_number % len(interests)]]
+        return [sections[tick_number % len(sections)]]
 
-    return interests
+    return list(sections)
 
 
 def _report_category_proposals(now: datetime) -> None:
@@ -223,7 +235,6 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
     # return meant a quiet cycle pruned the evidence but never showed it.
     _report_category_proposals(now)
 
-    interests = users_db.list_all_interests()
     fetched: list[tuple[str, dict]] = []
     # Loaded once per cycle (after cleanup_expired, so already-expired
     # links are gone and eligible to be re-added) -- skips re-classifying
@@ -268,15 +279,15 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
         else:
             fetch_call = fetch
 
-        queries = _queries_for_source(source_key, now, interests)
+        sections = _sections_for_source(source_key, now)
         source_articles = 0
         source_new = 0
         newest_seen_this_cycle = last_article_dt
-        for i, query in enumerate(queries):
+        for i, section in enumerate(sections):
             if i > 0:
                 # Real incident, first deploy of this job: GNews's
                 # documented 1-request/second limit (docs/current/ai-news-sources.md)
-                # returned 429 on 5 of 7 back-to-back queries for the same
+                # returned 429 on 5 of 7 back-to-back calls for the same
                 # source in one cycle. A flat delay between consecutive
                 # calls to the SAME source is cheap here (cycles run every
                 # 4h+, a few extra seconds is nothing) and avoids needing a
@@ -284,9 +295,16 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
                 # documented up front.
                 time.sleep(REQUEST_DELAY_SECONDS)
             try:
-                articles = news_sources.traced_fetch(source_key, fetch_call, query, max_results)
+                # The section, not a query: the fetchers keep their query
+                # parameter for agent.py's search_news, and ignore it when
+                # a section is given.
+                call = (functools.partial(fetch_call, section=section)
+                        if section is not None else fetch_call)
+                articles = news_sources.traced_fetch(
+                    source_key, call, _DEFAULT_QUERY, max_results)
             except Exception as exc:
-                print(f"[news_ingest] {source_key}: fetch({query!r}) failed with {exc!r}")
+                print(f"[news_ingest] {source_key}: fetch(section={section!r}) "
+                      f"failed with {exc!r}")
                 continue
             if time_filterable and last_article_dt is not None:
                 # The actually-authoritative "new" check -- applies
@@ -319,7 +337,7 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
             users_db.set_source_last_article_dt(source_key, newest_seen_this_cycle)
         print(
             f"[news_ingest] {source_key}: fetched {source_articles} article(s) across "
-            f"{len(queries)} quer{'y' if len(queries) == 1 else 'ies'} -- "
+            f"{len(sections)} section{'' if len(sections) == 1 else 's'} -- "
             f"{source_new} new, {source_articles - source_new} already cached"
         )
 
