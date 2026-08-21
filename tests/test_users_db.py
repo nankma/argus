@@ -875,3 +875,38 @@ def test_policy_split_does_not_touch_pre_existing_interest_category_mappings(
     assert users_db.get_cached_interest_categories(["legacy policy watcher"]) == {
         "legacy policy watcher": ["Policy"]
     }
+
+
+def test_seeding_promotes_a_name_the_model_had_already_proposed(isolated_subscribers_db):
+    """Regression test for a live defect. The Policy split added Legal as a
+    seed category, but the classifier had proposed "Legal" two hours
+    earlier, so INSERT OR IGNORE skipped it: on production it stayed
+    `proposed` with a NULL description and never entered the prompt. The
+    split was 3/4 applied and nothing reported it.
+
+    A seed is a deliberate decision that the category should exist, and
+    `proposed` is a decision waiting to be made -- so the seed wins."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    with users_db._connect() as conn:
+        conn.execute("UPDATE categories SET status = 'proposed', description = NULL, "
+                     "created_by = 'model' WHERE name = 'Legal'")
+
+    users_db.init_db()
+
+    active = dict(users_db.get_active_categories())
+    assert "Legal" in active
+    assert active["Legal"], "and it gets its seeded description, not NULL"
+
+
+def test_seeding_does_not_promote_a_name_an_admin_decided_on(isolated_subscribers_db):
+    """The other half. rejected/retired/merged are decisions someone made,
+    and seeding must not overturn them -- which is what INSERT OR IGNORE was
+    protecting in the first place."""
+    for decided in ("rejected", "retired", "merged"):
+        with users_db._connect() as conn:
+            conn.execute("UPDATE categories SET status = ? WHERE name = 'Legal'", (decided,))
+
+        users_db.init_db()
+
+        names = {name for name, _ in users_db.get_active_categories()}
+        assert "Legal" not in names, f"seeding overturned an admin '{decided}'"

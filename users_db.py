@@ -295,6 +295,23 @@ def _seed_categories(conn) -> None:
         "VALUES (?, ?, 'active', ?, 'seed', ?)",
         [(name, description, now, i) for i, (name, description) in enumerate(SEED_CATEGORIES)],
     )
+    # A name the model already PROPOSED is promoted to active rather than
+    # skipped. INSERT OR IGNORE alone was too broad: it exists to stop a
+    # category an admin retired from being resurrected, and that reasoning
+    # covers rejected/retired/merged -- all of which are decisions someone
+    # made. 'proposed' is not a decision, it is a pending one, and seeding a
+    # name IS the decision it was waiting for.
+    #
+    # Not hypothetical. The 2026-08-20 Policy split shipped Regulation,
+    # Government, Legal and Antitrust; on production, Legal had already been
+    # proposed by the classifier two hours earlier, so INSERT OR IGNORE
+    # skipped it and it stayed `proposed` with a NULL description -- absent
+    # from the prompt. The split was 3/4 applied and nothing said so.
+    conn.executemany(
+        "UPDATE categories SET status = 'active', description = ?, sort_order = ? "
+        "WHERE name = ? AND status = 'proposed'",
+        [(description, i, name) for i, (name, description) in enumerate(SEED_CATEGORIES)],
+    )
     # status='system', so get_active_categories() -- and therefore the
     # classifier prompt -- never sees it. It exists as a row so it resolves
     # like any other name and an admin can count how big the bucket is.
