@@ -72,10 +72,12 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.bot_data["admin_bot_token"] = admin_bot_token
     # Idempotent -- see bot.py's main() for the same call and its reasoning.
     users_db.set_restricted_sources_enabled(admin_chat_id, True)
-    app.add_handler(CommandHandler("start", info_bot.handle_start_command))
+    app.add_handler(CommandHandler(["start", "help"], info_bot.handle_start_command))
     app.add_handler(CommandHandler("interests", info_bot.handle_interests_command))
     app.add_handler(CommandHandler("language", info_bot.handle_language_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, info_bot.handle_message))
+    # Last: every real command above gets first refusal.
+    app.add_handler(MessageHandler(filters.COMMAND, info_bot.handle_unknown_command))
     info_bot.register_push_job(app)
     info_bot.register_ingest_job(app)
     info_bot.register_health_check_job(app)

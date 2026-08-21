@@ -56,6 +56,7 @@ import news_cache
 import news_classify
 import news_sources
 import users_db
+from opentelemetry import trace
 
 MAX_ARTICLES_PER_TOPIC = 5
 
@@ -302,6 +303,139 @@ def links_actually_sent(digest: str, candidates: list[dict]) -> list[str]:
     return [a["link"] for a in candidates if a.get("link") in hrefs]
 
 
+# Liveness for the dead man's switch in
+# docs/plans/observability-platform-plan.md.
+#
+# The alarm asks "has ANY span arrived in the last 30 minutes". Without
+# this, the answer is legitimately "no" on a healthy system: every LLM call
+# in a push cycle sits inside the per-subscriber loop AFTER the due check,
+# so a tick where nobody is due emits nothing at all. Two subscribers on a
+# 6-hour interval leave most of the 96 daily ticks silent, and an alarm
+# that cries wolf on an idle Sunday is an alarm nobody reads.
+#
+# A no-op when no tracer provider is configured -- which is every test and
+# CI run -- because OpenTelemetry's default is a no-op tracer. No env check
+# needed, and nothing to remember to stub.
+_tracer = trace.get_tracer("argus.news_push")
+
+
+def _emit_heartbeat(subscriber_count: int) -> None:
+    """One span per tick, whether or not there was any work to do.
+
+    Carries the subscriber count as an attribute rather than just existing:
+    the same span then answers "is it running" and "how many subscribers
+    did it see", and the second is the number whose sudden growth was the
+    2026-08-21 incident."""
+    with _tracer.start_as_current_span("argus_heartbeat") as span:
+        span.set_attribute("heartbeat.job", "push_tick")
+        span.set_attribute("heartbeat.push_enabled_subscribers", subscriber_count)
+
+
+class _ModelStageError(Exception):
+    """Marks a failure that came out of an LLM call rather than out of
+    local filtering or the database.
+
+    The alternative -- deciding after the fact whether an exception "looks
+    like" a model error by matching its message -- breaks the first time a
+    provider rewords one, and breaks silently, in the direction of
+    under-counting. Classifying by WHERE the call was made cannot drift:
+    `_model_call` wraps exactly the LLM calls and nothing else."""
+
+
+def _model_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        raise _ModelStageError(exc) from exc
+
+
+# Telegram's wording for "this chat can no longer receive anything."
+# Both are permanent for practical purposes and both cost a full digest
+# generation per cycle, so criterion 1 treats them identically.
+_UNREACHABLE_CHAT_MARKERS = (
+    "chat not found",       # BadRequest -- the chat never existed or was deleted
+    "bot was blocked",      # Forbidden -- the user blocked the bot
+    "user is deactivated",  # Forbidden -- the account is gone
+)
+
+
+def _classify_send_failure(exc: Exception) -> str:
+    """Narrows a delivery failure to chat_not_found where the message says
+    so, and leaves everything else as a generic cycle failure.
+
+    Matching on the message rather than the exception type because the
+    type does not separate these: `BadRequest` covers both a dead chat and
+    malformed HTML, and only the text tells them apart. The failure mode
+    of a reworded message is that a genuinely unreachable chat records as
+    `cycle_failed` -- criterion 1 goes quiet, rather than every failure
+    being mislabelled as unreachable and subscribers being disabled
+    wrongly. Wrong in the safe direction, deliberately."""
+    text = str(exc).lower()
+    if any(marker in text for marker in _UNREACHABLE_CHAT_MARKERS):
+        return users_db.PUSH_CHAT_NOT_FOUND
+    return users_db.PUSH_CYCLE_FAILED
+
+
+# Consecutive undeliverable digests before push is turned off for that
+# subscriber -- criterion 1 in docs/plans/incident-monitoring-plan.md.
+#
+# Three rather than one because delivery can fail for reasons that are not
+# about the chat being gone, and turning a real subscriber off is the more
+# expensive mistake of the two: they simply stop receiving news, with no
+# error to notice. Three consecutive failures with no successful delivery
+# between them is not a blip.
+UNREACHABLE_STRIKES = 3
+
+
+def _strike_unreachable_subscriber(chat_id: int, now: datetime) -> None:
+    """Turns push off once a chat has been undeliverable UNREACHABLE_STRIKES
+    times running.
+
+    This is the bound on the 2026-08-21 failure mode. An unreachable chat
+    still costs a full digest generation -- three LLM calls -- every cycle,
+    because generation happens before delivery is attempted and is billed
+    whether or not the send lands. Without a stop, that recurs for as long
+    as the subscriber row exists: the leak was open for eight days.
+
+    Reversible on purpose: only `push_enabled` is cleared. The subscriber,
+    their interests and their language survive, so a user who blocked the
+    bot and later unblocks it turns push back on and continues, rather than
+    discovering their settings were deleted.
+
+    Re-enabling does NOT reset the strike count -- only a delivered digest
+    does (see users_db.consecutive_chat_not_found). So a subscriber who
+    turns push back on while still unreachable is disabled again after a
+    single further failure rather than after three. That is deliberate: a
+    transient outage records `cycle_failed` and accrues no strikes at all,
+    so one more `chat_not_found` really does mean still unreachable, and
+    granting a fresh allowance would just pay for three more undeliverable
+    digests."""
+    strikes = users_db.consecutive_chat_not_found(chat_id)
+    if strikes < UNREACHABLE_STRIKES:
+        return
+    users_db.set_push_enabled(chat_id, False)
+    detail = f"undeliverable {strikes} cycles running"
+    _record(chat_id, users_db.PUSH_DISABLED,
+            f"{detail} -- push turned off (they can turn it back on)",
+            now, detail=detail)
+
+
+def _record(chat_id: int, outcome: str, message: str, now: datetime,
+            detail: str | None = None) -> None:
+    """Logs a push outcome for a human AND records it as a queryable row,
+    from one call site so the two cannot disagree.
+
+    Both halves are needed and neither replaces the other. The print goes
+    to `docker logs`, which is where someone looks when debugging a
+    specific cycle -- but it is free text, carries no timestamp of its
+    own, is destroyed when a deploy swaps the container, and cannot be
+    read at all by this process from inside that container. The row is
+    what an alarm can actually query. See
+    docs/plans/incident-monitoring-plan.md."""
+    print(f"[news_push] chat_id={chat_id}: {message}")
+    users_db.record_push_outcome(chat_id, outcome, now, detail=detail)
+
+
 def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: datetime) -> bool:
     if last_push_at is None:
         return True
@@ -318,9 +452,11 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     module doesn't need a live Bot/Application to be tested. One
     subscriber's failure doesn't stop the others, same isolation pattern
     as search_news's per-source error handling -- but unlike that
-    isolation, every outcome here is printed (docker logs captures
-    stdout) rather than swallowed silently, including ticks where nobody
-    was due -- not just when something actually sends.
+    isolation, every outcome here is both printed (docker logs captures
+    stdout) and recorded in push_outcomes rather than swallowed silently,
+    including ticks where nobody was due -- not just when something
+    actually sends. See _record for why both, and
+    docs/plans/incident-monitoring-plan.md for what reads the rows.
 
     The cache is read ONCE per cycle and reused across every subscriber
     -- matches docs/plans/local-news-cache-plan.md's stated efficiency argument
@@ -348,14 +484,19 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     # be "not due yet" for hours (push_interval_hours), which isn't the
     # same as this job having stopped running entirely.
     users_db.set_source_last_pulled_at(healthcheck.PUSH_TICK_KEY, now)
+    # Bounded here rather than on a timer of its own: this is the only job
+    # that writes the table, so it is the only one that can grow it.
+    users_db.prune_push_outcomes(now)
     subscribers = users_db.list_push_enabled_subscribers()
     print(f"[news_push] tick at {now.isoformat()}: {len(subscribers)} push-enabled subscriber(s)")
+    _emit_heartbeat(len(subscribers))
     cached_articles = news_cache.read_all()
     for subscriber in subscribers:
         chat_id = subscriber["chat_id"]
         interests = subscriber["interests"]
         if not interests:
-            print(f"[news_push] chat_id={chat_id}: push enabled but no interests set -- skipping")
+            _record(chat_id, users_db.PUSH_NO_INTERESTS,
+                    "push enabled but no interests set -- skipping", now)
             continue
         last_push_at = subscriber["last_push_at"]
         interval_hours = subscriber["push_interval_hours"]
@@ -368,8 +509,24 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
             continue
         print(f"[news_push] chat_id={chat_id}: due -- checking for new articles")
 
+        # What record_push must be told, and whether it must be told at
+        # all. None until an LLM has been paid to write a digest; a list
+        # from then on. Load-bearing twice over:
+        #
+        # Not-None means the money is spent, so the next attempt must be a
+        # full interval away even though this cycle failed. Leaving
+        # last_push_at untouched instead -- which is what every failure
+        # path used to do -- makes the subscriber due again on the very
+        # next tick, and the tick is PUSH_TICK_SECONDS (15 minutes), not
+        # their interval.
+        #
+        # Its CONTENTS matter for a narrower case: a send can succeed and a
+        # later step still raise (the outcome insert, or record_push
+        # itself). Recording [] there would leave articles the subscriber
+        # genuinely received still eligible, and they would be sent again.
+        delivered: list[str] | None = None
         try:
-            topic_categories = resolve_interest_categories(model, interests)
+            topic_categories = _model_call(resolve_interest_categories, model, interests)
             new_articles = select_candidate_articles(
                 cached_articles,
                 interests,
@@ -383,11 +540,13 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                 # Nothing new this cycle -- still advance last_push_at so
                 # the next check is a full interval away instead of
                 # re-fetching every tick until something new shows up.
-                print(f"[news_push] chat_id={chat_id}: due, but no new articles -- advancing last_push_at only")
+                _record(chat_id, users_db.PUSH_NOTHING_NEW,
+                        "due, but no new articles -- advancing last_push_at only", now)
                 users_db.record_push(chat_id, [], now)
                 continue
 
-            digest = write_push_digest(model, new_articles, subscriber["language"])
+            digest = _model_call(write_push_digest, model, new_articles, subscriber["language"])
+            delivered = []          # generated; nothing has reached them yet
 
             if not digest or not digest.strip():
                 # Stage 2 (the model's own content judgment) decided none
@@ -404,7 +563,8 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                 # has not been seen and must stay eligible for a later
                 # digest. Same rule as the guardrail-blocked branch below
                 # and as links_actually_sent.
-                print(f"[news_push] chat_id={chat_id}: candidates found but none judged relevant -- not sending")
+                _record(chat_id, users_db.PUSH_NOT_RELEVANT,
+                        "candidates found but none judged relevant -- not sending", now)
                 users_db.record_push(chat_id, [], now)
                 continue
 
@@ -413,26 +573,62 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
             # digest prompt above -- the same output-guardrail check
             # bot.py runs on chat replies applies here too, since this is
             # also model output about to be sent to a real user unread.
-            if guardrails.is_output_on_topic(model, digest):
-                await send(chat_id, digest)
+            if _model_call(guardrails.is_output_on_topic, model, digest):
+                try:
+                    await send(chat_id, digest)
+                except Exception as exc:
+                    # Generation already happened and was already billed;
+                    # only delivery failed. Recorded as its own outcome so
+                    # "we paid to write digests nobody can receive" is a
+                    # question the data can answer -- the exact shape of
+                    # the 2026-08-21 incident, which until now landed in
+                    # the catch-all below as an ordinary "cycle failed".
+                    outcome = _classify_send_failure(exc)
+                    detail = repr(exc)
+                    _record(chat_id, outcome,
+                            f"digest generated but delivery failed with {detail}",
+                            now, detail=detail)
+                    # No links: nothing was seen, so nothing is retired.
+                    # Same rule as the guardrail-blocked branch below.
+                    users_db.record_push(chat_id, [], now)
+                    if outcome == users_db.PUSH_CHAT_NOT_FOUND:
+                        _strike_unreachable_subscriber(chat_id, now)
+                    continue
                 # Only what the subscriber actually saw is recorded as seen.
                 # A candidate the model left out stays eligible for a later
                 # digest rather than being silently retired unread -- see
                 # links_actually_sent and select_candidate_articles.
-                sent_links = links_actually_sent(digest, new_articles)
-                print(
-                    f"[news_push] chat_id={chat_id}: sent digest -- "
-                    f"{len(sent_links)} of {len(new_articles)} candidate(s) appeared in it"
-                )
+                # The send landed, so retire what they actually saw before
+                # anything below can fail -- see `delivered`'s comment.
+                delivered = links_actually_sent(digest, new_articles)
+                detail = f"{len(delivered)} of {len(new_articles)} candidate(s)"
+                _record(chat_id, users_db.PUSH_DELIVERED,
+                        f"sent digest -- {detail} appeared in it", now, detail=detail)
             else:
                 # Blocked before delivery, so nothing was seen and nothing is
                 # recorded as seen. last_push_at still advances (below), so
                 # the next attempt is a full interval away rather than
                 # retrying every tick.
-                sent_links = []
-                print(f"[news_push] chat_id={chat_id}: digest blocked by output guardrail, not sent")
+                _record(chat_id, users_db.PUSH_BLOCKED,
+                        "digest blocked by output guardrail, not sent", now)
 
-            users_db.record_push(chat_id, sent_links, now)
+            users_db.record_push(chat_id, delivered, now)
+        except _ModelStageError as exc:
+            # A 402, a rate limit, a provider outage. Unlike everything
+            # else here this is never about one subscriber -- if the model
+            # is down for this chat it is down for all of them -- which is
+            # why criterion 2 alerts on a single occurrence rather than on
+            # a threshold.
+            detail = repr(exc.__cause__ or exc)
+            _record(chat_id, users_db.PUSH_MODEL_ERROR,
+                    f"model call failed with {detail}", now, detail=detail)
+            if delivered is not None:
+                users_db.record_push(chat_id, delivered, now)
+            continue
         except Exception as exc:
-            print(f"[news_push] chat_id={chat_id}: cycle failed with {exc!r}")
+            detail = repr(exc)
+            _record(chat_id, users_db.PUSH_CYCLE_FAILED,
+                    f"cycle failed with {detail}", now, detail=detail)
+            if delivered is not None:
+                users_db.record_push(chat_id, delivered, now)
             continue

@@ -999,3 +999,63 @@ def test_interests_command_keeps_the_original_when_translation_fails(
         _make_context(admin_chat_id=999)))
 
     assert users_db.get_interests(999) == ["光通訊"], "stored, just not translated"
+
+
+# --- unknown commands must never be silent --------------------------------
+#
+# The plain-text MessageHandler excludes commands (~filters.COMMAND), so a
+# /command with no registered handler matches nothing at all: no reply, no
+# log line, no error. That is how /start behaved for every new user until
+# 2026-08-09, and how /help behaved until a user reported on 2026-08-21
+# that typing it did nothing. These pin the class shut, not just the two
+# instances.
+
+
+def test_unknown_command_gets_a_reply_instead_of_silence(isolated_subscribers_db):
+    users_db.request_access(70, "gina", "Gina")
+    users_db.decide(70, approved=True)
+    update = _make_update(chat_id=70, text="/wat")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_unknown_command(update, context))
+
+    update.message.reply_text.assert_called_once()
+    sent = update.message.reply_text.call_args[0][0]
+    assert "don't have that command" in sent
+    # ...and it still tells them what the real ones are, rather than only
+    # saying no.
+    assert bot.guardrails.REDIRECT_MESSAGE in sent
+
+
+def test_unknown_command_still_respects_access_control(isolated_subscribers_db, monkeypatch):
+    """An unapproved stranger must not learn the command list by guessing
+    at commands -- same gate as every other handler."""
+    monkeypatch.setattr(bot, "notify_admin", AsyncMock())
+    update = _make_update(chat_id=71, username="hank", first_name="Hank", text="/wat")
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_unknown_command(update, context))
+
+    sent = update.message.reply_text.call_args[0][0]
+    assert "don't have that command" not in sent   # check_access's reply, not ours
+
+
+def test_help_is_registered_and_real_commands_are_matched_before_the_catch_all():
+    """Order is load-bearing. The catch-all is a MessageHandler on
+    filters.COMMAND, which matches EVERY command -- so registered before
+    the CommandHandlers it would swallow /interests and /language and
+    answer "I don't have that command" to commands that exist.
+
+    Asserted by reading main()'s source rather than by building an
+    Application, which would need real bot tokens. Crude, but it pins the
+    one property that matters and fails loudly if someone reorders the
+    registrations. combined_bot's equivalent asserts this properly on a
+    real handler list -- see tests/test_combined_bot.py."""
+    import inspect
+
+    src = inspect.getsource(bot.main)
+    catch_all = src.index("filters.COMMAND, handle_unknown_command")
+    for earlier in ('CommandHandler(["start", "help"]',
+                    'CommandHandler("interests"',
+                    'CommandHandler("language"'):
+        assert src.index(earlier) < catch_all, f"{earlier} must be registered first"
