@@ -340,14 +340,15 @@ def _migrate_split_policy(conn) -> None:
     ).fetchone()
     if done:
         return
+    now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "UPDATE categories SET status = 'retired', decided_at = ?, decided_by = 'migration' "
         "WHERE name = 'Policy' AND status = 'active'",
-        (datetime.now(timezone.utc).isoformat(),),
+        (now,),
     )
     conn.execute(
-        "INSERT OR REPLACE INTO health_state (key, value) VALUES ('policy_split_migrated', ?)",
-        (datetime.now(timezone.utc).isoformat(),),
+        "INSERT OR IGNORE INTO health_state (key, value) VALUES ('policy_split_migrated', ?)",
+        (now,),
     )
 
 

@@ -15,11 +15,20 @@ does it deliberately and offline.
 
 Two numbers matter:
 
-  COVERAGE -- what fraction of general-news articles the current 13
-  categories can classify at all. A low number is expected: the taxonomy
-  was derived from a corpus that is 47% AI-only feeds. How low tells you
-  whether general news is a few missing categories away from fitting, or a
-  different product.
+  COVERAGE -- what fraction of general-news articles the active taxonomy
+  can classify at all. Deliberately not stated as a fixed number of
+  categories: the taxonomy is data now and changes without a redeploy, and
+  the first version of this docstring said "13" in the very commit that
+  made it 16. The script prints the live count when it runs.
+
+  A low number is expected: the taxonomy was derived from a corpus that is
+  47% AI-only feeds. How low tells you whether general news is a few
+  missing categories away from fitting, or a different product.
+
+  Coverage alone is misleading, which is why the report also breaks down
+  WHICH categories get used. The first run of this scored 70% coverage
+  with 65% of all assignments landing on a single bucket -- a number that
+  looks like success and means the opposite.
 
   PROPOSED LABELS -- what the classifier asks for. These are candidates for
   the taxonomy, and unlike a human brainstorm they are grounded in articles
