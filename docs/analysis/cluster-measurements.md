@@ -891,3 +891,203 @@ question, not a cost one:
 Each of those was measured to work. None of them is worth building to
 save a dollar a month, and this note exists so a future reader doesn't
 re-derive the cost argument from the enthusiasm in the sections above.
+
+---
+
+# Hot topics and novelty for push selection, 2026-08-21
+
+Embeddings here are **not for classification** — the LLM does that and the
+taxonomy lives in the database. This is about which of the articles that
+survive filtering are worth sending. Two signals:
+
+- **hot** — several outlets are paying attention to the same thing
+- **novel** — one or two articles unlike everything else selected, so a
+  digest isn't five versions of one story
+
+Measured with `docs/analysis/tools/measure_hotspots.py` on a 2,706-article
+snapshot, 1,127 with real categories — the first snapshot taken since
+classification was repaired, so the first where a filtered set is big
+enough to say anything.
+
+## "Hot" is two different things, and one mechanism cannot find both
+
+### Story-level: the same event, several outlets
+
+Semantic clustering at a high threshold finds this. Inside the AI
+category (531 articles), cosine ≥ 0.75 gives 8 groups.
+
+**Size alone is actively misleading.** The largest groups are all one
+outlet publishing a series:
+
+| category | n | largest group | sources |
+|---|---|---|---|
+| Hardware | 196 | **30 articles** | **1** (newsapi, a Chinese finance series) |
+| Robotics | 138 | 11 articles | 1 (gnews) |
+| AI | 531 | 2 articles | 2 (Google buys Spirit Airlines' data) |
+| Finance | 252 | 2 articles | 2 (Travelodge CEO resigns) |
+| Policy | 156 | 2 articles | 2 (Evergrande founder sentenced) |
+
+A 30-article group from one source outranks every genuine multi-source
+story. **The usable metric is distinct source count, not article count** —
+and with that filter applied, real corroboration at this volume is
+currently pairs, not the 15-article/4-source Unitree IPO seen in an
+earlier snapshot.
+
+### Topic-level: several articles about the same subject, saying different things
+
+This is the case that matters more day to day — "GPT-5.3 shipped and five
+articles reference it while discussing different things", or "AI security
+is getting a lot of attention this week". **Semantic clustering cannot
+find it, and lowering the threshold does not help.**
+
+Two measurements say so.
+
+Articles sharing an entity are not semantically similar:
+
+| term | AI articles mentioning it | mean pairwise cosine | pairs ≥ 0.75 |
+|---|---|---|---|
+| openai | 16 | +0.190 | **0** |
+| chatgpt | 12 | +0.256 | **0** |
+| anthropic | 6 | +0.311 | **0** |
+
+Not one pair clears the story threshold. They are about different things
+and merely share a token.
+
+And lowering the threshold produces chaining collapse, not topics:
+
+| threshold | groups | largest group | share of the category |
+|---|---|---|---|
+| 0.75 | 8 | 26 | 5% |
+| 0.60 | 19 | 28 | 5% |
+| 0.50 | 26 | 42 | 8% |
+| 0.40 | 30 | **180** | **34%** |
+| 0.30 | 5 | **452** | **85%** |
+
+Single-linkage goes from fragments straight to a blob with nothing usable
+in between. There is no "topic threshold" to find.
+
+**So topic-level hotness is a lexical/entity problem, not a semantic
+one** — which is the honest answer to why BM25 was never redundant with
+embeddings here. Each finds something the other structurally cannot.
+
+## Burst detection needs history the active cache does not have
+
+The standard approach is comparing a term's rate in a recent window
+against its rate in a baseline period; [Kleinberg's burst
+detection](https://www.cs.cornell.edu/home/kleinber/bhs.pdf) formalises
+this as a state machine over the stream, and simpler rate-ratio versions
+are the usual practical starting point.
+
+A first attempt failed for a structural reason worth recording: the active
+cache has a 48-hour TTL and one ingestion cycle can add 1,000+ articles, so
+"the last 24 hours" captured 1,010 of 1,127 articles and the baseline was
+117. Every candidate term had a historical count of zero, making the lift
+ratio meaningless, and the top results were stopwords ("after", "can",
+"now").
+
+**The archive is the baseline.** `NEWS_ARCHIVE_DIR` has been accumulating
+since 2026-08-19 precisely so there is history to compare against; this is
+the first thing that actually needs it. Burst detection should read the
+archive for the baseline and the live cache for the recent window, not
+try to split the live cache against itself.
+
+## Time decay: what to weight and how
+
+Hotness is inherently time-sensitive — a story with five sources yesterday
+should outrank one with five sources last week — so the weight of evidence
+has to fade. Three families, all long-established:
+
+### 1. Rank-level decay (the Hacker News / Reddit family)
+
+    score = evidence / (age_hours + 2) ^ gravity        gravity ≈ 1.8
+
+[Hacker News](https://www.righto.com/2013/11/how-hacker-news-ranking-really-works.html)
+uses this shape. Time is raised to a higher power than the evidence, so
+nothing stays hot indefinitely regardless of how much evidence it
+accumulated. Cheap, stateless, one tunable.
+
+**Best fit for the story-level signal here**: a cluster's score becomes
+`distinct_sources / (hours_since_newest + 2) ^ gravity`, computed on the
+fly from data already in hand. Nothing to persist.
+
+### 2. Exponential ageing of the evidence itself (the damped-window family)
+
+    w(t) = 2 ^ (-λ · Δt)
+
+Each observation carries a weight that halves every `1/λ`. This is what
+stream-clustering algorithms use to let clusters fade —
+[DenStream](https://www.cs.sfu.ca/~ester/papers/SDM2006.DenStream.final.pdf)
+maintains micro-clusters under exactly this damped window, and CluStream
+keeps time-horizon snapshots for the same purpose.
+
+**Best fit for the term-burst signal**: instead of a hard 24h/baseline
+split, every article contributes `2^(-λ·age)` to each of its terms. A term
+mentioned by three articles today outweighs one mentioned by three
+articles four days ago, with no window boundary to tune and no cliff at
+the edge of it. It also fixes the failed measurement above, which was
+entirely an artefact of where the window boundary fell.
+
+### 3. Stateful stream clustering (DenStream/CluStream proper)
+
+Maintain micro-clusters incrementally with decaying weights, promoting and
+retiring them as the stream moves. This is the fully general answer and it
+is the wrong tool here: it exists for streams too large to re-cluster, and
+this corpus is ~1,000 articles a day that re-cluster in 0.2 s with
+model2vec. The cost of maintaining incremental state would exceed the cost
+of recomputing.
+
+### Recommendation
+
+Use (1) for story clusters and (2) for term bursts, and skip (3). Both are
+arithmetic over data already being collected — no new storage, no
+incremental state, nothing to keep consistent across restarts.
+
+Two parameters to fit from data rather than pick: `gravity` for the rank
+decay, and the half-life for term weighting. A sensible starting point is
+a half-life near the push interval, so a story stays hot for roughly one
+digest and then fades, but that is a guess and should be replaced by
+looking at how long real stories actually stay covered in the archive.
+
+## Novelty works, but "farthest" is not the same as "interesting"
+
+Distances are discriminating, which is the thing TF-IDF could not do (its
+median max-similarity across a candidate pool was 0.0000, with 61% ties):
+
+| category | pool | median max-sim to a 5-article selection | exact zeros |
+|---|---|---|---|
+| AI | 526 | 0.138 | 37 |
+| Research | 424 | 0.168 | 5 |
+| Finance | 247 | 0.156 | 2 |
+
+Farthest scores −0.083 against a nearest of 0.415 — a real ordering, not a
+tie-break.
+
+**But the articles it selects are outliers for the wrong reasons.** The
+farthest article in AI was a truncated headline ("plus infectious disease
+experts to Gujarat, with AI"); in Finance it was a Chinese-language fund
+prospectus in an English-dominant pool. Mis-parsed titles and
+language outliers are maximally distant from everything by construction,
+so a naive farthest-point pick will surface junk before it surfaces
+genuine novelty — and it would do so on every single digest.
+
+Novelty selection needs a quality floor first: a parseable title of
+reasonable length, and a language consistent with the subscriber's
+digest. Only then take the farthest survivor.
+
+## Duplicates: the fix is not title matching
+
+47 articles share 17 duplicate titles, and **15 of the 17 are one source
+repeated** — but they are two different problems:
+
+- **Genuine duplicates**: 9 gnews copies of one syndicated wire story
+  under different URLs. Link-based dedup cannot see these.
+- **Not duplicates at all**: "Tech Now", "Tech Life", "Business Daily" —
+  BBC programme titles, where each episode is different content under a
+  recurring name.
+
+Deduplicating by title would wrongly collapse the second group. The
+distinguishing signal is content similarity, which the embeddings already
+provide: collapse near-identical vectors (cosine above ~0.95) to one
+representative at candidate-selection time. That serves both purposes at
+once — subscribers stop receiving the same wire story twice, and the
+story-level hotness signal stops counting one syndicated piece as nine.

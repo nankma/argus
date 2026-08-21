@@ -31,7 +31,10 @@ import tempfile
 # Tabs are stripped from the fields themselves so the format can't be broken
 # by an article whose own text contains one.
 REMOTE_SCRIPT = r"""
-cd /app/news_cache || exit 1
+# The cache moved from /app/news_cache to the mounted volume on
+# 2026-08-19 -- /app was on the container filesystem and every redeploy
+# destroyed it. Falls back so this still works against an older container.
+cd "${NEWS_CACHE_DIR:-/data/news_cache}" 2>/dev/null || cd /app/news_cache || exit 1
 for f in *.yaml; do
   s=$(grep -m1 '^source_key:' "$f" | cut -d' ' -f2)
   d=$(grep -m1 '^published_dt:' "$f" | cut -d' ' -f2 | tr -d "'")
