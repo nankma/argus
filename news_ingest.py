@@ -149,6 +149,27 @@ def _is_source_due(source_key: str, last_pulled_at: datetime | None, now: dateti
     return elapsed_hours >= _interval_hours(source_key)
 
 
+def _cutoff_key(source_key: str, section: str | None) -> str:
+    """The key `last_article_dt` is tracked under.
+
+    Per SECTION, not per source, once a source has sections. They advance
+    at wildly different rates -- cs.AI produces dozens of papers a day and
+    physics.optics a handful -- so one shared cutoff lets the fast section
+    drag it past the slow one's genuinely-new articles, which are then
+    never offered again. That is the same class of bug this module's
+    docstring already records fixing once (last_pulled_at vs
+    last_article_dt), one level down.
+
+    Latent before sections existed, because the multiple queries a source
+    looped over were arbitrary interest phrasings with no systematic
+    cadence difference. Sections are fixed and disjoint, so a persistent
+    mismatch is now structural rather than occasional.
+
+    Composite keys are already how this table is used -- healthcheck stores
+    __ingest_tick__ and __push_tick__ in the same column."""
+    return source_key if section is None else f"{source_key}:{section}"
+
+
 def _sections_for_source(source_key: str, now: datetime) -> list[str | None]:
     """Which sections to pull this source by. `[None]` means "one call, no
     section" -- RSS feeds, which ignore anything passed to them.
@@ -274,24 +295,25 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
         # why that was the wrong cutoff: it advances on wall-clock time
         # regardless of whether anything new was found, which can
         # permanently skip an article a source indexes with a delay).
-        last_article_dt = users_db.get_source_last_article_dt(source_key)
-        # Server-side date filter for the 3 sources confirmed to support it
-        # correctly (see _SERVER_SIDE_SINCE_SOURCES above) -- an efficiency
-        # optimization only; the client-side filter below is what's
-        # actually authoritative for "new", regardless of whether this
-        # fires. None on the first-ever pull (last_article_dt is None) --
-        # nothing to filter against yet, so just take the unfiltered top-N
-        # up to the safety cap.
-        if time_filterable and source_key in _SERVER_SIDE_SINCE_SOURCES and last_article_dt is not None:
-            fetch_call = functools.partial(fetch, since=last_article_dt)
-        else:
-            fetch_call = fetch
-
         sections = _sections_for_source(source_key, now)
         source_articles = 0
         source_new = 0
-        newest_seen_this_cycle = last_article_dt
         for i, section in enumerate(sections):
+            # Read per section, not once for the source -- see _cutoff_key.
+            last_article_dt = users_db.get_source_last_article_dt(
+                _cutoff_key(source_key, section))
+            newest_seen_this_cycle = last_article_dt
+            # Server-side date filter for the 3 sources confirmed to support
+            # it correctly (see _SERVER_SIDE_SINCE_SOURCES above) -- an
+            # efficiency optimization only; the client-side filter below is
+            # what's actually authoritative for "new", regardless of whether
+            # this fires. None on the first-ever pull -- nothing to filter
+            # against yet, so just take the unfiltered top-N up to the cap.
+            if (time_filterable and source_key in _SERVER_SIDE_SINCE_SOURCES
+                    and last_article_dt is not None):
+                fetch_call = functools.partial(fetch, since=last_article_dt)
+            else:
+                fetch_call = fetch
             if i > 0:
                 # Real incident, first deploy of this job: GNews's
                 # documented 1-request/second limit (docs/current/ai-news-sources.md)
@@ -340,9 +362,14 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
                 if published_dt is not None and (newest_seen_this_cycle is None or published_dt > newest_seen_this_cycle):
                     newest_seen_this_cycle = published_dt
 
+            if (time_filterable and newest_seen_this_cycle is not None
+                    and newest_seen_this_cycle != last_article_dt):
+                users_db.set_source_last_article_dt(
+                    _cutoff_key(source_key, section), newest_seen_this_cycle)
+
+        # last_pulled_at stays per SOURCE: the pull interval and the daily
+        # budget are properties of the source, not of one of its sections.
         users_db.set_source_last_pulled_at(source_key, now)
-        if time_filterable and newest_seen_this_cycle is not None and newest_seen_this_cycle != last_article_dt:
-            users_db.set_source_last_article_dt(source_key, newest_seen_this_cycle)
         print(
             f"[news_ingest] {source_key}: fetched {source_articles} article(s) across "
             f"{len(sections)} section{'' if len(sections) == 1 else 's'} -- "

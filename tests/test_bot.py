@@ -946,3 +946,56 @@ def test_review_is_silent_when_nothing_crossed_the_threshold(monkeypatch, isolat
 
     assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 0
     sent.assert_not_called()
+
+
+# --- /interests translation -----------------------------------------------
+#
+# The existing /interests tests pass `guard_model` as a plain string, so
+# normalize_interest raises AttributeError, is caught, and returns None --
+# every one of them exercises the FALLBACK path while showing as covered.
+# These drive the real branch.
+
+
+def test_interests_command_stores_the_translated_form(monkeypatch, isolated_subscribers_db):
+    monkeypatch.setattr(bot.news_classify, "normalize_interest",
+                        lambda model, t, alongside=None: {"光通訊": "Optical Communications",
+                                                          "AAOI": "AAOI Applied Optoelectronics"}[t])
+    update = _make_update(chat_id=999, text="/interests 光通訊, AAOI")
+
+    asyncio.run(bot.handle_interests_command(update, _make_context(admin_chat_id=999)))
+
+    assert users_db.get_interests(999) == ["Optical Communications", "AAOI Applied Optoelectronics"]
+    assert "Optical Communications" in update.message.reply_text.call_args[0][0]
+
+
+def test_interests_command_disambiguates_each_against_the_others(
+    monkeypatch, isolated_subscribers_db
+):
+    """"/interests AAOI, AOI, semiconductors" -- AOI is only resolvable
+    given the company it sits next to."""
+    seen = {}
+
+    def fake(model, t, alongside=None):
+        seen[t] = alongside
+        return t
+
+    monkeypatch.setattr(bot.news_classify, "normalize_interest", fake)
+
+    asyncio.run(bot.handle_interests_command(
+        _make_update(chat_id=999, text="/interests AAOI, AOI, semiconductors"),
+        _make_context(admin_chat_id=999)))
+
+    assert seen["AOI"] == ["AAOI", "semiconductors"], "its peers, not itself"
+
+
+def test_interests_command_keeps_the_original_when_translation_fails(
+    monkeypatch, isolated_subscribers_db
+):
+    monkeypatch.setattr(bot.news_classify, "normalize_interest",
+                        lambda model, t, alongside=None: None)
+
+    asyncio.run(bot.handle_interests_command(
+        _make_update(chat_id=999, text="/interests 光通訊"),
+        _make_context(admin_chat_id=999)))
+
+    assert users_db.get_interests(999) == ["光通訊"], "stored, just not translated"

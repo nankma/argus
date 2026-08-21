@@ -250,7 +250,7 @@ def test_run_ingestion_cycle_passes_since_to_server_side_since_sources(
     # why that distinction matters.
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     last_article_dt = now - timedelta(hours=4)
-    users_db.set_source_last_article_dt("hackernews", last_article_dt)
+    users_db.set_source_last_article_dt("hackernews:front_page", last_article_dt)
     fetch = MagicMock(return_value=[])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
 
@@ -281,7 +281,7 @@ def test_run_ingestion_cycle_client_side_filter_drops_articles_not_newer_than_la
 ):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     last_article_dt = now - timedelta(hours=4)
-    users_db.set_source_last_article_dt("hackernews", last_article_dt)
+    users_db.set_source_last_article_dt("hackernews:front_page", last_article_dt)
     old_article = _article("https://example.com/old", published_dt=last_article_dt - timedelta(minutes=1))
     new_article = _article("https://example.com/new", published_dt=last_article_dt + timedelta(minutes=1))
     fetch = MagicMock(return_value=[old_article, new_article])
@@ -308,7 +308,7 @@ def test_run_ingestion_cycle_advances_last_article_dt_to_the_newest_seen(
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: [], 1: []}), now)
 
-    assert users_db.get_source_last_article_dt("hackernews") == now - timedelta(hours=1)
+    assert users_db.get_source_last_article_dt("hackernews:front_page") == now - timedelta(hours=1)
 
 
 def test_run_ingestion_cycle_does_not_advance_last_article_dt_when_nothing_new(
@@ -316,13 +316,13 @@ def test_run_ingestion_cycle_does_not_advance_last_article_dt_when_nothing_new(
 ):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     last_article_dt = now - timedelta(hours=4)
-    users_db.set_source_last_article_dt("hackernews", last_article_dt)
+    users_db.set_source_last_article_dt("hackernews:front_page", last_article_dt)
     fetch = MagicMock(return_value=[])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
 
-    assert users_db.get_source_last_article_dt("hackernews") == last_article_dt
+    assert users_db.get_source_last_article_dt("hackernews:front_page") == last_article_dt
 
 
 def test_run_ingestion_cycle_client_side_filter_keeps_articles_with_unparseable_date(
@@ -333,7 +333,7 @@ def test_run_ingestion_cycle_client_side_filter_keeps_articles_with_unparseable_
     # news_cache dedups by link hash, so re-caching an old one is a no-op
     # overwrite, not a growing duplicate.
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_source_last_article_dt("hackernews", now - timedelta(hours=4))
+    users_db.set_source_last_article_dt("hackernews:front_page", now - timedelta(hours=4))
     undated = _article("https://example.com/undated", published_dt=None)
     fetch = MagicMock(return_value=[undated])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
@@ -629,3 +629,38 @@ def test_Other_does_not_widen_what_a_subscriber_receives(
     )
 
     assert result == []
+
+
+def test_each_section_keeps_its_own_since_cutoff(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """Sections advance at wildly different rates -- cs.AI produces dozens
+    of papers a day, physics.optics a handful. A shared cutoff lets the fast
+    one drag it past the slow one's genuinely-new articles, which are then
+    never offered again. Same class of bug as last_pulled_at vs
+    last_article_dt, one level down."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    fast = _article("https://arxiv/fast", published_dt=now - timedelta(hours=1))
+    slow = _article("https://arxiv/slow", published_dt=now - timedelta(days=3))
+
+    def fetch(query, n, since=None, section=None):
+        return [fast] if section == "cs.AI" else [slow] if section == "physics.optics" else []
+
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("arxiv", fetch)])
+    monkeypatch.setattr(news_ingest.time, "sleep", MagicMock())
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["AI"], 1: ["AI"]}), now)
+
+    fast_cut = users_db.get_source_last_article_dt("arxiv:cs.AI")
+    slow_cut = users_db.get_source_last_article_dt("arxiv:physics.optics")
+    assert fast_cut == fast["published_dt"]
+    assert slow_cut == slow["published_dt"]
+    assert slow_cut < fast_cut, "the slow section is not dragged forward by the fast one"
+
+
+def test_a_sectionless_source_still_uses_the_plain_source_key(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """RSS sources have no section, so their cutoff key is unchanged --
+    no migration needed for rows already in the table."""
+    assert news_ingest._cutoff_key("bbc_business", None) == "bbc_business"
+    assert news_ingest._cutoff_key("arxiv", "cs.AI") == "arxiv:cs.AI"
