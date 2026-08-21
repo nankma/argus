@@ -294,3 +294,55 @@ def classify_articles(model, articles: list[dict], taxonomy: Taxonomy,
             f"(nothing known about them -- not the same as having no category)"
         )
     return categories
+
+
+class CategoryDescription(BaseModel):
+    # Reasoning first so the model works before it commits, the same
+    # field-order lesson already applied in guardrails.OutputCheck.
+    reasoning: str
+    description: str
+
+
+def draft_category_description(model, name: str, examples: list[str],
+                               existing: Taxonomy) -> str | None:
+    """Drafts the one-line gloss for a proposed category, from the articles
+    that actually triggered it.
+
+    This text goes into the classifier prompt verbatim for every article
+    afterwards, so a vague one silently degrades classification from then
+    on. Drafting it here means the admin sees the exact wording in the
+    approval message and can judge it, rather than facing a blank field
+    after they have already committed to adding the category.
+
+    The existing taxonomy is shown to the model so the description can say
+    what this category is NOT -- the failure being avoided is a new
+    category that overlaps an old one, which makes the classifier
+    inconsistent between them rather than wrong in any one place. Policy
+    was exactly that: its description listed four things and it absorbed
+    65% of all assignments on a general-news probe.
+
+    Returns None on failure; the caller falls back to asking the admin,
+    since a missing description is recoverable and a wrong one is not."""
+    try:
+        structured = model.with_structured_output(CategoryDescription)
+        result = structured.invoke([
+            {"role": "system", "content":
+                "You write one-line category descriptions for a news classifier. "
+                "The description is shown to the classifier as its only guidance "
+                "for the category, so it must be concrete and must not overlap "
+                "the existing categories. Match the style of the existing ones: "
+                "lowercase, a short comma-separated list of what belongs, no "
+                "trailing period. Where there is a risk of confusion with an "
+                "existing category, say what this one is NOT."},
+            {"role": "user", "content":
+                f"New category: {name}\n\n"
+                f"Articles the classifier used it for:\n"
+                + "\n".join(f"- {t}" for t in examples)
+                + f"\n\nExisting categories:\n{existing.prompt_fragment()}"},
+        ])
+    except Exception as exc:
+        print(f"[news_classify] could not draft a description for {name!r}: {exc!r}")
+        return None
+    if result is None or not result.description.strip():
+        return None
+    return result.description.strip()

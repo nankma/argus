@@ -33,8 +33,10 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from agent import ROUTE_B_CATEGORIES, build_agent, build_model, dispatch_settings, run_agent, setup_telemetry
+import admin_bot
 import guardrails
 import healthcheck
+import news_classify
 import news_ingest
 import news_push
 import test_api
@@ -595,6 +597,55 @@ async def _ingest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # enabled source -- offloaded the same way handle_message offloads
     # run_agent, so a slow cycle can't block the bot's event loop.
     await asyncio.to_thread(news_ingest.run_ingestion_cycle, model)
+    await review_category_proposals(
+        model, context.bot_data["admin_bot_token"], context.bot_data["admin_chat_id"]
+    )
+
+
+async def review_category_proposals(model, admin_bot_token: str, admin_chat_id: int,
+                                    now: datetime | None = None) -> int:
+    """Asks the admin about category proposals that have crossed the
+    threshold. Returns how many were raised.
+
+    Runs after ingestion because that is when new sightings appear, and
+    from the ingest job rather than the admin bot because this is a push:
+    nobody is going to open the admin bot to check whether the taxonomy has
+    gaps. Same shape as telemetry_monitor alerting through the admin token.
+
+    A proposal is marked alerted only AFTER its message is sent. Marking
+    first would drop it permanently if the send failed -- `alerted_at IS
+    NULL` is what makes it eligible, so a failed send would look exactly
+    like a delivered one. The cost of this ordering is at worst a duplicate
+    message when a retry succeeds, and a duplicate is visible while a lost
+    proposal is not."""
+    now = now or datetime.now(timezone.utc)
+    ready = users_db.categories_ready_for_review(now)
+    if not ready:
+        return 0
+
+    active = [n for n, _ in users_db.get_active_categories()]
+    taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+    bot = Bot(token=admin_bot_token)
+    raised = 0
+    for name, hits in ready:
+        examples = users_db.category_examples(name)
+        draft = await asyncio.to_thread(
+            news_classify.draft_category_description,
+            model, name, [title for title, _ in examples], taxonomy,
+        )
+        text, keyboard = admin_bot.build_category_review(
+            name, hits, examples, draft, active
+        )
+        try:
+            await bot.send_message(chat_id=admin_chat_id, text=text,
+                                   parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        except Exception as exc:
+            print(f"[news_ingest] could not raise category {name!r} with the admin: {exc!r}")
+            continue
+        users_db.mark_category_alerted(name, now, draft)
+        raised += 1
+    print(f"[news_ingest] raised {raised} category proposal(s) with the admin")
+    return raised
 
 
 def register_ingest_job(app: Application) -> None:

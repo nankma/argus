@@ -910,3 +910,150 @@ def test_seeding_does_not_promote_a_name_an_admin_decided_on(isolated_subscriber
 
         names = {name for name, _ in users_db.get_active_categories()}
         assert "Legal" not in names, f"seeding overturned an admin '{decided}'"
+
+
+# --- A4: category review lifecycle ----------------------------------------
+
+
+def _propose(name, now, hits=1):
+    for i in range(hits):
+        users_db.record_category_sighting(name, now, f"https://e.com/{name}{i}", f"{name} story {i}")
+
+
+def test_only_proposals_past_the_threshold_are_raised(isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Healthcare", now, hits=5)
+    _propose("Media", now, hits=2)
+
+    ready = users_db.categories_ready_for_review(now, threshold=5)
+
+    assert ready == [("Healthcare", 5)]
+
+
+def test_a_proposal_is_raised_once_not_every_cycle(isolated_subscribers_db):
+    """An admin who has been asked and hasn't answered must not be asked
+    again every four hours. The proposal stays in the table for a future
+    /proposals command; the alert is a push, not a reminder loop."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Healthcare", now, hits=5)
+
+    assert users_db.categories_ready_for_review(now, threshold=5)
+    users_db.mark_category_alerted("Healthcare", now, "hospitals, drugs, clinical tech")
+    assert users_db.categories_ready_for_review(now, threshold=5) == []
+
+
+def test_activating_uses_the_description_drafted_at_alert_time(isolated_subscribers_db):
+    """The draft is stored on the row rather than carried through Telegram's
+    callback_data (64 bytes) or re-derived on the button press. What the
+    admin read in the message is what ships into the classifier prompt."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Healthcare", now, hits=5)
+    users_db.mark_category_alerted("Healthcare", now, "hospitals, drugs, clinical tech")
+
+    assert users_db.activate_category("Healthcare", "admin:1", now) is True
+
+    assert dict(users_db.get_active_categories())["Healthcare"] == "hospitals, drugs, clinical tech"
+
+
+def test_activating_clears_interest_mappings_so_the_new_category_applies(
+    isolated_subscribers_db,
+):
+    """get_cached_interest_categories treats any existing row as a hit, so a
+    newly active category is invisible to every already-mapped interest
+    until those rows are gone."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    users_db.set_interest_categories("robotics", ["Robotics"])
+    _propose("Healthcare", now, hits=5)
+
+    users_db.activate_category("Healthcare", "admin:1", now)
+
+    assert users_db.get_cached_interest_categories(["robotics"]) == {}
+
+
+def test_a_second_press_of_activate_changes_nothing(isolated_subscribers_db):
+    """Two admins, or one double-tap. Guarded by `AND status = 'proposed'`."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Healthcare", now, hits=5)
+
+    assert users_db.activate_category("Healthcare", "admin:1", now) is True
+    assert users_db.activate_category("Healthcare", "admin:2", now) is False
+
+
+def test_rejecting_stops_it_being_raised_but_keeps_recording_sightings(
+    isolated_subscribers_db,
+):
+    """Sightings after a rejection cost a row each and answer "was
+    rejecting this right?" later. count_recent_sightings only counts
+    'proposed', so it never alerts again."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Media", now, hits=5)
+    assert users_db.reject_category("Media", "admin:1", now) is True
+
+    _propose("Media", now, hits=10)
+
+    assert users_db.categories_ready_for_review(now, threshold=1) == []
+    with users_db._connect() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM category_sightings WHERE name = 'Media'"
+        ).fetchone()[0]
+    assert total == 15, "still recorded, just never raised"
+
+
+def test_merging_rewrites_interests_without_a_model_call(isolated_subscribers_db):
+    """The new mapping is known, so there is nothing to re-derive. Contrast
+    activate, which must invalidate because the correct answer is unknown."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Antitrust2", now, hits=5)
+    users_db.activate_category("Antitrust2", "admin:1", now)
+    users_db.set_interest_categories("competition law", ["Antitrust2", "Legal"])
+
+    assert users_db.merge_category("Antitrust2", "Antitrust", "admin:1", now) is True
+
+    assert users_db.get_cached_interest_categories(["competition law"]) == {
+        "competition law": ["Antitrust", "Legal"]
+    }
+    assert users_db.resolve_category_name("Antitrust2") == "Antitrust"
+
+
+def test_merging_deduplicates_when_both_names_were_present(isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Antitrust2", now, hits=5)
+    users_db.activate_category("Antitrust2", "admin:1", now)
+    users_db.set_interest_categories("x", ["Antitrust2", "Antitrust"])
+
+    users_db.merge_category("Antitrust2", "Antitrust", "admin:1", now)
+
+    assert users_db.get_cached_interest_categories(["x"]) == {"x": ["Antitrust"]}
+
+
+def test_merging_into_a_non_active_category_is_refused(isolated_subscribers_db):
+    """Merging into a retired or already-merged category builds a chain
+    whose only symptom is articles quietly resolving to nothing."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _propose("Media", now, hits=5)
+
+    assert users_db.merge_category("Media", "Policy", "admin:1", now) is False, "Policy is retired"
+    assert users_db.merge_category("Media", "Nonexistent", "admin:1", now) is False
+
+
+def test_category_examples_come_back_newest_first(isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    users_db.record_category_sighting("Media", now - timedelta(days=2), "https://e/old", "Older")
+    users_db.record_category_sighting("Media", now, "https://e/new", "Newer")
+
+    examples = users_db.category_examples("Media", limit=2)
+
+    assert [t for t, _ in examples] == ["Newer", "Older"]
+
+
+def test_examples_from_one_cycle_are_returned_deterministically(isolated_subscribers_db):
+    """Every sighting in an ingestion cycle shares a timestamp, so ordering
+    by seen_at alone leaves which examples the admin sees unspecified --
+    different between runs, for no reason."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    for i in range(5):
+        users_db.record_category_sighting("Media", now, f"https://e/{i}", f"Story {i}")
+
+    first = users_db.category_examples("Media", limit=3)
+    assert first == users_db.category_examples("Media", limit=3)
+    assert [t for t, _ in first] == ["Story 4", "Story 3", "Story 2"], "most recent first"
