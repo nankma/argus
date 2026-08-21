@@ -866,3 +866,28 @@ month of archived collection is for. Deferred until then.
 story is the entertainment industry, not politics. A regulator appearing
 in a story doesn't make the story political when the subject is who owns
 a broadcaster.)
+
+---
+
+# The cost premise changed, 2026-08-21
+
+Everything above was motivated by removing the per-article API cost of
+LLM classification. That premise has been measured and does not hold at
+this volume.
+
+The live system classifies **991 articles/day in 20 LLM calls**, costing
+roughly **$0.03/day — under $1/month**. Full figures and the cheaper
+levers (prompt caching; the unused `LLM_MODEL_CLASSIFIER` env var) are in
+`docs/plans/taxonomy-and-admin-plan.md`.
+
+So the measurements here should be read as answering a **quality**
+question, not a cost one:
+
+- a taxonomy derived from the corpus rather than hand-written
+- hot-news detection by cluster size and source count (the Unitree IPO at
+  15 articles across 4 sources)
+- the far-from-everything diversity pick
+
+Each of those was measured to work. None of them is worth building to
+save a dollar a month, and this note exists so a future reader doesn't
+re-derive the cost argument from the enthusiasm in the sections above.
