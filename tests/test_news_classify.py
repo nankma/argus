@@ -410,3 +410,62 @@ def test_a_label_seen_only_on_a_malformed_entry_is_still_reported():
         on_unknown_label=lambda label, art: seen.append((label, art)),
     )
     assert seen == [("Education", {})]
+
+
+# --- interest normalization -----------------------------------------------
+
+
+def _echo_model(english):
+    class _M:
+        seen = None
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+        def invoke(self, messages):
+            _M.seen = messages[-1]["content"]
+            return self.schema.model_validate({"reasoning": "r", "english": english})
+    return _M()
+
+
+def test_normalize_interest_returns_the_english_label():
+    assert news_classify.normalize_interest(_echo_model("Optical Communications"),
+                                            "光通訊") == "Optical Communications"
+
+
+def test_peer_interests_are_sent_as_disambiguation_context():
+    """An ambiguous ticker expanded blind picks the wrong company, and is
+    then worse than not expanding: "AOI" came back as "Africa Oil Corp" on
+    one run and "Applied Optoelectronics" on the next -- two different
+    wrong answers to the same input. The subscriber's other interests
+    resolve it, and they cost nothing to include."""
+    model = _echo_model("Automated Optical Inspection")
+
+    news_classify.normalize_interest(model, "AOI", alongside=["AAOI", "semiconductors"])
+
+    assert "AAOI" in type(model).seen and "semiconductors" in type(model).seen
+
+
+def test_no_peers_means_no_context_paragraph():
+    model = _echo_model("Robotics")
+    news_classify.normalize_interest(model, "機器人科技")
+    assert "also follows" not in type(model).seen
+
+
+def test_a_failed_normalization_returns_none_so_the_caller_keeps_the_original():
+    """A stored interest that searches badly beats one that silently
+    wasn't saved."""
+    class Boom:
+        def with_structured_output(self, schema):
+            return self
+        def invoke(self, messages):
+            raise RuntimeError("model down")
+
+    assert news_classify.normalize_interest(Boom(), "光通訊") is None
+
+
+def test_empty_interest_text_is_rejected_without_calling_the_model():
+    class NeverCalled:
+        def with_structured_output(self, schema):
+            raise AssertionError("should not reach the model")
+
+    assert news_classify.normalize_interest(NeverCalled(), "   ") is None

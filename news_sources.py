@@ -360,6 +360,22 @@ def fetch_newsapi(query: str, max_results: int = 5) -> list[dict]:
         "https://newsapi.org/v2/everything",
         params={
             "q": query,
+            # Pinned to English, matching fetch_gnews. Without it this
+            # source returned 65 of 65 articles in Chinese, because
+            # news_ingest._queries_for_source rotates through subscriber
+            # interest text as the query and several subscribers store
+            # theirs in Chinese (機器人科技, 科技財經, 光通訊). NewsAPI
+            # obliged; GNews didn't, purely because it had this parameter.
+            #
+            # Not a cosmetic difference. A monolingual block inside a
+            # mostly-English corpus clusters by LANGUAGE rather than
+            # subject: those 65 articles formed a 28-strong "hot topic"
+            # spanning Taiwanese stocks, optical networking, a Pixel phone
+            # review and robot touch sensors, with mean pairwise similarity
+            # 0.71 -- and they simultaneously dominated the
+            # farthest-from-everything novelty pick, since anything in
+            # another script is maximally distant from an English pool.
+            "language": "en",
             "sortBy": "publishedAt",
             "pageSize": max_results,
             "apiKey": os.environ["NEWSAPI_API_KEY"],

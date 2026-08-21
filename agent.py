@@ -34,6 +34,7 @@ from langchain.agents.middleware import dynamic_prompt
 from langchain.chat_models import init_chat_model
 from langchain.tools import ToolRuntime
 from phoenix.otel import register
+import news_classify
 import news_sources
 import users_db
 
@@ -259,15 +260,37 @@ TOOLS = [save_note, search_news]
 ROUTE_B_CATEGORIES = {"set_interest", "remove_interest", "start_push", "stop_push", "set_language"}
 
 
-def dispatch_settings(category: str, chat_id: int, classification) -> str:
+def dispatch_settings(category: str, chat_id: int, classification, model=None) -> str:
     """Performs the state change for one Route B category and returns an
     English confirmation string. `classification` is the
     guardrails.MessageClassification the router produced -- its
     topic/push_interval_hours/language fields carry whatever argument this
-    category needs, already extracted and normalized by the router."""
+    category needs, already extracted and normalized by the router.
+
+    `model` is used only to translate a new interest into English (see
+    news_classify.normalize_interest for why every consumer of interest
+    text is English-facing). Optional so the settings path stays testable
+    without one and so a missing model degrades to storing the original
+    text rather than refusing the change."""
     if category == "set_interest":
         before = users_db.get_interests(chat_id)
-        after = users_db.add_interest(chat_id, classification.topic)
+        topic = classification.topic
+        if model is not None:
+            # Translated at WRITE time, while the subscriber is here. The
+            # alternative -- translating at query time -- would repeat the
+            # call on every push cycle for a value that never changes.
+            #
+            # Their existing interests go in as disambiguation context: an
+            # ambiguous ticker expanded blind picks the wrong company, and
+            # is then worse than not expanding at all. "AOI" came back as
+            # "Africa Oil Corp" on one run and "Applied Optoelectronics" on
+            # the next -- two different wrong answers to the same input,
+            # which is what guessing looks like. With the subscriber's own
+            # AAOI/semiconductors/光通訊 alongside it, it resolves to
+            # automated optical inspection.
+            topic = news_classify.normalize_interest(
+                model, topic, alongside=before) or topic
+        after = users_db.add_interest(chat_id, topic)
         if len(after) == len(before):
             return f"You already have {classification.topic} in your interests, so nothing new was added."
         return f"Added {classification.topic} to your interests."

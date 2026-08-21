@@ -307,3 +307,51 @@ def test_run_agent_records_callback_events():
     event_types = [e["type"] for e in recorder.events]
     assert "llm_start" in event_types
     assert "llm_end" in event_types
+
+
+def test_set_interest_stores_the_english_form(isolated_subscribers_db, monkeypatch):
+    """Interest text is a live search query, a BM25 match target and a
+    classification input, and all three are English-facing -- gnews and
+    newsapi both pin lang=en, so a Chinese interest returns nothing at
+    all, and BM25 scored 0% recall for 光通訊 against an English corpus."""
+    monkeypatch.setattr(agent.news_classify, "normalize_interest",
+                        lambda model, text, alongside=None: "Optical Communications")
+    classification = SimpleNamespace(topic="光通訊")
+
+    agent.dispatch_settings("set_interest", 7, classification, model="fake")
+
+    assert users_db.get_interests(7) == ["Optical Communications"]
+
+
+def test_set_interest_passes_existing_interests_as_context(isolated_subscribers_db, monkeypatch):
+    seen = {}
+
+    def fake(model, text, alongside=None):
+        seen["alongside"] = alongside
+        return "Automated Optical Inspection"
+
+    monkeypatch.setattr(agent.news_classify, "normalize_interest", fake)
+    users_db.add_interest(7, "AAOI")
+
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="AOI"), model="fake")
+
+    assert seen["alongside"] == ["AAOI"]
+
+
+def test_set_interest_falls_back_to_the_original_when_normalization_fails(
+    isolated_subscribers_db, monkeypatch
+):
+    monkeypatch.setattr(agent.news_classify, "normalize_interest",
+                        lambda model, text, alongside=None: None)
+
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"), model="fake")
+
+    assert users_db.get_interests(7) == ["光通訊"], "stored, just not translated"
+
+
+def test_set_interest_without_a_model_stores_the_raw_topic(isolated_subscribers_db):
+    """The settings path stays usable without a model -- tests and the CLI
+    both exercise it that way."""
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="robotics"))
+
+    assert users_db.get_interests(7) == ["robotics"]

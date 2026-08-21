@@ -301,7 +301,22 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("Interests cleared.")
         return
 
-    interests = [t.strip() for t in text_after_command.split(",") if t.strip()]
+    # Normalized here too, not only on the conversational path: this
+    # command bypasses the router entirely, so an interest typed as
+    # "/interests 光通訊" would otherwise be stored untranslated and search
+    # for nothing. Same reasoning as dispatch_settings.
+    raw = [t.strip() for t in text_after_command.split(",") if t.strip()]
+    model = context.bot_data.get("guard_model")
+    # Each interest is disambiguated against the others being set in the
+    # same command -- "/interests AAOI, AOI, semiconductors" gives the
+    # model the context it needs to tell those two apart.
+    interests = []
+    for i, t in enumerate(raw):
+        peers = raw[:i] + raw[i + 1:]
+        interests.append(
+            (news_classify.normalize_interest(model, t, alongside=peers) or t)
+            if model else t
+        )
     users_db.set_interests(chat_id, interests)
     await update.message.reply_text("Interests updated: " + ", ".join(interests))
 
@@ -363,7 +378,7 @@ async def _route_b_reply(chat_id: int, classification, guard_model, category: st
     docs/plans/context-management-plan.md's settings-dispatch refactor and
     agent.dispatch_settings's own docstring for why this is model-free
     except for the one translation call below."""
-    reply = dispatch_settings(category, chat_id, classification)
+    reply = dispatch_settings(category, chat_id, classification, model=guard_model)
 
     # A language preference governs every reply, not just news_query --
     # checked *after* dispatch_settings, so a set_language turn's own
