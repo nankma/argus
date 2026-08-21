@@ -37,8 +37,28 @@ def test_build_info_app_wires_bot_data(monkeypatch, isolated_subscribers_db):
     # CommandHandler, since the plain-text MessageHandler excludes all
     # commands). Assert the exact command set so a future missing command
     # fails loudly here instead of silently in production.
-    commands = {next(iter(h.commands)) for h in handlers if isinstance(h, CommandHandler)}
-    assert commands == {"start", "interests", "language"}
+    #
+    # Every command of every handler, not next(iter(h.commands)): one
+    # CommandHandler can serve several names (/start and /help share a
+    # reply), and taking only the first would silently drop one.
+    commands = {c for h in handlers if isinstance(h, CommandHandler) for c in h.commands}
+    assert commands == {"start", "help", "interests", "language"}
+    # And a catch-all BEHIND them, so an unregistered command gets an
+    # answer rather than silence -- see bot.handle_unknown_command.
+    #
+    # Order is the load-bearing half: python-telegram-bot dispatches only
+    # the first matching handler in a group, and this catch-all matches
+    # EVERY command. Registered before the CommandHandlers it would
+    # swallow /interests and /language and tell a user that commands which
+    # exist do not. Asserted on the real Application's handler list rather
+    # than by reading source, which is possible here (unlike bot.main())
+    # because build_info_app needs no live token.
+    catch_all_at = next(i for i, h in enumerate(handlers)
+                        if isinstance(h, MessageHandler)
+                        and h.callback.__name__ == "handle_unknown_command")
+    for i, h in enumerate(handlers):
+        if isinstance(h, CommandHandler):
+            assert i < catch_all_at, f"{h.commands} must be registered before the catch-all"
 
 
 def test_build_admin_app_wires_bot_data(monkeypatch):

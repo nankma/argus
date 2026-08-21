@@ -365,18 +365,101 @@ def run_agent(
 
 # --- Telemetry -------------------------------------------------------------
 
-def setup_telemetry():
-    """Wire up Phoenix tracing if PHOENIX_ENABLED is set. No-op otherwise —
-    tests/CI never set that env var, so they never try to reach a collector
-    that isn't there."""
-    if not os.environ.get("PHOENIX_ENABLED"):
-        return
-    register(
-        endpoint=PHOENIX_ENDPOINT,
-        project_name="myfirstagent",
-        protocol="grpc",
-        auto_instrument=True,
+# Logfire's ingest host is regional and the region is encoded in the write
+# token's own prefix (pylf_v1_us_ / pylf_v2_us_ / ..._eu_), so the endpoint
+# is derived rather than configured -- one fewer env var to get wrong, and
+# it cannot disagree with the credential it authenticates.
+LOGFIRE_HOSTS = {"us": "https://logfire-us.pydantic.dev",
+                 "eu": "https://logfire-eu.pydantic.dev"}
+
+# Length of the region-bearing prefix: "pylf_v2_us_" and friends. One
+# constant rather than two slice literals, so the window searched and the
+# window quoted back in the error can never drift apart.
+_LOGFIRE_PREFIX_LEN = len("pylf_v2_us_")
+
+
+def logfire_traces_endpoint(token: str) -> str:
+    """OTLP/HTTP traces URL for whichever region `token` belongs to.
+
+    Raises rather than guessing a default: an unrecognised prefix means the
+    token format changed, and quietly sending US-region traffic to a token
+    minted in the EU fails as a 401 at export time -- which the OTLP HTTP
+    exporter logs instead of raising, i.e. silently."""
+    prefix = token[:_LOGFIRE_PREFIX_LEN]
+    for region, host in LOGFIRE_HOSTS.items():
+        if f"_{region}_" in prefix:
+            return f"{host}/v1/traces"
+    raise ValueError(
+        "cannot tell which Logfire region this token belongs to from its "
+        f"prefix {prefix!r}; expected one of {sorted(LOGFIRE_HOSTS)}"
     )
+
+
+def _logfire_processor(token: str):
+    """A span processor exporting to Logfire over OTLP/HTTP.
+
+    Deliberately the plain OTLP exporter rather than the `logfire` SDK: the
+    spans we care about are produced by
+    openinference-instrumentation-langchain, which already speaks OTLP, so
+    the SDK would add a dependency and a second instrumentation path
+    without adding a span. Verified 2026-08-21 -- see
+    docs/plans/observability-platform-plan.md."""
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    return BatchSpanProcessor(
+        OTLPSpanExporter(endpoint=logfire_traces_endpoint(token),
+                         headers={"Authorization": token})
+    )
+
+
+def setup_telemetry():
+    """Wires up tracing to Phoenix, Logfire, both, or neither.
+
+    Each backend has its own explicit enable flag and is a no-op without
+    it. `LOGFIRE_ENABLED` is required even though `LOGFIRE_API_KEY` alone
+    would be enough to export, because the key is present in the
+    development environment: keying off the credential would turn every
+    local script and test run into a live exporter. Same reason
+    PHOENIX_ENABLED exists -- tests and CI set neither and so never reach a
+    collector.
+
+    Both can run at once, on purpose. Retiring the Phoenix VM is the last
+    step of the migration, not the first, and dual-writing is what makes it
+    possible to compare the two before committing."""
+    provider = None
+    if os.environ.get("PHOENIX_ENABLED"):
+        provider = register(
+            endpoint=PHOENIX_ENDPOINT,
+            project_name="myfirstagent",
+            protocol="grpc",
+            auto_instrument=True,
+        )
+
+    if not os.environ.get("LOGFIRE_ENABLED"):
+        return provider
+
+    token = os.environ.get("LOGFIRE_API_KEY")
+    if not token:
+        # Loud, because the alternative is a bot that looks instrumented
+        # and silently isn't -- the failure this whole plan exists to
+        # prevent.
+        raise RuntimeError("LOGFIRE_ENABLED is set but LOGFIRE_API_KEY is not")
+
+    if provider is None:
+        # No Phoenix, so nothing has built a provider or instrumented
+        # LangChain yet.
+        from openinference.instrumentation.langchain import LangChainInstrumentor
+        from opentelemetry import trace
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+
+        provider = TracerProvider(resource=Resource.create({"service.name": "myfirstagent"}))
+        trace.set_tracer_provider(provider)
+        LangChainInstrumentor().instrument(tracer_provider=provider)
+
+    provider.add_span_processor(_logfire_processor(token))
+    return provider
 
 
 # --- CLI chat interface ----------------------------------------------------

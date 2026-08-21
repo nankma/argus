@@ -12,7 +12,7 @@ they're constructed, rather than hardcoded.
 |---|------|--------|
 | 1 | Dependency injection (model + callbacks as parameters) | Done |
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
-| 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker |
+| 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker. **2026-08-21: a second backend (Logfire) added alongside it** — `agent.setup_telemetry()` now wires Phoenix, Logfire, both or neither onto one shared `TracerProvider`; see `docs/plans/observability-platform-plan.md` for the platform decision and migration status (nothing deployed yet, Phoenix remains live in production). |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
 | 5 | Test cases (actual scenarios) | Done — 16 tests, see below for what's covered vs. not |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
@@ -365,10 +365,43 @@ deployment chain resolved, not just this).
 - `enabled_sources()` — all 7 free sources always present; gated sources
   absent/present based on whether their env var is set.
 
-**`tests/test_telemetry.py`** — the `PHOENIX_ENABLED` gating logic only (see
-item 3).
+**`tests/test_telemetry.py`** — the `PHOENIX_ENABLED` gating logic (see item
+3), plus, added 2026-08-21: `LOGFIRE_ENABLED`/`LOGFIRE_API_KEY` gating (a
+key present without the flag must not export — load-bearing, since
+`LOGFIRE_API_KEY` sits in the dev shell env), the raise-when-enabled-
+without-a-key contract, one shared `TracerProvider` when both backends are
+on, and the token-prefix → region derivation (`logfire_traces_endpoint`).
+
+**This "Test cases" section and its counts are stale project-wide** (the
+suite is now 486 tests, not 16 — `qa-engineer` tracks the current total,
+this doc doesn't attempt to stay in sync test-by-test). Two additions
+specifically from the 2026-08-21 push-outcomes/telemetry work, since
+those are new *categories* of behaviour rather than more of an existing
+one:
+
+- **`tests/test_news_push.py`/`tests/test_users_db.py`** — `push_outcomes`
+  recording (`news_push._record`, `users_db.record_push_outcome` and its
+  queries), the cost-bug fix (failure paths advancing `last_push_at` only
+  once generation has happened, three-strikes-and-disable for an
+  unreachable chat), and the push-tick heartbeat span. See
+  `docs/plans/incident-monitoring-plan.md`'s "Status: step 1 built" for
+  the design this covers.
+- **`tests/test_news_push.py::test_emit_heartbeat_is_a_noop_without_a_tracer_provider`**
+  and the Logfire gating tests above are this project's hermeticity check
+  for telemetry specifically: nothing in `tests/` or `tests/conftest.py`
+  calls `setup_telemetry()` implicitly or at import time, so a real
+  `LOGFIRE_API_KEY` sitting in the dev environment cannot cause a real
+  export during any test or CI run.
 
 **Not covered yet** (candidates for later):
+- ~~`agent._logfire_processor`'s actual body, and the Logfire-only wiring
+  branch of `setup_telemetry`~~ — flagged 2026-08-21 by `qa-engineer`,
+  closed the same day: `test_logfire_processor_targets_the_regional_endpoint_with_the_token`
+  exercises the real `OTLPSpanExporter`/`BatchSpanProcessor` construction
+  (mocking only those two classes, not the whole function), and
+  `test_setup_telemetry_without_phoenix_builds_and_installs_its_own_provider`
+  exercises the `provider is None` branch and asserts the provider is
+  actually installed as the process-global one, not just constructed.
 - No test compares captured events/output against a checked-in baseline file
   (snapshot testing) — current tests assert specific expected values inline
   instead. Revisit if that stops scaling.

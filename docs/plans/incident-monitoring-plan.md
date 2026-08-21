@@ -211,3 +211,271 @@ Detection is not prevention. Test traffic could create real, billable
 subscribers; that is fixed structurally (`is_test`) rather than by
 watching for it. Not testing against production at all is a separate
 piece of work — `docs/plans/dev-environment-plan.md`.
+
+---
+
+# 2026-08-21: how industry does this, and what we should copy
+
+Researched because the shape of the answer decides whether "monitoring"
+here means adding services or adding rows.
+
+## The pattern, and its four pieces
+
+Every stack implements the same four, under different names:
+
+| Piece | Azure | Open-source |
+|---|---|---|
+| telemetry ingestion | App Insights SDK → Log Analytics | OTel SDK → Collector → backend |
+| query + alert rule | KQL scheduled query rule | Prometheus rules / Grafana Alerting |
+| notification routing | ICM → mail / phone / SMS | Alertmanager receivers |
+| **dedup until resolved** | ICM incident dedup | Alertmanager fingerprint + grouping |
+
+The fourth is the only one with real substance, and it rests on a
+distinction worth stating plainly: **rule evaluation is stateless — it
+runs every interval and yields a boolean — while an alert is stateful,
+with an identity and a lifecycle.** The identity is a fingerprint over the
+rule plus its subject. "Same query, no new ticket" is fingerprint equality;
+"new threshold, new ticket" is severity being part of the fingerprint.
+
+Three things the plain threshold-and-notify model leaves out, all of which
+we need:
+
+**A pending period (`for:`).** The condition must hold for N consecutive
+evaluations before the alert fires. Criterion 1's "three consecutive
+`chat_not_found`" is already this, hand-rolled.
+
+**Inhibition.** A firing high-severity alert suppresses the lower-severity
+alerts downstream of it. **We need this on day one**: on 2026-08-21
+criterion 2 (`model_error`) and criterion 3 (delivery ratio collapsed to
+14%) would both have fired off one root cause. Two alerts per incident is
+how an alert channel becomes noise.
+
+**Symptom-based alerting** (Google SRE). Alert on what the user
+experiences, not on causes. Criterion 3 is a symptom; criteria 1 and 2 are
+causes. That ordering is why criterion 3 is the one that matters most.
+
+## Why Phoenix is not the answer, in three independent ways
+
+Any one of these would be sufficient:
+
+1. **Open-source Phoenix has no alerting at all.** Threshold rules,
+   PagerDuty/Opsgenie routing and anomaly detection are Arize AX, the
+   commercial product. Phoenix OSS is a trace viewer and an eval harness.
+2. **Phoenix cannot see the events the criteria are about.** We emit no
+   custom spans — `grep` for `tracer`/`span`/`set_attribute` across
+   `agent.py`, `news_push.py`, `news_ingest.py` and `guardrails.py` returns
+   nothing. Only `openinference-instrumentation-langchain`'s automatic LLM
+   spans reach it. `delivered`, `chat_not_found` and the delivery ratio are
+   properties of a *Telegram send*, not of an LLM call. Phoenix has never
+   had this data and would not have it even with alerting bolted on.
+3. **The store is write-only from where the bot sits** — port 6006
+   unreachable from the bot VM, OTLP 4317 fine (verified 2026-08-21).
+
+### "But could we emit outcomes as spans and pull them back by API?"
+
+Technically yes. Phoenix ingests OTLP *spans*, not logs, but a span with
+`outcome=chat_not_found` as an attribute is a log in all but name, and
+Phoenix exposes both GraphQL and REST (`/v1/spans`) to read them back.
+There is even a second always-on host to run a puller on — Phoenix has
+its own VM.
+
+Rejected anyway, for a reason that gets stronger the closer you look:
+
+**It saves none of the expensive work.** Emitting the span is the same
+instrumentation as inserting the row. The part that costs is deciding
+what the outcomes are and making every branch report one.
+
+**And it inverts the dependency.** Phoenix runs on a separate VM
+*precisely because* "its memory use can spike hard under load; isolating
+it means a spike can't take the bot down"
+(`docs/current/infrastructure.md`). That is a recorded judgement that
+Phoenix is the less reliable of the two. Routing the alarm through it
+makes the watchdog depend on the component we already isolated for being
+unstable — and its failure mode is silence, which is the one failure mode
+a monitor must not have.
+
+Secondary but real: 6006 is unreachable from the bot VM, Phoenix has its
+own auth to hold credentials for, the `phoenix.Client()` helper lives in
+the full `arize-phoenix` package that imports pandas (see `CLAUDE.md`),
+and span retention on a small disk is far heavier than outcome rows.
+
+### Is Phoenix the right tool for what we DO use it for?
+
+Mostly yes, narrowly. The case against is fair — we use none of its
+datasets, experiments, evals, annotations or playground, and plain logs
+could carry a prompt if we wrote it out ourselves.
+
+What it uniquely gives is the **tree**: agent → tool call → LLM call →
+tool call, nested, with token counts and latency per node. Flat log lines
+cannot express that nesting, and it is exactly what answers "why did the
+agent loop three times". We pay nothing for it —
+`openinference-instrumentation-langchain` produces all of it with no code
+of ours.
+
+So: keep it for diagnosis, don't grow it into the alarm path, and don't
+add a log service either — that would be a third store for a system with
+one viewer, when SQLite already holds everything else. If Phoenix ever
+stops being worth its VM, what replaces it is logging the prompt tree
+ourselves, which is real work worth avoiding while it is free.
+
+An SSH tunnel fixes *viewing*, which is real and worth keeping: when
+something has already gone wrong and the question is "what exactly did that
+digest prompt contain", Phoenix is the best tool we have and `/status`
+will never replace it. But alerting has to run when nobody is watching, and
+an alarm that only fires while a tunnel is open is not an alarm.
+
+## Why not Prometheus + Alertmanager + Grafana
+
+Two reasons, in order of weight:
+
+**The expensive part is instrumentation, not machinery.** Nothing can
+alert on "this digest was generated but not delivered" until the code says
+so in a queryable form. That work is identical whether the sink is
+Prometheus or SQLite — and having done it, the remaining state machine is
+a table and about forty lines (upsert on breach; notify once when a
+pending period elapses; notify resolved and clear when it stops). That is
+Alertmanager's core, and it is smaller than the config needed to run
+Alertmanager.
+
+**And it does not fit.** The bot VM is a `VM.Standard.E2.1.Micro` — 954 MB
+total, ~420 MB free with the container resident. Collector + Prometheus +
+Grafana + Alertmanager exceeds that before storing a single sample, and
+each wants a port, an OCI security-list rule, an `iptables` rule, TLS and
+auth. For one viewer.
+
+The mapping we use instead:
+
+| App Insights | Here |
+|---|---|
+| Log Analytics table | SQLite `push_outcomes`, `llm_usage` |
+| KQL | SQL |
+| scheduled query rule | an evaluation pass on the push tick |
+| ICM + dedup | an `alert_state` table keyed by fingerprint |
+| notification channel | the admin bot (already authenticated by `ADMIN_CHAT_ID`) |
+| dashboard | `/status` |
+
+**The dashboard need not run on the VM at all.** `subscribers.db` is small;
+copying it to a dev box and rendering locally costs production nothing —
+the same move as tunnelling to Phoenix. `/status` answers "is it healthy
+right now" from a phone; a local view answers "what has the trend been".
+
+## Why the existing log lines cannot be the data source
+
+They are not missing. `news_push.py` already printed every branch —
+not-due, no-interests, due, no-new-articles, none-relevant, sent, blocked,
+failed. Essentially the outcome enum this document asks for. Four things
+stop them from being what an alarm reads:
+
+- **No timestamp of their own.** Only the tick line carries
+  `now.isoformat()`; the per-subscriber lines carry none. Docker's
+  json-file driver stamps each line, so `docker logs -t` recovers it — but
+  only through Docker.
+- **Free text.** `sent digest -- 3 of 8 candidate(s) appeared in it` has to
+  be regex-parsed, and rewording a print silently stops the monitor
+  counting. It does not error; it just goes quiet.
+- **Unreadable from inside the container.** `docker logs` is a host-side
+  command. The evaluator has to run in-process (see above: the
+  out-of-process store is write-only from here), and an in-process
+  evaluator cannot read it. Mounting the Docker socket to work around this
+  would hand the container host-level control — not a trade worth making
+  for a log read.
+- **Destroyed by our own deploys.** A container swap is a `docker rm`; the
+  json-file log goes with it. There is no `--log-opt max-size` either, so
+  between deploys it grows unbounded on a small disk.
+
+So the outcome is now written **both** ways, from a single call site
+(`news_push._record`) that prints and inserts together, so a new branch
+cannot do one without the other. The prints stay exactly as useful as they
+were for reading a specific cycle by hand.
+
+## Correction: the leak was roughly 24x worse than "every six hours"
+
+Found while instrumenting this, and it revises the incident's arithmetic.
+
+`PUSH_TICK_SECONDS = 900` — the job ticks every 15 minutes and decides per
+subscriber whether an interval has elapsed. `users_db.record_push` is what
+advances `last_push_at`. On the delivery-failure path it was never reached:
+the exception propagated to the per-subscriber catch-all, which `continue`d
+past it. `is_subscriber_due` returns `True` for a `NULL` `last_push_at`.
+
+Together: a subscriber whose chat cannot receive **regenerates a full
+digest on every 15-minute tick, forever** — never every six hours. Three
+LLM calls (`resolve_interest_categories`, `write_push_digest`,
+`is_output_on_topic`) × 96 ticks/day × 19 leaked accounts is on the order
+of 5,000 calls/day, which is the scale that actually empties a balance in
+eight days. The earlier "~162 calls/day" estimate counted digests at their
+nominal interval and is wrong for exactly this reason.
+
+**Fixed 2026-08-21**, in two parts, because there were two independent
+defects and either alone would have left the leak open:
+
+**(A) Any failure after generation now advances `last_push_at`.** A
+`generated` flag is set the moment `write_push_digest` returns; every
+failure handler below that point records an empty push. The rule it
+encodes: *once we have paid for a digest, the next attempt is a full
+interval away, whatever went wrong afterwards.* This alone takes the
+retry rate from every 15 minutes to every interval.
+
+A model error *before* generation deliberately does not advance — nothing
+was billed, and a transient provider blip should not cost the subscriber
+their whole cycle. That asymmetry is the point of the flag; a blanket
+"always advance on failure" would be simpler and wrong.
+
+**(B) Three consecutive undeliverable cycles turn push off**
+(`news_push.UNREACHABLE_STRIKES`). Only `delivered` breaks the streak and
+only `chat_not_found` extends it; every other outcome is skipped rather
+than treated as either — a `nothing_new` cycle attempts no send, so it is
+evidence of nothing, and letting it reset the count would let a dead chat
+with one quiet cycle in three bill digests forever.
+
+Three rather than one because turning a real subscriber off is the more
+expensive mistake: they simply stop receiving news, with no error to
+notice. And only `push_enabled` is cleared — interests and language
+survive, so a user who blocked the bot and later unblocks it turns push
+back on and continues.
+
+The exposure was not hypothetical once the test accounts were gone: a real
+user who blocks the bot produces the identical signature.
+
+**The admin is not notified yet.** A strike-out records a `disabled`
+outcome and prints, and nothing reads either. That is the alerting work,
+still to be designed.
+
+## Status: step 1 built
+
+`push_outcomes` (one row per subscriber per cycle that reached an
+outcome), `news_push._record`, and the queries the three criteria need
+(`push_outcome_counts`, `push_delivery_ratio`, `recent_outcomes_for`,
+`prune_push_outcomes`) landed 2026-08-21. 17 tests.
+
+Two design points worth keeping:
+
+- **Failures are classified by which call raised, not by what the message
+  says.** `_model_call` wraps exactly the LLM calls, so a provider
+  rewording an error cannot silence criterion 2. The one place a message
+  must be matched is separating a dead chat from malformed HTML — both
+  arrive as `BadRequest` — and there the fallback is `cycle_failed`, so an
+  unrecognised error under-reports criterion 1 rather than wrongly
+  disabling a live subscriber.
+- **`not_due` is not recorded.** It fires for every subscriber on every
+  tick, and `healthcheck.py` already answers whether the job is running.
+
+Criterion 1's *action* also landed (see the correction above): three
+consecutive undeliverable cycles turn push off. Its *alert* did not —
+nothing tells the admin it happened.
+
+Still to build: the `alert_state` machine (with pending period and
+inhibition), the admin-bot notifier, `llm_usage`, and `/status`.
+
+### A note on verifying this one
+
+Both fixes were mutation-checked — disabled in place, suite re-run,
+confirmed the new tests go red, then restored. Worth recording because the
+first attempt at that check reported success while silently changing
+nothing (a piped heredoc that never landed), and three of the tests passed
+against the mutated code for a reason that had nothing to do with the fix:
+`get_push_enabled` returns `False` for a subscriber row that does not
+exist, so `assert ... is False` held whether or not anything was turned
+off. Each of those tests now creates the row first. A test that cannot
+fail is worse than no test, and neither pytest nor a green run says which
+kind you have.

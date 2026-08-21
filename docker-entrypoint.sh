@@ -43,6 +43,13 @@ fi
 if [ -n "$PHOENIX_API_KEY_SECRET_OCID" ]; then
     export PHOENIX_API_KEY="$(fetch_secret "$PHOENIX_API_KEY_SECRET_OCID")"
 fi
+# Logfire is a second telemetry backend alongside Phoenix during the
+# migration in docs/plans/observability-platform-plan.md, not a replacement
+# yet. Export still needs LOGFIRE_ENABLED as well -- resolving the secret
+# does not by itself turn tracing on.
+if [ -n "$LOGFIRE_API_KEY_SECRET_OCID" ]; then
+    export LOGFIRE_API_KEY="$(fetch_secret "$LOGFIRE_API_KEY_SECRET_OCID")"
+fi
 if [ -n "$GNEWS_API_KEY_SECRET_OCID" ]; then
     export GNEWS_API_KEY="$(fetch_secret "$GNEWS_API_KEY_SECRET_OCID")"
 fi

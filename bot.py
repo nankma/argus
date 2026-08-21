@@ -268,10 +268,39 @@ async def handle_start_command(update: Update, context: ContextTypes.DEFAULT_TYP
     returns False for all of them, so there's nothing more to do here in
     those cases. Only an *already-approved* user typing /start again
     falls through to the capabilities message below, since check_access
-    returns True silently for them."""
+    returns True silently for them.
+
+    Also serves /help, which asks the same question. One reply rather than
+    two capability lists that drift apart -- guardrails.REDIRECT_MESSAGE is
+    the single place that says what this bot can do, and the guardrail's
+    own off-topic redirect uses it too."""
     if not await check_access(update, context):
         return
     await update.message.reply_text(guardrails.REDIRECT_MESSAGE, parse_mode=ParseMode.HTML)
+
+
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Any /command no CommandHandler above claimed.
+
+    Without this the reply is *silence*, which is worse than an error: the
+    plain-text MessageHandler excludes commands (~filters.COMMAND), so an
+    unregistered command matches no handler at all -- no reply, no log
+    line, nothing. That is not hypothetical. It is exactly how /start
+    behaved for every brand-new user until 2026-08-09, and how /help
+    behaved until 2026-08-21, when a user reported that typing it did
+    nothing.
+
+    Fixing those one command at a time treats the symptom; this closes the
+    class. Registered after the real commands, so they still match first,
+    and it answers with the same capabilities message rather than a bare
+    "unknown command" -- someone who guessed at a command wants to know
+    what the right one is."""
+    if not await check_access(update, context):
+        return
+    await update.message.reply_text(
+        "🤔 I don't have that command.\n\n" + guardrails.REDIRECT_MESSAGE,
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -726,10 +755,12 @@ def main():
     # Perigon) by default; granting it to anyone else is a plain DB update
     # (users_db.set_restricted_sources_enabled), not a new code path.
     users_db.set_restricted_sources_enabled(app.bot_data["admin_chat_id"], True)
-    app.add_handler(CommandHandler("start", handle_start_command))
+    app.add_handler(CommandHandler(["start", "help"], handle_start_command))
     app.add_handler(CommandHandler("interests", handle_interests_command))
     app.add_handler(CommandHandler("language", handle_language_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Last: every real command above gets first refusal.
+    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
     register_push_job(app)
     register_ingest_job(app)
     register_health_check_job(app)

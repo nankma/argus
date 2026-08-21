@@ -12,12 +12,13 @@ ServerAlive*, ExitOnForwardFailure, always a fresh tunnel, never reused
 from an earlier session) rather than assuming one is already open.
 
 Covers checklist cases 1, 2, 3, 4, 5, 7, 8, 9, 12, 14 -- everything that's
-a plain message through process_message's pipeline. Cases 6, 10, 11, 13
-(/interests, /language, /start) are command handlers that don't route
-through test_api.py at all (see docs/reference/local-testing-api-plan.md's "What it
-does and doesn't cover") -- listed explicitly as NOT COVERED in the
-report rather than silently omitted, so a human knows to check those
-against real Telegram separately.
+a plain message through process_message's pipeline. Cases 6, 10, 11, 13,
+15, 16 (/interests, /language, /start, /help, and an unrecognised
+command) are command handlers that don't route through test_api.py at
+all (see docs/reference/local-testing-api-plan.md's "What it does and
+doesn't cover") -- listed explicitly as NOT COVERED in the report rather
+than silently omitted, so a human knows to check those against real
+Telegram separately.
 
 Usage:
     python tools/run_smoke_tests.py --bot-vm ubuntu@<bot-vm-ip> --bot-key <path> [--chat-id 999] [--timeout 90]
@@ -39,6 +40,8 @@ NOT_COVERED = [
     "10 /language, /language clear command handlers",
     "11 /language <specific script/variant> command handler",
     "13 /start from a brand-new account (access-control flow)",
+    "15 /help from an already-approved account",
+    "16 an unrecognised command (e.g. /foo) gets a reply, not silence",
 ]
 
 

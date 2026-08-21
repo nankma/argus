@@ -222,6 +222,45 @@ def init_db() -> None:
         # step in the approval state machine, it is a fact about a proposal
         # still sitting in 'proposed'.
         _ensure_column(conn, "categories", "alerted_at", "TEXT")
+        # One row per subscriber per push cycle that got far enough to have
+        # an outcome -- see docs/plans/incident-monitoring-plan.md.
+        #
+        # This duplicates information news_push.py already prints, on
+        # purpose. The print lines are for a human reading `docker logs`;
+        # they are free text with no timestamp of their own, and a container
+        # swap on deploy destroys them. Neither property survives being the
+        # input to an alarm, and a process inside the container cannot read
+        # its own `docker logs` anyway. So the outcome is written here as
+        # well, from the same call site (news_push._record) that prints it,
+        # so a new branch cannot record without logging or log without
+        # recording.
+        #
+        # Deliberately NOT recorded: the "not due yet" branch. It fires for
+        # every subscriber on every tick, carries no signal healthcheck.py
+        # doesn't already cover, and would dominate the table.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS push_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                detail TEXT
+            )
+            """
+        )
+        # Two indexes for the two shapes of question the criteria ask:
+        # "what happened across everyone in the last 24h" (ratio alarm) and
+        # "what were this subscriber's last N outcomes" (consecutive-failure
+        # alarm).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS push_outcomes_at "
+            "ON push_outcomes (recorded_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS push_outcomes_chat_at "
+            "ON push_outcomes (chat_id, recorded_at)"
+        )
         _seed_categories(conn)
         _migrate_split_policy(conn)
 
@@ -278,6 +317,49 @@ SEED_CATEGORIES: list[tuple[str, str]] = [
 ]
 
 CATEGORY_SIGHTING_RETENTION_DAYS = 30
+
+# The outcome of one subscriber's turn in one push cycle, as recorded in
+# push_outcomes. Exhaustive by intent: every branch of news_push's
+# per-subscriber loop that does not `continue` before doing any work ends
+# at exactly one of these.
+PUSH_DELIVERED = "delivered"            # digest generated, sent, accepted
+PUSH_NOTHING_NEW = "nothing_new"        # due, but no candidate articles
+PUSH_NOT_RELEVANT = "not_relevant"      # model saw candidates, wrote nothing
+PUSH_BLOCKED = "blocked"                # digest failed the output guardrail
+PUSH_NO_INTERESTS = "no_interests"      # push on, but nothing to push about
+PUSH_CHAT_NOT_FOUND = "chat_not_found"  # generated, then Telegram refused
+PUSH_MODEL_ERROR = "model_error"        # an LLM call raised
+PUSH_CYCLE_FAILED = "cycle_failed"      # anything else raised
+PUSH_DISABLED = "disabled"              # struck out; push turned off for them
+
+# Outcomes that mean an LLM was actually called to write a digest -- the
+# denominator of the delivered/generated ratio, which is criterion 3 in
+# docs/plans/incident-monitoring-plan.md and the number that would have
+# caught the 2026-08-21 leak on day one (3 delivered of 22 generated).
+#
+# nothing_new and no_interests are excluded because they return before
+# write_push_digest, so no digest was paid for -- and counting them would
+# let a flood of idle subscribers hide a collapsed delivery rate.
+#
+# "No spend at all" would be slightly too strong for nothing_new:
+# resolve_interest_categories runs first and can make one classification
+# call for an interest string never seen before. That is once per distinct
+# interest ever, since the result is cached permanently in
+# interest_categories, so it does not accumulate -- but the denominator
+# does undercount by that one call, and the ratio is about digests
+# specifically.
+PUSH_GENERATED_OUTCOMES = frozenset({
+    PUSH_DELIVERED,
+    PUSH_NOT_RELEVANT,
+    PUSH_BLOCKED,
+    PUSH_CHAT_NOT_FOUND,
+    PUSH_MODEL_ERROR,
+})
+
+# Longer than the 30-day sightings window: the ratio alarm reads 24 hours,
+# but answering "was this normal?" after an incident means comparing
+# against the weeks before it, and these rows are tiny.
+PUSH_OUTCOME_RETENTION_DAYS = 90
 
 # How many sightings inside the retention window before an admin is asked.
 #
@@ -510,6 +592,100 @@ def prune_category_sightings(now: datetime,
     cutoff = (now - timedelta(days=days)).isoformat()
     with _connect() as conn:
         cursor = conn.execute("DELETE FROM category_sightings WHERE seen_at < ?", (cutoff,))
+        return cursor.rowcount
+
+
+def record_push_outcome(chat_id: int, outcome: str, recorded_at: datetime,
+                        detail: str | None = None) -> None:
+    """Records what happened to one subscriber in one push cycle.
+
+    Call this from news_push._record rather than directly: the point of
+    that helper is that the human log line and this row are written
+    together, so the two can't disagree about what happened.
+
+    `detail` is free text for a human reading the row back (an exception
+    repr, "3 of 8 candidates"). Nothing queries it -- anything an alarm
+    needs to test belongs in `outcome`, which is a closed set."""
+    ts = recorded_at if recorded_at.tzinfo else recorded_at.replace(tzinfo=timezone.utc)
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO push_outcomes (chat_id, outcome, recorded_at, detail) "
+            "VALUES (?, ?, ?, ?)",
+            (chat_id, outcome, ts.isoformat(), detail),
+        )
+
+
+def push_outcome_counts(since: datetime) -> dict[str, int]:
+    """{outcome: count} across all subscribers since `since`. The shape
+    /status renders and the ratio alarm reads."""
+    cutoff = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT outcome, COUNT(*) FROM push_outcomes WHERE recorded_at >= ? "
+            "GROUP BY outcome",
+            (cutoff.isoformat(),),
+        ).fetchall()
+    return {outcome: count for outcome, count in rows}
+
+
+def push_delivery_ratio(since: datetime) -> tuple[int, int]:
+    """(delivered, generated) since `since` -- criterion 3's numerator and
+    denominator, derived from the same counts so they cannot drift apart.
+
+    Returns (0, 0) when nothing was generated, which callers must treat as
+    "no opinion" rather than as a 0% delivery rate: a window in which every
+    subscriber was idle is not an outage."""
+    counts = push_outcome_counts(since)
+    generated = sum(n for outcome, n in counts.items()
+                    if outcome in PUSH_GENERATED_OUTCOMES)
+    return counts.get(PUSH_DELIVERED, 0), generated
+
+
+def recent_outcomes_for(chat_id: int, limit: int = 20) -> list[str]:
+    """This subscriber's most recent outcomes, newest first.
+
+    Raw and unfiltered on purpose -- see consecutive_chat_not_found for
+    the one policy currently layered on top of it."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT outcome FROM push_outcomes WHERE chat_id = ? "
+            "ORDER BY recorded_at DESC, id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def consecutive_chat_not_found(chat_id: int, limit: int = 50) -> int:
+    """How many `chat_not_found` outcomes have piled up since the last
+    proof this chat was reachable.
+
+    Only `delivered` breaks the streak, and only `chat_not_found` extends
+    it; every other outcome is skipped rather than treated as either. That
+    is not a shortcut -- it follows from what each outcome is evidence OF.
+    A `nothing_new` cycle attempts no send at all, so it says nothing about
+    whether the chat still exists; letting it reset the count would leave a
+    dead chat billing digests indefinitely, which is the exact failure this
+    is here to stop. A successful delivery is the only positive proof, so
+    it is the only thing that clears the record.
+
+    `limit` bounds the scan rather than the answer: a streak longer than
+    this cannot be distinguished from one exactly this long, which is
+    harmless because every threshold is far smaller."""
+    streak = 0
+    for outcome in recent_outcomes_for(chat_id, limit):
+        if outcome == PUSH_DELIVERED:
+            break
+        if outcome == PUSH_CHAT_NOT_FOUND:
+            streak += 1
+    return streak
+
+
+def prune_push_outcomes(now: datetime,
+                        days: int = PUSH_OUTCOME_RETENTION_DAYS) -> int:
+    """Drops outcomes outside the window. Returns how many."""
+    cutoff = (now - timedelta(days=days)).isoformat()
+    with _connect() as conn:
+        cursor = conn.execute("DELETE FROM push_outcomes WHERE recorded_at < ?", (cutoff,))
         return cursor.rowcount
 
 
