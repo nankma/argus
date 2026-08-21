@@ -25,3 +25,4 @@ local-infra/
 # docs/analysis/cluster-measurements.md.
 docs/analysis/cluster-report.html
 docs/analysis/data/
+docs/analysis/data/cache-snapshot-0821.tsv
