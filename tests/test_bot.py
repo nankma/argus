@@ -870,3 +870,79 @@ def test_register_health_check_job_schedules_one_repeating_job():
     jobs = app.job_queue.jobs()
     assert len(jobs) == 1
     assert jobs[0].trigger.interval.total_seconds() == bot.HEALTH_CHECK_TICK_SECONDS
+
+
+# --- A4: raising category proposals with the admin ------------------------
+
+
+def _seed_proposal(name, now, hits=5):
+    for i in range(hits):
+        users_db.record_category_sighting(name, now, f"https://e/{i}", f"{name} story {i}")
+
+
+def test_review_raises_a_proposal_past_the_threshold(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _seed_proposal("Healthcare", now)
+    monkeypatch.setattr(bot.news_classify, "draft_category_description",
+                        lambda *a, **k: "hospitals, drugs, clinical tech")
+    sent = AsyncMock()
+    monkeypatch.setattr(bot, "Bot", lambda token: MagicMock(send_message=sent))
+
+    raised = asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now))
+
+    assert raised == 1
+    text = sent.call_args.kwargs["text"]
+    assert "Healthcare" in text
+    assert "hospitals, drugs, clinical tech" in text, "the admin sees the exact wording that ships"
+    assert "Healthcare story" in text, "and an example to judge it by"
+
+
+def test_review_does_not_raise_the_same_proposal_twice(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _seed_proposal("Healthcare", now)
+    monkeypatch.setattr(bot.news_classify, "draft_category_description", lambda *a, **k: "d")
+    monkeypatch.setattr(bot, "Bot", lambda token: MagicMock(send_message=AsyncMock()))
+
+    assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 1
+    assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 0
+
+
+def test_a_failed_send_leaves_the_proposal_raisable(monkeypatch, isolated_subscribers_db):
+    """alerted_at IS NULL is what makes a proposal eligible, so marking it
+    before a successful send would make a failed send indistinguishable
+    from a delivered one -- and lose the proposal permanently. A duplicate
+    message on retry is visible; a dropped proposal is not."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _seed_proposal("Healthcare", now)
+    monkeypatch.setattr(bot.news_classify, "draft_category_description", lambda *a, **k: "d")
+    monkeypatch.setattr(bot, "Bot", lambda token: MagicMock(
+        send_message=AsyncMock(side_effect=RuntimeError("telegram down"))))
+
+    assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 0
+    assert users_db.categories_ready_for_review(now) != [], "still eligible next cycle"
+
+
+def test_review_still_raises_when_the_description_could_not_be_drafted(
+    monkeypatch, isolated_subscribers_db
+):
+    """A missing description is recoverable -- the admin can reject and add
+    it by hand. Skipping the alert because drafting failed would hide the
+    gap entirely, which is the failure this whole feature exists to fix."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _seed_proposal("Healthcare", now)
+    monkeypatch.setattr(bot.news_classify, "draft_category_description", lambda *a, **k: None)
+    sent = AsyncMock()
+    monkeypatch.setattr(bot, "Bot", lambda token: MagicMock(send_message=sent))
+
+    assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 1
+    assert "no description drafted" in sent.call_args.kwargs["text"]
+
+
+def test_review_is_silent_when_nothing_crossed_the_threshold(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    _seed_proposal("Healthcare", now, hits=1)
+    sent = AsyncMock()
+    monkeypatch.setattr(bot, "Bot", lambda token: MagicMock(send_message=sent))
+
+    assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 0
+    sent.assert_not_called()

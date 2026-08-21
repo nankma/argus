@@ -1,6 +1,6 @@
 # Plan: DB-backed taxonomy, admin-in-the-loop growth, and an admin console
 
-Status: **A1, A2, and A3 built (2026-08-20); A4 onward not started.**
+Status: **A1, A2, A3, and A4 built (2026-08-20); A5 onward not started.**
 
 - **A1 — schema.** Done. `categories` and `category_sightings` exist in
   `users_db.py`, seeded with the original 13 from `SEED_CATEGORIES`.
@@ -17,7 +17,51 @@ Status: **A1, A2, and A3 built (2026-08-20); A4 onward not started.**
   proposals. Still no admin interaction — that's A4 — and the alert
   threshold in A4 remains an unreplaced placeholder pending the real
   distribution this step exists to collect.
-- **A4, A5, B** — not started.
+- **A4 — the admin prompt.** Done. `users_db.categories_ready_for_review`
+  finds `proposed` categories past `CATEGORY_PROPOSAL_THRESHOLD` (still 5,
+  still an unreplaced placeholder — production hasn't run long enough
+  since A3 to have a real distribution) that haven't been alerted yet;
+  `bot._ingest_job` calls it after each ingestion cycle via
+  `review_category_proposals`, which drafts a description with
+  `news_classify.draft_category_description` (model-drafted from the
+  example articles, shown to the admin rather than a blank field) and
+  sends the Activate/Merge into…/Reject message built by
+  `admin_bot.build_category_review`. `admin_bot.handle_category_decision`
+  joins the three buttons to `users_db.activate_category` /
+  `reject_category` / `merge_category`, all guarded by `WHERE status =
+  'proposed'` so a double-tap or two admins racing is a no-op, reported as
+  such, not silently repeated. A proposal is marked alerted only *after*
+  a successful send, so a Telegram failure retries next cycle instead of
+  losing the proposal; both untrusted-HTML interpolation (category name,
+  drafted description, and example article titles all escaped) and a
+  proposed name colliding with the `:`-delimited `callback_data` format
+  (normalized at write time in `record_category_sighting`) were caught in
+  review and fixed.
+
+  **Deliberate deviation from the state diagram in A1:** `merge_category`
+  accepts a `proposed` source, not only `active`. The diagram only draws
+  `merged` as reachable from `active`; forcing Activate-then-Merge for a
+  proposal the admin already recognizes as a duplicate would be a wasted
+  activation (including the interest-cache invalidation `activate_category`
+  does) immediately undone by the merge. The code is judged correct here;
+  the diagram is stale and should gain a `proposed → merged` edge, which
+  this note flags rather than leaving to drift unnoticed.
+
+  **Known small gap against this section's own text:** the open question
+  above ("having the model draft the description from the example
+  articles") is implemented; the description text in the A4 mockup
+  ("the admin edit rather than face a blank field") is not — the admin
+  sees the model's draft in the alert message and can only accept it
+  (Activate) or discard it (Reject, then `/category_add` by hand once B2
+  exists); there is no in-place edit affordance. Worth a decision on
+  whether that's the intended v1 scope or a follow-up.
+- **A5, B** — not started. `activate_category` does a blanket
+  `DELETE FROM interest_categories` rather than A5's eager batched re-map
+  or lazy `taxonomy_version` bump — an explicitly-acknowledged "pre-A5
+  shape" (see the function's docstring) that relies on the existing
+  missing-row-retries / cached-empty-is-a-real-answer distinction in
+  `news_push.resolve_interest_categories` to stay safe, not on anything
+  A5 adds.
 
 Two related pieces:
 
@@ -593,7 +637,18 @@ a side effect of `detail` being a free-form JSON column.
    label has recurred. `CATEGORY_PROPOSAL_THRESHOLD` in A4 is still a
    placeholder guessed from one observation ("Education") — this step
    exists to collect the real distribution before that number is chosen.
-3. **A4 + A5** — the admin loop and interest-cache invalidation.
+3. ~~**A4 + A5** — the admin loop and interest-cache invalidation.~~
+   **A4 done 2026-08-20; A5 split off, not started.** A4 landed on its
+   own: the admin loop (threshold check, model-drafted description,
+   Activate/Merge into…/Reject) is built and tested. A5's actual
+   design — persisted derived state with `taxonomy_version` staleness and
+   an eager batched re-map on activation — did not land with it;
+   `activate_category` instead invalidates the interest cache outright,
+   documented in its own docstring as the "pre-A5 shape". That is safe
+   only because `news_push.resolve_interest_categories` already treats a
+   missing mapping as "retry", not "empty" — the fix for the 2026-08-20
+   cache bug — so A5 is still a real, separate piece of work, not
+   optional cleanup.
 4. **B2** — the read-only commands (`/categories`, `/proposals`, `/users`)
    before the mutating ones.
 5. **B3** — audit log, once the retention question is answered.

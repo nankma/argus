@@ -86,7 +86,10 @@ def build_admin_app(admin_chat_id: int, info_bot_token: str) -> Application:
     app = Application.builder().token(os.environ["ADMIN_BOT_TOKEN"]).build()
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["info_bot_token"] = info_bot_token
-    app.add_handler(CallbackQueryHandler(admin_bot.handle_decision))
+    # Disjoint patterns so the category buttons and the approve/deny
+    # buttons can't catch each other's callbacks.
+    app.add_handler(CallbackQueryHandler(admin_bot.handle_category_decision, pattern=r"^cat:"))
+    app.add_handler(CallbackQueryHandler(admin_bot.handle_decision, pattern=r"^(approve|deny):"))
     app.add_handler(MessageHandler(filters.ALL, admin_bot.reject_non_admin))
     return app
 

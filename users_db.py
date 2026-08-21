@@ -214,6 +214,11 @@ def init_db() -> None:
         # Stock from Finance even though Stock's description cross-references
         # it -- see get_active_categories.
         _ensure_column(conn, "categories", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        # When the admin was last asked about this proposal. NULL = never.
+        # A timestamp rather than a status value: "we have asked" is not a
+        # step in the approval state machine, it is a fact about a proposal
+        # still sitting in 'proposed'.
+        _ensure_column(conn, "categories", "alerted_at", "TEXT")
         _seed_categories(conn)
         _migrate_split_policy(conn)
 
@@ -270,6 +275,16 @@ SEED_CATEGORIES: list[tuple[str, str]] = [
 ]
 
 CATEGORY_SIGHTING_RETENTION_DAYS = 30
+
+# How many sightings inside the retention window before an admin is asked.
+#
+# A PLACEHOLDER, not a measured value. It was picked from a single
+# observation of "Education" before any of this existed. As of 2026-08-20
+# production has four proposals sitting at one sighting each, which cannot
+# distinguish a real gap from a model slip -- that takes seeing the same
+# label recur across separate cycles. Revisit once the sightings table has
+# a distribution worth reading.
+CATEGORY_PROPOSAL_THRESHOLD = 5
 
 # Written by the code, never chosen by the model. It marks "the classifier
 # looked and nothing applied", which needs to be distinguishable from "the
@@ -420,6 +435,24 @@ def resolve_category_name(name: str) -> str | None:
     return None
 
 
+# Telegram caps callback_data at 64 bytes and admin_bot packs
+# "cat:into:{name}:{target}" into it, so a proposed name must be short and
+# must not contain the delimiter. Proposed names are unsanitized model
+# output -- a label containing ':' would silently mis-parse on the button
+# press and the admin would be told "already decided" about a category
+# that was never touched.
+MAX_CATEGORY_NAME_LENGTH = 32
+
+
+def normalize_category_name(name: str) -> str:
+    """Makes a model-proposed label safe to round-trip through a Telegram
+    callback. Normalized at the point it is RECORDED rather than parsed
+    defensively later: one place to get right, and the table then only ever
+    holds names the rest of the system can handle."""
+    cleaned = " ".join(name.replace(":", " ").split())
+    return cleaned[:MAX_CATEGORY_NAME_LENGTH].strip()
+
+
 def record_category_sighting(name: str, seen_at: datetime, link: str | None = None,
                              title: str | None = None) -> None:
     """Logs that the classifier reached for `name`, which isn't active, and
@@ -429,6 +462,9 @@ def record_category_sighting(name: str, seen_at: datetime, link: str | None = No
     exists as rejected, retired or merged, that decision stands. A sighting
     is evidence, and evidence does not resurrect a decision someone
     already made."""
+    name = normalize_category_name(name)
+    if not name:
+        return
     ts = seen_at.isoformat()
     with _connect() as conn:
         conn.execute(
@@ -472,6 +508,141 @@ def prune_category_sightings(now: datetime,
     with _connect() as conn:
         cursor = conn.execute("DELETE FROM category_sightings WHERE seen_at < ?", (cutoff,))
         return cursor.rowcount
+
+
+def categories_ready_for_review(now: datetime,
+                               threshold: int = CATEGORY_PROPOSAL_THRESHOLD,
+                               days: int = CATEGORY_SIGHTING_RETENTION_DAYS
+                               ) -> list[tuple[str, int]]:
+    """[(name, hits)] for proposals that have crossed the threshold inside
+    the window and have NOT been raised with an admin yet.
+
+    `alerted_at IS NULL` is what stops this nagging: an admin who has been
+    asked and hasn't answered is not asked again every ingestion cycle. The
+    proposal stays in the table and a future /proposals command can list
+    it; the alert is a one-time push, not a reminder loop."""
+    cutoff = (now - timedelta(days=days)).isoformat()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT c.name, COUNT(s.id) AS hits FROM categories c "
+            "JOIN category_sightings s ON s.name = c.name "
+            "WHERE c.status = 'proposed' AND c.alerted_at IS NULL AND s.seen_at >= ? "
+            "GROUP BY c.name HAVING hits >= ? ORDER BY hits DESC",
+            (cutoff, threshold),
+        ).fetchall()
+    return [(name, hits) for name, hits in rows]
+
+
+def category_examples(name: str, limit: int = 3) -> list[tuple[str, str]]:
+    """[(title, link)] of articles that triggered this proposal. The admin
+    is being asked to write a description that goes into the classifier
+    prompt for every article afterwards, so they need to see what the label
+    was actually reaching for -- a bare name is not enough to decide on."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT article_title, article_link FROM category_sightings "
+            "WHERE name = ? AND article_title IS NOT NULL "
+            # id breaks the tie: sightings from one ingestion cycle all
+            # share a timestamp, so seen_at alone leaves which examples the
+            # admin sees unspecified and irreproducible between runs.
+            "ORDER BY seen_at DESC, id DESC LIMIT ?",
+            (name, limit),
+        ).fetchall()
+    return [(title, link or "") for title, link in rows]
+
+
+def mark_category_alerted(name: str, now: datetime, description: str | None = None) -> None:
+    """Records that the admin was asked, and stores the drafted description
+    alongside. The draft lives in the row rather than being carried through
+    Telegram's callback_data (64 bytes, far too small) or re-derived on the
+    button press (which would need a model in the admin bot). The admin sees
+    the exact text in the message and it is the exact text that ships."""
+    with _connect() as conn:
+        if description is None:
+            conn.execute("UPDATE categories SET alerted_at = ? WHERE name = ?",
+                         (now.isoformat(), name))
+        else:
+            conn.execute("UPDATE categories SET alerted_at = ?, description = ? WHERE name = ?",
+                         (now.isoformat(), description, name))
+
+
+def activate_category(name: str, by: str, now: datetime,
+                      description: str | None = None) -> bool:
+    """Promotes a proposal to a real category. Returns False if it wasn't
+    'proposed' any more -- two admins, or a double-tapped button.
+
+    Also clears interest_categories. Those rows map a subscriber's interest
+    text to category names, and get_cached_interest_categories treats any
+    existing row as a hit, so a newly active category is invisible to every
+    already-mapped interest until they are recomputed. The next push cycle
+    re-resolves them.
+
+    Deleting rather than re-mapping in place is the pre-A5 shape: A5 makes
+    these mappings persisted derived state recomputed at write time, at
+    which point this becomes an explicit migration instead of an
+    invalidation. The distinction matters for where failures surface, not
+    for what ends up in the table."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE categories SET status = 'active', "
+            "description = COALESCE(?, description), decided_at = ?, "
+            "decided_by = ?, sort_order = (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM categories) "
+            "WHERE name = ? AND status = 'proposed'",
+            (description, now.isoformat(), by, name),
+        )
+        if not cursor.rowcount:
+            return False
+        conn.execute("DELETE FROM interest_categories")
+    return True
+
+
+def reject_category(name: str, by: str, now: datetime) -> bool:
+    """Sightings keep accumulating afterwards -- they cost a row each and
+    answer "was rejecting this right?" later -- but count_recent_sightings
+    only counts 'proposed', so it never alerts again."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE categories SET status = 'rejected', decided_at = ?, decided_by = ? "
+            "WHERE name = ? AND status = 'proposed'",
+            (now.isoformat(), by, name),
+        )
+        return bool(cursor.rowcount)
+
+
+def merge_category(name: str, into: str, by: str, now: datetime) -> bool:
+    """Points `name` at `into` and rewrites any interest that referenced it.
+
+    Interests are REWRITTEN, not invalidated: the new mapping is known, so
+    there is nothing to re-derive and no reason to pay for a model call.
+    Article files are left alone -- resolve_category_name follows the
+    tombstone on read, which beats rewriting the whole cache for a rename.
+
+    Refuses to merge into anything that isn't active, which would otherwise
+    create a chain or a cycle whose only symptom is articles quietly
+    resolving to nothing."""
+    with _connect() as conn:
+        target = conn.execute(
+            "SELECT status FROM categories WHERE name = ?", (into,)
+        ).fetchone()
+        if not target or target[0] != "active":
+            return False
+        cursor = conn.execute(
+            "UPDATE categories SET status = 'merged', merged_into = ?, decided_at = ?, "
+            "decided_by = ? WHERE name = ? AND status IN ('proposed', 'active')",
+            (into, now.isoformat(), by, name),
+        )
+        if not cursor.rowcount:
+            return False
+        for interest, raw in conn.execute(
+            "SELECT interest, categories FROM interest_categories"
+        ).fetchall():
+            cats = json.loads(raw)
+            if name not in cats:
+                continue
+            rewritten = list(dict.fromkeys(into if c == name else c for c in cats))
+            conn.execute("UPDATE interest_categories SET categories = ? WHERE interest = ?",
+                         (json.dumps(rewritten), interest))
+    return True
 
 
 def try_consume_api_budget(source: str, daily_cap: int, today: str) -> bool:
