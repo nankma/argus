@@ -38,11 +38,25 @@ import news_classify
 import news_sources
 import users_db
 
-# Default provider:model string for init_chat_model -- deepseek-chat is
-# required (see CLAUDE.md's MODEL landmine: deepseek-reasoner doesn't
-# support tool calling, which search_news/save_note/the router/output
-# check all depend on). See docs/plans/model-portability-plan.md Level 1/2.
-DEFAULT_MODEL = "deepseek:deepseek-chat"
+# Default provider:model string for init_chat_model. See
+# docs/plans/model-portability-plan.md Level 1/2.
+#
+# Pinned to a real model name rather than the `deepseek-chat` alias this
+# used to carry. DeepSeek's catalogue moved to v4 and the API no longer
+# lists that alias at all -- an unknown model name is answered with "the
+# supported API model names are deepseek-v4-pro, deepseek-v4-flash, and
+# deepseek-v4-flash-vision-exp". The alias still resolves, and as of
+# 2026-08-21 it resolves to v4-flash (checked by reading the `model` field
+# the API returns, not assumed), so this change is behaviour-neutral today.
+#
+# It removes two silent failure modes. DeepSeek could repoint the alias at
+# v4-pro, which is roughly 3x the price and would show up only on the
+# invoice; or drop it, which takes the whole bot down at once.
+#
+# Flash rather than pro deliberately: this workload is routing, tagging and
+# short-report writing, and pro's premium is for reasoning depth this
+# doesn't need.
+DEFAULT_MODEL = "deepseek:deepseek-v4-flash"
 NOTES_FILE = "notes.jsonl"
 # Configurable because "localhost" only works for local dev — once Phoenix
 # runs as its own container/Kubernetes service, this needs to point there
