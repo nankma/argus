@@ -145,6 +145,29 @@ def test_select_candidate_articles_unrestricted_topic_matches_any_category():
     assert len(result) == 1
 
 
+def test_select_candidate_articles_explicit_empty_mapping_is_also_unrestricted():
+    """The "unrestricted" branch (test above) is normally exercised by a
+    topic simply ABSENT from topic_categories (a classifier miss). This
+    pins the other way an interest can land there: a topic present in the
+    dict but explicitly mapped to [] -- e.g. an interest that once mapped
+    to a category later retired and never re-mapped (see
+    users_db._migrate_split_policy's docstring and
+    test_users_db.test_policy_split_does_not_touch_pre_existing_interest_category_mappings
+    -- no code path currently produces this for Policy specifically, but
+    nothing would stop it for a category retired in the future). Both cases
+    hit the same `topic_cats and not (...)` branch and are therefore
+    indistinguishable to this function -- which is exactly the gap: nothing
+    downstream can tell "never classified" apart from "used to be
+    restricted, now silently isn't"."""
+    article = _article("https://example.com/a", categories=["Government"])
+
+    result = news_push.select_candidate_articles(
+        [article], ["legacy policy watcher"], {"legacy policy watcher": []}, None, set()
+    )
+
+    assert len(result) == 1
+
+
 def test_select_candidate_articles_excludes_off_category_article():
     # The Nikkei Asia incident this was built to fix: an uncategorized
     # (or off-category) article shouldn't reach a subscriber whose topic

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -690,3 +691,187 @@ def test_split_is_recorded_as_a_migration_not_an_admin_decision(isolated_subscri
             "SELECT status, decided_by FROM categories WHERE name = 'Policy'"
         ).fetchone()
     assert row == ("retired", "migration")
+
+
+def _undo_policy_split(conn) -> None:
+    """Rolls a database that already went through init_db() (and therefore
+    already ran _migrate_split_policy once, via isolated_subscribers_db) back
+    to a pre-migration state: Policy active again, the four new rows gone,
+    the migration marker gone. Lets a test simulate "a database that looked
+    like production before this migration ever ran" without needing a
+    checkout of main's users_db.py -- the table SCHEMA is unchanged by this
+    branch, only SEED_CATEGORIES' data and the new _migrate_split_policy
+    call, so undoing just those two effects reconstructs the pre-migration
+    state exactly."""
+    conn.execute(
+        "UPDATE categories SET status = 'active', decided_at = NULL, decided_by = NULL "
+        "WHERE name = 'Policy'"
+    )
+    conn.execute(
+        "DELETE FROM categories WHERE name IN ('Regulation', 'Government', 'Legal', 'Antitrust')"
+    )
+    conn.execute("DELETE FROM health_state WHERE key = 'policy_split_migrated'")
+
+
+def test_migration_is_safe_on_a_realistic_pre_existing_database(isolated_subscribers_db):
+    """Builds a database shaped like production before this migration ever
+    ran -- 45 subscribers spanning approved/pending/denied, 13
+    interest_categories mappings (none pointing at Policy, matching what was
+    confirmed against the live DB), 5 proposed categories, and an unrelated
+    health_state row -- then runs init_db() (which retires Policy and adds
+    the four new categories) and asserts every pre-existing table/row is
+    byte-identical afterwards, except Policy's own status/decided_at/
+    decided_by. A migration that mutates existing rows (unlike a purely
+    additive one) is exactly the kind of change a narrow "does Policy get
+    retired" test can pass while still silently corrupting something else."""
+    with users_db._connect() as conn:
+        _undo_policy_split(conn)
+
+        now = datetime.now(timezone.utc).isoformat()
+        for i in range(1, 46):
+            status = "approved" if i <= 40 else ("pending" if i <= 43 else "denied")
+            conn.execute(
+                "INSERT INTO subscribers (chat_id, username, first_name, status, requested_at, "
+                "decided_at, interests, push_enabled, push_interval_hours, last_push_at, "
+                "pushed_links, language) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    2000 + i, f"user{i}", f"First{i}", status, now,
+                    now if status != "pending" else None,
+                    json.dumps(["AI", "Finance"] if i % 2 == 0 else ["Policy watch"]),
+                    1 if i % 3 == 0 else 0, 24, None, "{}", "en",
+                ),
+            )
+
+        interest_rows = [
+            ("AI", ["AI"]), ("Finance", ["Finance", "Stock"]),
+            ("robotics stuff", ["Robotics"]), ("crypto news", ["Crypto"]),
+            ("chip shortage", ["Hardware"]), ("cybersecurity", ["Security"]),
+            ("startup funding", ["Startups"]), ("cloud computing", ["IT"]),
+            ("gadgets", ["Consumer"]), ("academic ai research", ["Research"]),
+            ("dev tools", ["Software"]), ("earnings calls", ["Finance"]),
+            ("some obscure ticker", []),
+        ]
+        assert len(interest_rows) == 13  # matches the live DB's row count
+        for interest, cats in interest_rows:
+            conn.execute(
+                "INSERT INTO interest_categories (interest, categories) VALUES (?, ?)",
+                (interest, json.dumps(cats)),
+            )
+
+        conn.execute(
+            "INSERT INTO health_state (key, value) VALUES ('some_other_marker', ?)",
+            (json.dumps(["unrelated"]),),
+        )
+
+        proposed = ["Robotaxi", "Quantum", "Espionage", "Wearables", "Chips Act"]
+        for i, name in enumerate(proposed):
+            conn.execute(
+                "INSERT INTO categories (name, description, status, created_at, created_by, sort_order) "
+                "VALUES (?, NULL, 'proposed', ?, 'model', ?)",
+                (name, now, 100 + i),
+            )
+
+    def snapshot():
+        with users_db._connect() as conn:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()]
+            return {t: set(conn.execute(f"SELECT * FROM {t}").fetchall()) for t in tables}
+
+    before = snapshot()
+
+    users_db.init_db()
+
+    after = snapshot()
+
+    # Every table except `categories` and `health_state` must be untouched.
+    for table in before:
+        if table in ("categories", "health_state"):
+            continue
+        assert after[table] == before[table], f"{table} changed by the migration"
+
+    # health_state: the pre-existing unrelated row survives untouched, and
+    # only the new migration marker is added.
+    with users_db._connect() as conn:
+        marker = conn.execute(
+            "SELECT value FROM health_state WHERE key = 'some_other_marker'"
+        ).fetchone()
+    assert marker is not None and json.loads(marker[0]) == ["unrelated"]
+
+    # categories: only Policy's status/decided_at/decided_by changed, and
+    # exactly the four new rows were added -- nothing else in the table
+    # (the 5 proposed rows, the system "Other" row, the other 12 seed rows)
+    # moved at all.
+    before_cats = {row[0]: row for row in before["categories"]}
+    after_cats = {row[0]: row for row in after["categories"]}
+    changed_names = {
+        name for name in before_cats
+        if name in after_cats and before_cats[name] != after_cats[name]
+    }
+    assert changed_names == {"Policy"}
+    assert set(after_cats) - set(before_cats) == {"Regulation", "Government", "Legal", "Antitrust"}
+    assert not set(before_cats) - set(after_cats)  # nothing disappeared
+
+    for name in ["Robotaxi", "Quantum", "Espionage", "Wearables", "Chips Act"]:
+        assert after_cats[name][2] == "proposed"  # status column untouched
+
+
+def test_migration_is_idempotent_on_a_realistic_database(isolated_subscribers_db):
+    """Running init_db() a second time after the migration already applied
+    must be a true no-op -- not just "Policy stays retired" (already covered
+    by test_split_does_not_re_retire_a_deliberately_reactivated_policy) but
+    literally zero rows anywhere change."""
+    with users_db._connect() as conn:
+        _undo_policy_split(conn)
+
+    users_db.init_db()  # first application of the migration
+
+    def snapshot():
+        with users_db._connect() as conn:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()]
+            return {t: set(conn.execute(f"SELECT * FROM {t}").fetchall()) for t in tables}
+
+    once = snapshot()
+    users_db.init_db()
+    users_db.init_db()
+    twice = snapshot()
+
+    assert once == twice
+
+
+def test_policy_split_does_not_touch_pre_existing_interest_category_mappings(
+    isolated_subscribers_db,
+):
+    """The plan doc's general "Retire" lifecycle operation
+    (docs/plans/taxonomy-and-admin-plan.md, A5a) calls for re-mapping any
+    interest that pointed at the retired category, so it doesn't end up
+    matching every article (see news_push.select_candidate_articles: an
+    interest mapped to an empty category list is unrestricted). That
+    re-mapping machinery is explicitly NOT built yet (A4 onward, per the
+    doc's own Status line) -- this migration's docstring says it verified
+    by hand that nothing live mapped to Policy and skipped the step on that
+    basis, not because the step was performed.
+
+    This pins that skip as real, observable behaviour: an interest that
+    already mapped to ["Policy"] before the migration keeps that exact
+    mapping afterwards, unre-mapped and unstripped. This is not itself a
+    bug for THIS migration (verified against production data), but it is
+    the gap that would matter for a future retirement that DOES have live
+    mappings -- there is nothing here, or anywhere else in this codebase,
+    that would re-map or even flag that case."""
+    with users_db._connect() as conn:
+        _undo_policy_split(conn)
+        conn.execute(
+            "INSERT INTO interest_categories (interest, categories) VALUES (?, ?)",
+            ("legacy policy watcher", json.dumps(["Policy"])),
+        )
+
+    users_db.init_db()
+
+    # Unchanged -- not re-mapped to the four new categories, not stripped,
+    # not emptied. Still literally ["Policy"].
+    assert users_db.get_cached_interest_categories(["legacy policy watcher"]) == {
+        "legacy policy watcher": ["Policy"]
+    }
