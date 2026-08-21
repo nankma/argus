@@ -386,3 +386,158 @@ def test_new_sources_are_not_restricted():
     inside the product's stated technology-industry scope."""
     for name in ("ars_technica", "techcrunch", "cnbc"):
         assert name not in news_sources.RESTRICTED_SOURCES
+
+
+def test_traced_fetch_records_the_section_rather_than_a_placeholder_query():
+    """A section pull ignores the query, so recording it would stamp the
+    same placeholder on every ingestion span and hide the one thing worth
+    knowing when diagnosing one."""
+    captured = {}
+
+    class FakeSpan:
+        def set_attribute(self, k, v):
+            captured[k] = v
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    import contextlib
+    from unittest.mock import patch
+
+    @contextlib.contextmanager
+    def fake_span(name):
+        yield FakeSpan()
+
+    with patch.object(news_sources._tracer, "start_as_current_span", fake_span):
+        news_sources.traced_fetch("arxiv", lambda q, n: [], "technology", 5,
+                                  section="quant-ph")
+    assert captured.get("section") == "quant-ph"
+    assert "query" not in captured
+
+    captured.clear()
+    with patch.object(news_sources._tracer, "start_as_current_span", fake_span):
+        news_sources.traced_fetch("arxiv", lambda q, n: [], "user question", 5)
+    assert captured.get("query") == "user question"
+    assert "section" not in captured
+
+
+# --- section mode (scheduled ingestion) -----------------------------------
+#
+# The section branch of each fetcher is new code on a live path. The query
+# branch stays for agent.search_news, which passes a real user question.
+
+
+def test_hackernews_section_uses_the_ranking_endpoint(requests_mock):
+    """front_page is a RANKING. search_by_date would re-sort it into
+    chronological order and throw away the only thing it was for."""
+    m = requests_mock.get("https://hn.algolia.com/api/v1/search", json=HACKERNEWS_RESPONSE)
+
+    news_sources.fetch_hackernews("IGNORED", 5, section="front_page")
+
+    assert m.last_request.qs["tags"] == ["front_page"]
+    assert "query" not in m.last_request.qs, "the query is not sent in section mode"
+
+
+def test_hackernews_section_still_honours_since(requests_mock):
+    m = requests_mock.get("https://hn.algolia.com/api/v1/search", json=HACKERNEWS_RESPONSE)
+    since = datetime(2026, 8, 20, tzinfo=timezone.utc)
+
+    news_sources.fetch_hackernews("IGNORED", 5, since=since, section="front_page")
+
+    assert m.last_request.qs["numericfilters"] == [f"created_at_i>{int(since.timestamp())}"]
+
+
+def test_hackernews_query_mode_is_unchanged(requests_mock):
+    """agent.search_news must keep hitting the chronological search with a
+    real query -- its failure mode is silent, since it would still return
+    articles, just the wrong ones."""
+    m = requests_mock.get("https://hn.algolia.com/api/v1/search_by_date", json=HACKERNEWS_RESPONSE)
+
+    news_sources.fetch_hackernews("nvidia earnings", 5)
+
+    assert m.last_request.qs["query"] == ["nvidia earnings"]
+    assert m.last_request.qs["tags"] == ["story"]
+
+
+def test_arxiv_section_becomes_a_subject_class(requests_mock):
+    m = requests_mock.get("http://export.arxiv.org/api/query", text=ARXIV_RESPONSE)
+
+    news_sources.fetch_arxiv("IGNORED", 5, section="quant-ph")
+
+    assert m.last_request.qs["search_query"] == ["cat:quant-ph"]
+
+
+def test_arxiv_section_and_since_compose(requests_mock):
+    """arxiv is uncapped AND server-side-since, so every production pull
+    takes both."""
+    m = requests_mock.get("http://export.arxiv.org/api/query", text=ARXIV_RESPONSE)
+    since = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
+
+    news_sources.fetch_arxiv("IGNORED", 5, since=since, section="physics.optics")
+
+    q = m.last_request.qs["search_query"][0]
+    assert q.startswith("cat:physics.optics"), "the section, not the ignored query"
+    assert "submitteddate:[202608200900" in q
+
+
+def test_arxiv_query_mode_is_unchanged(requests_mock):
+    m = requests_mock.get("http://export.arxiv.org/api/query", text=ARXIV_RESPONSE)
+
+    news_sources.fetch_arxiv("photonic computing", 5)
+
+    assert m.last_request.qs["search_query"] == ["photonic computing"]
+
+
+def test_newsapi_section_uses_top_headlines(requests_mock, monkeypatch):
+    monkeypatch.setenv("NEWSAPI_API_KEY", "k")
+    m = requests_mock.get("https://newsapi.org/v2/top-headlines", json=NEWSAPI_RESPONSE)
+
+    news_sources.fetch_newsapi("IGNORED", 5, section="science")
+
+    assert m.last_request.qs["category"] == ["science"]
+    assert m.last_request.qs["language"] == ["en"]
+    assert "q" not in m.last_request.qs
+
+
+def test_newsapi_query_mode_keeps_the_language_pin(requests_mock, monkeypatch):
+    """The pin applies to search too -- an unconstrained query here returned
+    65 of 65 Chinese articles."""
+    monkeypatch.setenv("NEWSAPI_API_KEY", "k")
+    m = requests_mock.get("https://newsapi.org/v2/everything", json=NEWSAPI_RESPONSE)
+
+    news_sources.fetch_newsapi("AOI", 5)
+
+    assert m.last_request.qs["q"] == ["aoi"]
+    assert m.last_request.qs["language"] == ["en"]
+
+
+def test_gnews_section_uses_top_headlines(requests_mock, monkeypatch):
+    monkeypatch.setenv("GNEWS_API_KEY", "k")
+    m = requests_mock.get("https://gnews.io/api/v4/top-headlines", json=GNEWS_RESPONSE)
+
+    news_sources.fetch_gnews("IGNORED", 5, section="technology")
+
+    assert m.last_request.qs["topic"] == ["technology"]
+    assert m.last_request.qs["lang"] == ["en"]
+    assert "q" not in m.last_request.qs
+
+
+def test_gnews_section_and_since_compose(requests_mock, monkeypatch):
+    monkeypatch.setenv("GNEWS_API_KEY", "k")
+    m = requests_mock.get("https://gnews.io/api/v4/top-headlines", json=GNEWS_RESPONSE)
+    since = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
+
+    news_sources.fetch_gnews("IGNORED", 5, since=since, section="business")
+
+    assert m.last_request.qs["topic"] == ["business"]
+    assert m.last_request.qs["from"] == ["2026-08-20t09:00:00z"]
+
+
+def test_gnews_query_mode_is_unchanged(requests_mock, monkeypatch):
+    monkeypatch.setenv("GNEWS_API_KEY", "k")
+    m = requests_mock.get("https://gnews.io/api/v4/search", json=GNEWS_RESPONSE)
+
+    news_sources.fetch_gnews("nvidia earnings", 5)
+
+    assert m.last_request.qs["q"] == ["nvidia earnings"]

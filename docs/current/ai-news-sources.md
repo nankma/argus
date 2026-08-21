@@ -271,6 +271,64 @@ rather than after a month of accumulation, is more sources. Each of these
 returns 20–30 items per pull against a 200 cap, so the cap is not the
 binding constraint here; the number of feeds is.
 
+
+## Scheduled ingestion pulls by SECTION, not by query (2026-08-21)
+
+This supersedes the query-based descriptions elsewhere in this document
+for the four query-capable sources. **`agent.py`'s `search_news` is
+unchanged** — it passes a real user question, which is a legitimate query.
+Only `news_ingest.py`'s scheduled pulls changed.
+
+| Source | Section endpoint | Sections |
+|---|---|---|
+| **NewsAPI** | `/v2/top-headlines?category=` | technology, business, science, health |
+| **GNews** | `/top-headlines?topic=` | technology, business, science, world |
+| **arXiv** | `search_query=cat:` | cs.AI, cs.LG, cs.RO, cs.CR, quant-ph, physics.optics |
+| **Hacker News** | `tags=front_page` on `/search` | front_page |
+
+Note the Hacker News endpoint: **`/search`, not `/search_by_date`**, in
+section mode only. `front_page` is a ranking, and `search_by_date` would
+re-sort it chronologically and discard the only thing it was for. Query
+mode still uses `/search_by_date`, as documented above.
+
+**NewsAPI now pins `language=en`**, which GNews always had. Without it
+this multilingual aggregator returned whatever matched globally: all 65
+cached articles from it were Chinese, against 1 from every other source
+combined, and "Bitcoin" returned Spanish-language finance.
+
+### Why this changed
+
+Scheduled pulls used to query these sources with subscriber interest text,
+one interest per pull. That makes the corpus a mirror of what subscribers
+already asked for: nothing can be discovered that nobody had already
+named, and the bias compounds every cycle. It was measurably dirty too —
+"AOI" returned Taiwanese optical-inspection news, Japanese anime (AOI is
+also a name) and half a page of Chinese.
+
+arXiv's subject classes are the clearest win: free-text search found 36
+quantum and 6 optics articles across the whole corpus while subscribers
+actively follow both topics. Searching a properly-classified archive by
+free text was throwing away its index.
+
+### Consequences worth knowing
+
+**arXiv is uncapped, so all six subject classes are pulled every cycle** —
+six calls per 4-hour tick rather than one, a deliberate breadth increase.
+Its own multi-day indexing lag prunes most of that before classification.
+
+**The since-cutoff is tracked per `(source, section)`**, not per source.
+Sections advance at very different rates — cs.AI produces dozens of papers
+a day, physics.optics a handful — and one shared cutoff let the fast
+section drag it past the slow one's genuinely new articles, which were then
+never offered again. Same class of bug as `last_pulled_at` vs
+`last_article_dt`, one level down. Keys are composite (`arxiv:cs.AI`);
+sectionless sources keep their plain key, so no migration was needed.
+
+**Perigon has no section vocabulary** — its API has no top-headlines
+equivalent — so it falls back to a single fixed query and lost the
+rotation it used to have. Accepted rather than overlooked: it has been out
+of quota since 2026-08-15 and is excluded from subscriber digests anyway.
+
 ## User-Agent
 
 Every fetch sends `Mozilla/5.0 (compatible; ArgusNewsBot/1.0; +https://github.com/nankma/argus)`

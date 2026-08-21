@@ -346,3 +346,87 @@ def draft_category_description(model, name: str, examples: list[str],
     if result is None or not result.description.strip():
         return None
     return result.description.strip()
+
+
+def _interest_request(text: str, alongside: list[str] | None) -> str:
+    if not alongside:
+        return f"Interest: {text}"
+    return (
+        f"Interest: {text}\n\n"
+        f"The same subscriber also follows: {', '.join(alongside)}.\n"
+        "Use this to disambiguate an ambiguous abbreviation or ticker -- "
+        "pick the reading that fits what they already follow."
+    )
+
+
+class NormalizedInterest(BaseModel):
+    # Reasoning first so the model commits after working, not before --
+    # the field-order lesson from guardrails.OutputCheck.
+    reasoning: str
+    english: str
+
+
+def normalize_interest(model, text: str, alongside: list[str] | None = None) -> str | None:
+    """Turns a subscriber's stated interest into a short ENGLISH label.
+
+    Interest text is not just displayed -- it is used as a live search
+    query against every query-capable source, matched lexically by BM25,
+    and classified into categories. All three of those are English-facing,
+    so a non-English interest degrades quietly rather than failing:
+
+      - `fetch_gnews` pins `lang=en` and `fetch_newsapi` now does too, so
+        a Chinese query returns nothing at all. Measured: 0 articles for
+        機器人科技 and 光通訊, 10 for "robotics".
+      - BM25 scored **0%** recall for 光通訊 against this corpus, because
+        no English article shares a token with it. Not weak -- structurally
+        incapable. Embeddings managed 57%, which is what hid the problem.
+      - A bare ticker is worse still: "AAOI" retrieves 0/30 relevant
+        articles by BOTH methods, since the corpus contains no such token
+        and four letters carry no semantics. "Applied Optoelectronics"
+        gets 6/30 by embedding. So a ticker is expanded rather than
+        preserved alone -- the ticker is the lexical handle BM25 needs when
+        an article does mention it, the company name is the semantic handle
+        the embedding needs, and dropping either loses one retrieval path.
+      - The corpus is 97.6% English, so any non-English text is an outlier
+        by script alone, which distorts both clustering and the
+        farthest-from-everything novelty pick.
+
+    Stores English rather than keeping the original because every consumer
+    is English-facing. The subscriber still gets confirmations in their own
+    language (bot.py translates Route B replies), and seeing the English
+    label in /interests tells them how the system actually understood
+    them -- which is worth knowing when it got it wrong.
+
+    `alongside` is the subscriber's OTHER interests, used to disambiguate.
+    Expanding a ticker without context picks the wrong company and is then
+    worse than not expanding at all: "AOI" alone came back as "Africa Oil
+    Corp", which would drag retrieval toward oil news, when the subscriber
+    who stored it also tracks AAOI, semiconductors and optical
+    communications and plainly meant automated optical inspection. The
+    disambiguating information is already in the database and costs
+    nothing to include.
+
+    Returns None on failure; the caller keeps the original text rather than
+    dropping the interest, since a stored interest that searches badly
+    beats an interest that silently wasn't saved."""
+    if not text.strip():
+        return None
+    try:
+        structured = model.with_structured_output(NormalizedInterest)
+        result = structured.invoke([
+            {"role": "system", "content":
+                "You normalize a news-subscription interest into a short "
+                "English label of 2-4 words. Translate if it isn't English. "
+                "For a stock ticker, keep the ticker AND add the company "
+                "name: \"AAOI\" becomes \"AAOI Applied Optoelectronics\". "
+                "Prefer the term the industry press would actually use in a "
+                "headline over a literal translation. No punctuation, no "
+                "explanation."},
+            {"role": "user", "content": _interest_request(text, alongside)},
+        ])
+    except Exception as exc:
+        print(f"[news_classify] could not normalize interest {text!r}: {exc!r}")
+        return None
+    if result is None or not result.english.strip():
+        return None
+    return result.english.strip()
