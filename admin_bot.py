@@ -158,8 +158,17 @@ async def handle_category_decision(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     # Buttons removed so a decision can't be re-tapped; the operations are
     # guarded server-side too, but a live button after a decision is a lie.
-    await query.edit_message_text(f"{query.message.text}\n\n{outcome}",
-                                  reply_markup=None)
+    # text_html, not text: the message was sent with parse_mode=HTML, and
+    # `text` hands it back with the markup stripped. Re-sending that as
+    # plain text would silently flatten the bold name and the italic
+    # description the admin just approved -- the record of what they
+    # agreed to would no longer look like what they were shown.
+    # quote=False so apostrophes stay literal. Telegram's HTML parser only
+    # understands &lt; &gt; &amp;, so escaping ' to &#x27; would show the
+    # entity to the admin rather than an apostrophe.
+    outcome = html.escape(outcome, quote=False)
+    await query.edit_message_text(f"{query.message.text_html}\n\n{outcome}",
+                                  parse_mode=ParseMode.HTML, reply_markup=None)
 
 
 def main():
