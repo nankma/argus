@@ -291,9 +291,15 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
             topic = news_classify.normalize_interest(
                 model, topic, alongside=before) or topic
         after = users_db.add_interest(chat_id, topic)
+        # `topic`, not classification.topic: the confirmation must name what
+        # was actually stored. Saying "Added 光通訊" while the database holds
+        # "Optical Communications" is the exact opposite of the reason for
+        # normalizing in the open -- the subscriber should be able to see
+        # how the system understood them, and this is the first place they
+        # would see it.
         if len(after) == len(before):
-            return f"You already have {classification.topic} in your interests, so nothing new was added."
-        return f"Added {classification.topic} to your interests."
+            return f"You already have {topic} in your interests, so nothing new was added."
+        return f"Added {topic} to your interests."
 
     if category == "remove_interest":
         before = users_db.get_interests(chat_id)

@@ -386,3 +386,37 @@ def test_new_sources_are_not_restricted():
     inside the product's stated technology-industry scope."""
     for name in ("ars_technica", "techcrunch", "cnbc"):
         assert name not in news_sources.RESTRICTED_SOURCES
+
+
+def test_traced_fetch_records_the_section_rather_than_a_placeholder_query():
+    """A section pull ignores the query, so recording it would stamp the
+    same placeholder on every ingestion span and hide the one thing worth
+    knowing when diagnosing one."""
+    captured = {}
+
+    class FakeSpan:
+        def set_attribute(self, k, v):
+            captured[k] = v
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    import contextlib
+    from unittest.mock import patch
+
+    @contextlib.contextmanager
+    def fake_span(name):
+        yield FakeSpan()
+
+    with patch.object(news_sources._tracer, "start_as_current_span", fake_span):
+        news_sources.traced_fetch("arxiv", lambda q, n: [], "technology", 5,
+                                  section="quant-ph")
+    assert captured.get("section") == "quant-ph"
+    assert "query" not in captured
+
+    captured.clear()
+    with patch.object(news_sources._tracer, "start_as_current_span", fake_span):
+        news_sources.traced_fetch("arxiv", lambda q, n: [], "user question", 5)
+    assert captured.get("query") == "user question"
+    assert "section" not in captured

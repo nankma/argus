@@ -355,3 +355,36 @@ def test_set_interest_without_a_model_stores_the_raw_topic(isolated_subscribers_
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="robotics"))
 
     assert users_db.get_interests(7) == ["robotics"]
+
+
+def test_set_interest_confirmation_names_what_was_actually_stored(
+    isolated_subscribers_db, monkeypatch
+):
+    """The confirmation said "Added 光通訊" while the database held
+    "Optical Communications" -- the opposite of the reason for normalizing
+    in the open, and the first place the subscriber would have seen how
+    they were understood. The four earlier tests all asserted on
+    get_interests and none on the reply, which is why it survived."""
+    monkeypatch.setattr(agent.news_classify, "normalize_interest",
+                        lambda model, text, alongside=None: "Optical Communications")
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"),
+                                    model="fake")
+
+    assert "Optical Communications" in reply
+    assert "光通訊" not in reply
+    assert users_db.get_interests(7) == ["Optical Communications"]
+
+
+def test_duplicate_interest_message_also_names_the_stored_form(
+    isolated_subscribers_db, monkeypatch
+):
+    monkeypatch.setattr(agent.news_classify, "normalize_interest",
+                        lambda model, text, alongside=None: "Optical Communications")
+    users_db.add_interest(7, "Optical Communications")
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"),
+                                    model="fake")
+
+    assert "Optical Communications" in reply
+    assert "already have" in reply

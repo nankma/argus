@@ -176,6 +176,14 @@ def _sections_for_source(source_key: str, now: datetime) -> list[str | None]:
 
     sections = news_sources.SOURCE_SECTIONS.get(source_key)
     if not sections:
+        # A query-capable source with no section vocabulary -- currently
+        # only Perigon, whose API has no top-headlines equivalent. It
+        # therefore loses the per-tick rotation it used to get and falls
+        # back to a single fixed query, which is a real reduction in
+        # coverage, accepted rather than overlooked: Perigon has been out
+        # of quota since 2026-08-15 (docs/plans/security-plan.md finding
+        # 21) and is excluded from subscriber digests anyway. Revisit if it
+        # is ever brought back.
         return [None]
 
     if source_key in _DAILY_CAPS:
@@ -301,7 +309,7 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
                 call = (functools.partial(fetch_call, section=section)
                         if section is not None else fetch_call)
                 articles = news_sources.traced_fetch(
-                    source_key, call, _DEFAULT_QUERY, max_results)
+                    source_key, call, _DEFAULT_QUERY, max_results, section=section)
             except Exception as exc:
                 print(f"[news_ingest] {source_key}: fetch(section={section!r}) "
                       f"failed with {exc!r}")

@@ -491,21 +491,14 @@ def fetch_perigon(query: str, max_results: int = 5) -> list[dict]:
     ]
 
 
-# Sections each query-capable source can be pulled by, INSTEAD of a search
-# query. Used only by news_ingest's scheduled pulls; agent.py's search_news
-# still passes a real user question, which is a legitimate query.
+# The section vocabulary each query-capable source accepts, as an
+# alternative to a search query. The values are dictated by each API and
+# live here alongside the fetch functions that pass them; the reasoning for
+# pulling by section at all is ingestion policy and lives with it, in
+# news_ingest._sections_for_source.
 #
-# Why this exists. Ingestion used to query these sources with subscriber
-# interest text, rotating through it one interest per pull. That makes the
-# corpus a mirror of what subscribers already asked for -- nothing can ever
-# be discovered that nobody had already named, and the sampling bias
-# compounds every cycle. It also turned out to be dirty in practice: "AOI"
-# returned Taiwanese optical-inspection news, Japanese anime (AOI is a
-# name), and half a page of Chinese-language results, while "Bitcoin"
-# returned Spanish-language finance.
-#
-# Pulling by section fixes both. A section is unambiguous, and what arrives
-# is a newsroom's front page rather than an answer to a question we asked.
+# Used only by news_ingest's scheduled pulls. agent.py's search_news still
+# passes a real user question, which is a legitimate query.
 SOURCE_SECTIONS: dict[str, list[str]] = {
     # https://newsapi.org/docs/endpoints/top-headlines -- fixed vocabulary
     "newsapi": ["technology", "business", "science", "health"],
@@ -605,7 +598,8 @@ def enabled_sources(include_restricted: bool = True) -> list[tuple[str, callable
 _tracer = trace.get_tracer(__name__)
 
 
-def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int) -> list[dict]:
+def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int,
+                 section: str | None = None) -> list[dict]:
     """Wraps one source's fetch call in an OpenTelemetry span, so it shows
     up in Phoenix's unified trace view alongside LLM calls -- this is the
     layer openinference-instrumentation-langchain's auto-instrumentation
@@ -630,7 +624,14 @@ def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int)
     visibility, it doesn't change control flow."""
     with _tracer.start_as_current_span("fetch_source") as span:
         span.set_attribute("source_key", source_key)
-        span.set_attribute("query", query)
+        # A section-based pull ignores the query, so recording it would put
+        # the same placeholder on every ingestion span and hide which
+        # section was actually fetched -- the one thing worth knowing when
+        # diagnosing one of these.
+        if section is not None:
+            span.set_attribute("section", section)
+        else:
+            span.set_attribute("query", query)
         span.set_attribute("restricted", source_key in RESTRICTED_SOURCES)
         try:
             articles = fetch(query, max_results)
