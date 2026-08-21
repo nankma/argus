@@ -18,9 +18,14 @@ scope, since different subscribers care about different topics.
 
 ## Landmines — small, real, worth knowing before you touch nearby code
 
-- **`MODEL` must stay `"deepseek-chat"`.** `"deepseek-reasoner"`
-  (DeepSeek-R1) doesn't support tool calling, which `search_news`/
-  `save_note` depend on. Don't switch without changing the tools setup.
+- **The model is pinned to `deepseek-v4-flash`, not an alias.** DeepSeek's
+  catalogue is now `deepseek-v4-pro` / `deepseek-v4-flash` /
+  `deepseek-v4-flash-vision-exp`; the old `deepseek-chat` alias still
+  resolves but is no longer listed, so it could be repointed at pro (≈3x
+  the price, visible only on the invoice) or dropped (bot down). Whatever
+  replaces it must support **tool calling** — `search_news`/`save_note`,
+  the router and the output check all depend on it, which is why the old
+  `deepseek-reasoner` was never an option.
 - **Replies are Telegram HTML, not Markdown.** `SYSTEM_PROMPT` asks for
   `<b>`/`<a href="">`; `bot.py` sends with `parse_mode=ParseMode.HTML`.
   See the `telegram-message-formatting` skill before touching either.
@@ -63,6 +68,30 @@ Write a change's own unit tests as part of the change, and run plain
 standards), then `qa-engineer` (matches its documented design, coverage,
 smoke suite, guardrail harness), then `deploy-engineer`. Each reports
 back pass or a diagnosis; don't advance past a failure.
+
+## Deploying: batch it, don't ship every merge
+
+A merged PR is **not** a reason to deploy. Deployments are expensive in a
+way that isn't obvious from the diff: each one is a build, an image
+transfer over SSH, a container swap, and a full verification pass, and it
+resets the bot's uptime. Merge freely; let changes accumulate on `main`
+and go out together.
+
+**Deploy when the change is worth the interruption:**
+
+- a live incident or a bug users are hitting now
+- a fix whose whole value is that it stops something ongoing — the
+  2026-08-21 test-account leak was billing real money every 6 hours, so it
+  shipped immediately
+- a change the next piece of work depends on being live
+
+**Don't deploy for**: a doc update, a comment, a refactor with no
+behaviour change, a new test, or an analysis tool under
+`docs/analysis/tools/` — those aren't even in the image. Check the
+Dockerfile's `COPY` line: a commit touching nothing in it changes nothing
+in the container, and rebuilding for it is pure cost.
+
+When in doubt, say what is waiting undeployed and let the user decide.
 
 ## Landing a change: PR only, `main` is protected
 
