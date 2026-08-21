@@ -17,10 +17,12 @@ Run:
     python admin_bot.py
 """
 
+import html
 import os
 from datetime import datetime, timezone
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import users_db
 
@@ -71,16 +73,29 @@ def build_category_review(name: str, hits: int, examples: list[tuple[str, str]],
     prompt verbatim for every article afterwards -- the admin is approving
     that exact wording, not just a name, and a vague one silently degrades
     classification from then on."""
+    # Everything interpolated here is escaped, because all three sources are
+    # untrusted for HTML: `name` and `description` are model output, and
+    # `title` is a real headline -- and ampersands in headlines ("AT&T",
+    # "R&D", "Health & Wellness") are common, not an edge case. Telegram
+    # rejects the whole send on an unescaped &/</>, and since nothing about
+    # a stored proposal changes between cycles, such a proposal would fail
+    # identically forever: never raised, and visible only in a log.
+    # html.escape handles the ordering trap the telegram-message-formatting
+    # skill warns about -- & must be escaped before < and >.
+    esc = html.escape
+    drafted = (f"<i>{esc(description)}</i>" if description
+               else "<i>(no description drafted -- reject and add by hand)</i>")
     lines = [
-        f"The classifier proposed <b>{name}</b> {hits} time(s) and it isn't in the taxonomy.",
+        f"The classifier proposed <b>{esc(name)}</b> {hits} time(s) "
+        f"and it isn't in the taxonomy.",
         "",
         "It would be described to the classifier as:",
-        f"<i>{description or '(no description drafted -- reject and add by hand)'}</i>",
+        drafted,
         "",
         "Examples it was used for:",
     ]
-    lines += [f"· {title}" for title, _ in examples] or ["· (none recorded)"]
-    lines += ["", f"Active categories: {', '.join(active)}"]
+    lines += [f"· {esc(title)}" for title, _ in examples] or ["· (none recorded)"]
+    lines += ["", f"Active categories: {esc(', '.join(active))}"]
 
     buttons = [[
         InlineKeyboardButton("Activate", callback_data=f"cat:activate:{name}"),

@@ -435,6 +435,24 @@ def resolve_category_name(name: str) -> str | None:
     return None
 
 
+# Telegram caps callback_data at 64 bytes and admin_bot packs
+# "cat:into:{name}:{target}" into it, so a proposed name must be short and
+# must not contain the delimiter. Proposed names are unsanitized model
+# output -- a label containing ':' would silently mis-parse on the button
+# press and the admin would be told "already decided" about a category
+# that was never touched.
+MAX_CATEGORY_NAME_LENGTH = 32
+
+
+def normalize_category_name(name: str) -> str:
+    """Makes a model-proposed label safe to round-trip through a Telegram
+    callback. Normalized at the point it is RECORDED rather than parsed
+    defensively later: one place to get right, and the table then only ever
+    holds names the rest of the system can handle."""
+    cleaned = " ".join(name.replace(":", " ").split())
+    return cleaned[:MAX_CATEGORY_NAME_LENGTH].strip()
+
+
 def record_category_sighting(name: str, seen_at: datetime, link: str | None = None,
                              title: str | None = None) -> None:
     """Logs that the classifier reached for `name`, which isn't active, and
@@ -444,6 +462,9 @@ def record_category_sighting(name: str, seen_at: datetime, link: str | None = No
     exists as rejected, retired or merged, that decision stands. A sighting
     is evidence, and evidence does not resurrect a decision someone
     already made."""
+    name = normalize_category_name(name)
+    if not name:
+        return
     ts = seen_at.isoformat()
     with _connect() as conn:
         conn.execute(

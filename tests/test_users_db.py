@@ -1057,3 +1057,36 @@ def test_examples_from_one_cycle_are_returned_deterministically(isolated_subscri
     first = users_db.category_examples("Media", limit=3)
     assert first == users_db.category_examples("Media", limit=3)
     assert [t for t, _ in first] == ["Story 4", "Story 3", "Story 2"], "most recent first"
+
+
+def test_a_proposed_name_containing_a_colon_is_normalized(isolated_subscribers_db):
+    """Telegram callback_data packs "cat:into:{name}:{target}" and the
+    handler splits on ':'. A model-proposed label containing one would
+    mis-parse on the button press -- the admin would be told "already
+    decided" about a category that was never touched. Normalized where it
+    is recorded, so the table only ever holds names the rest of the system
+    can round-trip."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+
+    users_db.record_category_sighting("Health: Policy", now, "https://e/1", "T")
+
+    assert users_db.count_recent_sightings(now) == {"Health Policy": 1}
+
+
+def test_an_overlong_proposed_name_is_truncated(isolated_subscribers_db):
+    """callback_data caps at 64 bytes and the merge keyboard packs both a
+    name and a target into it."""
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+
+    users_db.record_category_sighting("A" * 100, now)
+
+    proposed = list(users_db.count_recent_sightings(now))
+    assert len(proposed[0]) == users_db.MAX_CATEGORY_NAME_LENGTH
+
+
+def test_a_name_that_normalizes_to_nothing_is_dropped(isolated_subscribers_db):
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+
+    users_db.record_category_sighting("   :  ", now)
+
+    assert users_db.count_recent_sightings(now) == {}

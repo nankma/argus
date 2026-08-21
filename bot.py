@@ -623,8 +623,9 @@ async def review_category_proposals(model, admin_bot_token: str, admin_chat_id: 
     if not ready:
         return 0
 
-    active = [n for n, _ in users_db.get_active_categories()]
-    taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+    rows = users_db.get_active_categories()
+    active = [name for name, _ in rows]
+    taxonomy = news_classify.Taxonomy.from_rows(rows)
     bot = Bot(token=admin_bot_token)
     raised = 0
     for name, hits in ready:
