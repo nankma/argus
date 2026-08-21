@@ -63,14 +63,12 @@ def test_classify_articles_handles_missing_index_gracefully():
     assert result == {1: ["Crypto"]}
 
 
-def test_seed_taxonomy_is_the_thirteen_categories():
+def test_seed_taxonomy_covers_the_expected_names():
     """The taxonomy moved from a Literal in this module to the categories
-    table (docs/plans/taxonomy-and-admin-plan.md A1/A2). users_db.SEED_CATEGORIES
-    is what a fresh database starts with, and this pins that the move was
-    behaviour-neutral -- same names, same count."""
-    assert "Stock" in TAXONOMY.names
-    assert "Robotics" in TAXONOMY.names
-    assert len(TAXONOMY.names) == 13
+    table (docs/plans/taxonomy-and-admin-plan.md A1/A2). This pins the names
+    rather than a count -- the count is now expected to change as categories
+    are added, and a test that fails on "14 != 13" reports nothing useful."""
+    assert {"Stock", "Robotics", "Antitrust", "Government"} <= set(TAXONOMY.names)
 
 
 def test_taxonomy_prompt_fragment_lists_every_category_with_its_description():

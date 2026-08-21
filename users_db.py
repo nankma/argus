@@ -215,6 +215,7 @@ def init_db() -> None:
         # it -- see get_active_categories.
         _ensure_column(conn, "categories", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         _seed_categories(conn)
+        _migrate_split_policy(conn)
 
 
 # The taxonomy the classifier started with, moved here from
@@ -235,12 +236,37 @@ SEED_CATEGORIES: list[tuple[str, str]] = [
     ("Finance", "business/financial industry news, economics, corporate deals"),
     ("Stock", "stock price moves, market reactions specifically -- distinct "
               "from Finance, which covers business news generally"),
+    # Policy was retired 2026-08-20 and split into the four below -- see
+    # _migrate_split_policy. Kept in this list so seeding an old database
+    # still creates the row the migration then retires, and so the history
+    # is visible rather than looking like it never existed.
     ("Policy", "regulation, government, legal, antitrust"),
     ("Security", "cybersecurity, breaches, vulnerabilities"),
     ("Research", "academic papers, science"),
     ("Consumer", "consumer gadgets, reviews, product launches for individual users"),
     ("Robotics", "robotics specifically"),
     ("Crypto", "cryptocurrency/blockchain"),
+    # The four Policy was split into, added 2026-08-20. They are literally
+    # the four words Policy's own description listed, which is what made it
+    # a bundle rather than a category: a probe of 94 general-news articles
+    # found Policy absorbing 65% of all category assignments, including a
+    # food-safety outbreak and a CDC appointment. Splitting it lets a
+    # subscriber who cares about antitrust stop receiving cabinet
+    # nominations.
+    #
+    # Added by hand rather than waiting for the classifier to propose them,
+    # because it will not: the same probe produced ZERO proposed labels
+    # against 94 articles. A category only gets proposed when nothing
+    # plausible exists to absorb the article, and Policy was plausible
+    # enough to absorb anything governmental. A3 finds gaps with no
+    # neighbour; it cannot find a bundle that is too coarse.
+    ("Regulation", "rules and compliance imposed on an industry -- export "
+                   "controls, safety standards, licensing"),
+    ("Government", "government action and process -- agencies, appointments, "
+                   "budgets, procurement, public programmes"),
+    ("Legal", "courts, lawsuits, rulings, liability, intellectual property"),
+    ("Antitrust", "competition law specifically -- monopoly, market power, "
+                  "mergers under review, breakup remedies"),
 ]
 
 CATEGORY_SIGHTING_RETENTION_DAYS = 30
@@ -277,6 +303,52 @@ def _seed_categories(conn) -> None:
         "(name, description, status, created_at, created_by, sort_order) "
         "VALUES (?, ?, 'system', ?, 'seed', ?)",
         (UNCLASSIFIABLE, "the classifier found nothing applicable", now, len(SEED_CATEGORIES)),
+    )
+
+
+def _migrate_split_policy(conn) -> None:
+    """Retires `Policy` in favour of Regulation/Government/Legal/Antitrust,
+    once.
+
+    Policy's description was "regulation, government, legal, antitrust" --
+    it was a bundle of four things, and a probe of 94 general-news articles
+    measured it absorbing 65% of every category assignment made, including
+    a food-safety outbreak and a CDC appointment. A subscriber tracking
+    antitrust was necessarily also subscribed to cabinet nominations.
+
+    Retired rather than deleted, and rather than merged into one of the
+    four: articles cached with the `Policy` label keep it (retired
+    categories keep old labels), and there is no single survivor a merge
+    could point at -- that is what makes this a split rather than a merge.
+    The tombstone machinery in the plan doc handles merges; a split has no
+    equivalent, and this is why.
+
+    Guarded by a marker in health_state rather than by checking Policy's
+    status, so an admin who deliberately re-activates Policy later does not
+    have it silently retired again on the next restart. That resurrection
+    problem is the same one _seed_categories' INSERT OR IGNORE avoids in the
+    other direction.
+
+    Verified before writing this: no row in interest_categories mapped to
+    Policy, so no subscriber's filter is emptied by the retirement. An
+    interest left with no categories matches EVERY article -- see
+    news_push.select_candidate_articles -- so retiring a category that
+    subscribers do map to needs re-resolving those interests first, not
+    just stripping the name."""
+    done = conn.execute(
+        "SELECT value FROM health_state WHERE key = 'policy_split_migrated'"
+    ).fetchone()
+    if done:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE categories SET status = 'retired', decided_at = ?, decided_by = 'migration' "
+        "WHERE name = 'Policy' AND status = 'active'",
+        (now,),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO health_state (key, value) VALUES ('policy_split_migrated', ?)",
+        (now,),
     )
 
 
