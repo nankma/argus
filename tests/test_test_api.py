@@ -57,7 +57,7 @@ def _post(port, payload):
         return exc.code, json.loads(exc.read())
 
 
-def test_test_message_returns_process_message_result(running_server):
+def test_test_message_returns_process_message_result(running_server, isolated_subscribers_db):
     port = running_server.server_address[1]
     status, body = _post(port, {"chat_id": 1, "text": "hello"})
     assert status == 200

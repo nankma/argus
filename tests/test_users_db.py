@@ -1090,3 +1090,56 @@ def test_a_name_that_normalizes_to_nothing_is_dropped(isolated_subscribers_db):
     users_db.record_category_sighting("   :  ", now)
 
     assert users_db.count_recent_sightings(now) == {}
+
+
+# --- test accounts (2026-08-21) -------------------------------------------
+
+
+def test_push_skips_accounts_created_by_the_test_api(isolated_subscribers_db):
+    """54 abandoned smoke-test rows had accumulated against 5 real
+    subscribers, 19 still push-enabled, each drawing a billed and
+    undeliverable digest every 6 hours until the balance ran out and real
+    subscribers stopped receiving anything."""
+    users_db.request_access(111, "real", "Real Person")
+    users_db.decide(111, True)
+    users_db.set_push_enabled(111, True)
+    users_db.mark_test_account(222)
+    users_db.set_push_enabled(222, True)
+
+    due = [s["chat_id"] for s in users_db.list_push_enabled_subscribers()]
+
+    assert due == [111]
+
+
+def test_marking_works_before_the_row_exists(isolated_subscribers_db):
+    """test_api flags the id at the door, before the pipeline has had a
+    chance to create the subscriber."""
+    users_db.mark_test_account(333)
+
+    assert users_db.get_status(333) == users_db.APPROVED
+    with users_db._connect() as conn:
+        assert conn.execute(
+            "SELECT is_test FROM subscribers WHERE chat_id = 333").fetchone()[0] == 1
+
+
+def test_marking_an_existing_row_keeps_its_other_fields(isolated_subscribers_db):
+    users_db.request_access(444, "someone", "Someone")
+    users_db.decide(444, True)
+    users_db.add_interest(444, "robotics")
+
+    users_db.mark_test_account(444)
+
+    assert users_db.get_interests(444) == ["robotics"]
+
+
+def test_a_real_subscriber_is_never_excluded_by_a_null_is_test(isolated_subscribers_db):
+    """Rows predating the column have is_test NULL, not 0 -- the query has
+    to treat those as real or every existing subscriber stops receiving
+    pushes on deploy."""
+    users_db.request_access(555, "old", "Old Subscriber")
+    users_db.decide(555, True)
+    users_db.set_push_enabled(555, True)
+    with users_db._connect() as conn:
+        conn.execute("UPDATE subscribers SET is_test = NULL WHERE chat_id = 555")
+
+    assert [s["chat_id"] for s in users_db.list_push_enabled_subscribers()] == [555]

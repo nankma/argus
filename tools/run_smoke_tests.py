@@ -233,17 +233,35 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
     return results
 
 
+# Not actually outside the range of real Telegram ids -- accounts in the
+# tens of millions exist. It is safe because this bot has a handful of
+# subscribers and the odds of one holding this exact id are negligible,
+# which is a weaker claim than "impossible" and the honest one.
+SMOKE_TEST_CHAT_ID = 90000001
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bot-vm", required=True, help="e.g. ubuntu@<bot-vm-ip>")
     parser.add_argument("--bot-key", required=True, help="path to the bot VM's SSH key")
-    parser.add_argument("--chat-id", type=int, default=None, help="defaults to a fresh id derived from the clock")
+    parser.add_argument("--chat-id", type=int, default=None,
+                        help=f"defaults to the fixed smoke-test id {SMOKE_TEST_CHAT_ID}")
     parser.add_argument("--timeout", type=int, default=90, help="seconds per request (news_query calls are slow)")
     args = parser.parse_args()
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
 
-    chat_id = args.chat_id if args.chat_id is not None else 900000 + int(time.time()) % 100000
+    # A FIXED id, reused every run. The clock-derived one it replaced made
+    # a fresh subscriber on every invocation and never removed it -- see
+    # users_db.mark_test_account for what that cost.
+    #
+    # Reuse means each run starts from the previous run's state rather than
+    # a blank one, which is a feature: that is how a returning subscriber's
+    # row actually looks. Two concurrent runs would interleave writes to
+    # this row and could produce a confusing smoke-test failure; use
+    # --chat-id for that. It cannot cause billing harm either way, since
+    # is_test excludes the row from push whatever state it is left in.
+    chat_id = args.chat_id if args.chat_id is not None else SMOKE_TEST_CHAT_ID
 
     print(f"Starting SSH tunnel to {args.bot_vm}...")
     tunnel = start_tunnel(args.bot_vm, args.bot_key)
