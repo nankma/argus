@@ -1121,12 +1121,8 @@ def list_push_enabled_subscribers() -> list[dict]:
     news_push.py's scheduler needs to decide who's due and what to filter
     against -- avoids the scheduler doing its own row-by-row SQL.
 
-    Test accounts are excluded here rather than left to a cleanup step in
-    the smoke tests. A cleanup that is skipped when a test fails early is
-    exactly when the mess gets made, and the mess is expensive: 19
-    abandoned test accounts each drew a digest generation every 6 hours,
-    billed and undeliverable, until the DeepSeek balance ran out and real
-    subscribers stopped receiving anything. See mark_test_account."""
+    Excludes accounts flagged by test_api -- see mark_test_account for why
+    that is done structurally here rather than as cleanup in the tests."""
     with _connect() as conn:
         rows = conn.execute(
             """

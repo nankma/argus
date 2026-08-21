@@ -87,7 +87,7 @@ def test_missing_fields_returns_400(running_server):
     assert status == 400
 
 
-def test_server_binds_to_all_interfaces_inside_the_container(running_server, isolated_subscribers_db):
+def test_server_binds_to_all_interfaces_inside_the_container(running_server):
     """Deliberately 0.0.0.0, not 127.0.0.1 -- see test_api.py's module
     docstring. Real incident: binding to 127.0.0.1 here made the service
     unreachable even from the VM's own localhost, because Docker's
