@@ -1,79 +1,31 @@
 # Plan: DB-backed taxonomy, admin-in-the-loop growth, and an admin console
 
-Status: **A1, A2, A3, and A4 built (2026-08-20); A5 onward not started.**
+Status: **A1–A4 built and deployed (2026-08-20/21); A5 and B not started.**
 
-- **A1 — schema.** Done. `categories` and `category_sightings` exist in
-  `users_db.py`, seeded with the original 13 from `SEED_CATEGORIES`.
-- **A2 — classifier reads from the DB.** Done. `news_classify.Taxonomy` is
-  passed in; the prompt is generated from active rows. Verified
-  behaviour-neutral by diffing the generated prompt against the constant it
-  replaced, character for character.
-- **A3 — recording sightings.** Done. `_valid_categories` reports an
-  unknown label via an `on_unknown_label(label, article)` callback rather
-  than writing the DB itself, keeping `news_classify` free of a DB
-  dependency; `news_ingest.run_ingestion_cycle` wires that callback to
-  `users_db.record_category_sighting`, prunes sightings on the same tick
-  as the article cache, and prints a per-cycle summary of accumulated
-  proposals. Still no admin interaction — that's A4 — and the alert
-  threshold in A4 remains an unreplaced placeholder pending the real
-  distribution this step exists to collect.
-- **A4 — the admin prompt.** Done. `users_db.categories_ready_for_review`
-  finds `proposed` categories past `CATEGORY_PROPOSAL_THRESHOLD` (still 5,
-  still an unreplaced placeholder — production hasn't run long enough
-  since A3 to have a real distribution) that haven't been alerted yet;
-  `bot._ingest_job` calls it after each ingestion cycle via
-  `review_category_proposals`, which drafts a description with
-  `news_classify.draft_category_description` (model-drafted from the
-  example articles, shown to the admin rather than a blank field) and
-  sends the Activate/Merge into…/Reject message built by
-  `admin_bot.build_category_review`. `admin_bot.handle_category_decision`
-  joins the three buttons to `users_db.activate_category` /
-  `reject_category` / `merge_category`, all guarded by `WHERE status =
-  'proposed'` so a double-tap or two admins racing is a no-op, reported as
-  such, not silently repeated. A proposal is marked alerted only *after*
-  a successful send, so a Telegram failure retries next cycle instead of
-  losing the proposal; both untrusted-HTML interpolation (category name,
-  drafted description, and example article titles all escaped) and a
-  proposed name colliding with the `:`-delimited `callback_data` format
-  (normalized at write time in `record_category_sighting`) were caught in
-  review and fixed.
+- **A1 — schema.** Done. `categories` and `category_sightings` in
+  `users_db.py`.
+- **A2 — classifier reads from the DB.** Done. Verified behaviour-neutral
+  by diffing the generated prompt against the constant it replaced,
+  character for character — which caught an ordering regression no test
+  would have.
+- **A3 — recording sightings.** Done and exercised against real traffic:
+  the first cycle after three new sources went live produced five
+  proposals (Healthcare, Legal, Media, Open Source, Retail), and there are
+  nine as of 2026-08-21.
+- **A4 — the admin loop.** Done. Threshold check after each ingestion
+  cycle, a model-drafted description shown in the message, and
+  Activate / Merge into… / Reject buttons. **No alert has fired yet, which
+  is correct**: all nine proposals sit at one sighting each against a
+  threshold of five.
+- **A5 — interest mappings as derived state.** Not started. See the cost
+  note below for why this is not a cost optimisation.
+- **B — admin console, audit log.** Not started.
 
-  **Deliberate deviation from the state diagram in A1:** `merge_category`
-  accepts a `proposed` source, not only `active`. The diagram only draws
-  `merged` as reachable from `active`; forcing Activate-then-Merge for a
-  proposal the admin already recognizes as a duplicate would be a wasted
-  activation (including the interest-cache invalidation `activate_category`
-  does) immediately undone by the merge. The code is judged correct here;
-  the diagram is stale and should gain a `proposed → merged` edge, which
-  this note flags rather than leaving to drift unnoticed.
-
-  **Known small gap against this section's own text:** the open question
-  above ("having the model draft the description from the example
-  articles") is implemented; the description text in the A4 mockup
-  ("the admin edit rather than face a blank field") is not — the admin
-  sees the model's draft in the alert message and can only accept it
-  (Activate) or discard it (Reject, then `/category_add` by hand once B2
-  exists); there is no in-place edit affordance. Worth a decision on
-  whether that's the intended v1 scope or a follow-up.
-- **A5, B** — not started. `activate_category` does a blanket
-  `DELETE FROM interest_categories` rather than A5's eager batched re-map
-  or lazy `taxonomy_version` bump — an explicitly-acknowledged "pre-A5
-  shape" (see the function's docstring) that relies on the existing
-  missing-row-retries / cached-empty-is-a-real-answer distinction in
-  `news_push.resolve_interest_categories` to stay safe, not on anything
-  A5 adds.
-
-Two related pieces:
-
-- **A.** Move the category taxonomy out of code into the database, and add
-  a loop where the system notices it needs a new category and asks an
-  admin, rather than waiting for someone to notice and redeploy.
-- **B.** An admin console for the data behind the bot — categories,
-  subscribers, and what subscribers have been doing.
-
-They're sequenced: B has nothing to manage until A exists.
-
----
+**Taxonomy changes shipped alongside**: `Policy` was split into
+`Regulation`, `Government`, `Legal` and `Antitrust` and retired; `Other`
+was added as a `status='system'` marker; the source registry gained Ars
+Technica, TechCrunch (general) and CNBC. Live state: 16 active,
+9 proposed, 1 retired, 1 system.
 
 ## Why now
 
@@ -672,3 +624,64 @@ of one, and picking an alert threshold from one data point is guessing.
   `merged_into` tombstone avoids it, at the cost of a resolution step on
   every read. If merges turn out to be common, a batch rewrite may be
   simpler than carrying the indirection forever.
+
+---
+
+## What classification actually costs, and what A5 does not fix
+
+The goal here changed on 2026-08-21, from "classify without paying an API"
+to "minimise what classification costs". That is a smaller claim and it
+deserves a number, because the number changes which work is worth doing.
+
+Measured from the live cache's `fetched_at` timestamps and the real prompt:
+
+| | |
+|---|---|
+| articles classified | **991/day**, in ~7 ingestion cycles |
+| LLM calls | **20/day** (chunks of `MAX_ARTICLES_PER_CALL` = 50) |
+| input | ~51,000 tokens/day |
+| — of which the taxonomy prompt, re-sent per chunk | ~8,400 (**16%**) |
+| output | ~15,000 tokens/day |
+
+At deepseek-chat rates that is roughly **$0.03/day — under $1/month** for
+the entire article-classification line.
+
+### A5 optimises a term that is already zero
+
+`interest_categories` holds **13 rows**, is already persisted, and is
+recomputed only when something invalidates it. A 24-hour log check found
+**zero** interest-classification calls. So A5 — making those mappings
+derived state computed at write time — is worth doing, but **not for
+cost**. Its value is where failures surface (in front of the subscriber
+who just typed the interest, rather than hours later in a background job
+nobody is watching) and in making a taxonomy change an explicit migration
+rather than an invalidation. Those are correctness and observability
+wins, and the plan should not be read as claiming otherwise.
+
+### Where the cost actually is, in order
+
+1. **Prompt caching.** 16% of input tokens are the same taxonomy prompt
+   re-sent 20 times a day. DeepSeek's context caching bills a hit at
+   roughly a tenth of a miss. Largest single lever, and close to a
+   configuration change.
+2. **`LLM_MODEL_CLASSIFIER`.** The env var exists — added by
+   `docs/plans/model-portability-plan.md`'s per-stage routing — and is
+   **currently unused**, so classification runs on the same model as the
+   agent. Classification is a far simpler task than writing a digest;
+   pointing this at something cheaper cuts the whole line item rather
+   than trimming it.
+3. Everything else is noise at this volume.
+
+### The embedding work is not justified by cost
+
+`docs/analysis/cluster-measurements.md` measures an embedding-based
+classifier in some depth, and the original motivation was removing this
+API cost entirely. Against a sub-$1/month line item, that motivation does
+not survive contact with the number.
+
+It may still be worth building for **quality** — finer categories than a
+hand-written taxonomy, hot-news detection by cluster size, and the
+far-from-everything diversity pick, all of which were measured to work.
+But those are product arguments. Anyone reaching for that work to save
+money should read this section first and then do items 1 and 2 above
+instead.
