@@ -233,17 +233,34 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
     return results
 
 
+# Deliberately outside any plausible Telegram user id range, so it can
+# never collide with a real subscriber.
+SMOKE_TEST_CHAT_ID = 90000001
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bot-vm", required=True, help="e.g. ubuntu@<bot-vm-ip>")
     parser.add_argument("--bot-key", required=True, help="path to the bot VM's SSH key")
-    parser.add_argument("--chat-id", type=int, default=None, help="defaults to a fresh id derived from the clock")
+    parser.add_argument("--chat-id", type=int, default=None,
+                        help=f"defaults to the fixed smoke-test id {SMOKE_TEST_CHAT_ID}")
     parser.add_argument("--timeout", type=int, default=90, help="seconds per request (news_query calls are slow)")
     args = parser.parse_args()
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
 
-    chat_id = args.chat_id if args.chat_id is not None else 900000 + int(time.time()) % 100000
+    # A FIXED id, reused every run. The clock-derived one it replaced
+    # created a fresh subscriber on every invocation and never removed it:
+    # by 2026-08-21 that was 54 abandoned rows against 5 real subscribers,
+    # 19 of them still push-enabled and each drawing a billed, undeliverable
+    # digest every 6 hours until the DeepSeek balance ran out.
+    #
+    # Reuse also means each run starts from the previous run's state rather
+    # than a blank one, which is a feature here: it is how a real returning
+    # subscriber's row looks. test_api flags anything it touches with
+    # is_test, so push cycles skip this row regardless of what the tests
+    # leave enabled.
+    chat_id = args.chat_id if args.chat_id is not None else SMOKE_TEST_CHAT_ID
 
     print(f"Starting SSH tunnel to {args.bot_vm}...")
     tunnel = start_tunnel(args.bot_vm, args.bot_key)

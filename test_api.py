@@ -46,6 +46,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import bot as info_bot
+import users_db
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("TEST_API_PORT", "8765"))
@@ -80,6 +81,15 @@ class _Handler(BaseHTTPRequestHandler):
         except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
             self._json_response(400, {"error": f"expected JSON body {{'chat_id': int, 'text': str}}: {exc!r}"})
             return
+
+        # Everything arriving here is test traffic by definition -- this
+        # endpoint exists for nothing else -- so the subscriber row the
+        # pipeline is about to create (or update) is flagged before it runs.
+        # Marking at the door rather than asking each test to clean up:
+        # smoke tests drive the real pipeline, so verifying "start pushing
+        # me news every 6 hours" genuinely turns push on, and a cleanup step
+        # is skipped precisely when a test fails early.
+        users_db.mark_test_account(chat_id)
 
         server = self.server  # type: _Server
         future = asyncio.run_coroutine_threadsafe(

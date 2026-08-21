@@ -125,6 +125,9 @@ def init_db() -> None:
         _ensure_column(conn, "subscribers", "pushed_links", "TEXT")
         _ensure_column(conn, "subscribers", "language", "TEXT")
         _ensure_column(conn, "subscribers", "restricted_sources_enabled", "INTEGER")
+        # Marks a row created by the local test API rather than by a real
+        # Telegram user. See mark_test_account.
+        _ensure_column(conn, "subscribers", "is_test", "INTEGER")
         _migrate_api_budget_table(conn)
         conn.execute(
             """
@@ -896,6 +899,38 @@ def get_interests(chat_id: int) -> list[str]:
     return json.loads(row[0])
 
 
+def mark_test_account(chat_id: int) -> None:
+    """Flags a subscriber as created by test_api.py, so push cycles skip it.
+
+    Smoke tests drive the real pipeline through test_api, which means they
+    create real subscriber rows -- including turning push on, since
+    verifying that the router extracts "every 6 hours" requires actually
+    performing the setting. Those rows then received digests forever.
+
+    By 2026-08-21 that had produced 54 abandoned accounts, 19 of them
+    push-enabled, against 5 real subscribers. Each one cost a digest
+    generation and a guardrail call every 6 hours, delivered to a Telegram
+    user that does not exist -- the generation is billed, only the send
+    fails. It exhausted the DeepSeek balance and took real subscribers'
+    pushes down with it.
+
+    Excluding them structurally beats asking the test to clean up after
+    itself: a cleanup step that is skipped when a test fails early is
+    exactly when the mess gets made.
+
+    Upserts, because the row may not exist yet -- test_api marks the id
+    before the pipeline has had a chance to create it."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, status, requested_at, is_test)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(chat_id) DO UPDATE SET is_test = 1
+            """,
+            (chat_id, APPROVED, datetime.now().isoformat()),
+        )
+
+
 def set_interests(chat_id: int, interests: list[str]) -> None:
     """Upserts -- a chat_id may not have a subscribers row yet (e.g. the
     admin, who bypasses the approval flow in check_access() entirely and
@@ -1084,7 +1119,14 @@ def record_push(chat_id: int, article_links: list[str], pushed_at: datetime) -> 
 def list_push_enabled_subscribers() -> list[dict]:
     """Approved subscribers with push_enabled=true, with everything
     news_push.py's scheduler needs to decide who's due and what to filter
-    against -- avoids the scheduler doing its own row-by-row SQL."""
+    against -- avoids the scheduler doing its own row-by-row SQL.
+
+    Test accounts are excluded here rather than left to a cleanup step in
+    the smoke tests. A cleanup that is skipped when a test fails early is
+    exactly when the mess gets made, and the mess is expensive: 19
+    abandoned test accounts each drew a digest generation every 6 hours,
+    billed and undeliverable, until the DeepSeek balance ran out and real
+    subscribers stopped receiving anything. See mark_test_account."""
     with _connect() as conn:
         rows = conn.execute(
             """
@@ -1092,6 +1134,7 @@ def list_push_enabled_subscribers() -> list[dict]:
                    restricted_sources_enabled
             FROM subscribers
             WHERE status = ? AND push_enabled = 1
+              AND (is_test IS NULL OR is_test = 0)
             """,
             (APPROVED,),
         ).fetchall()
