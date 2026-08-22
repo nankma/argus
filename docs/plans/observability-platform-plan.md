@@ -131,6 +131,48 @@ The scheduler half was confirmed separately once the alert existed — see
 "Verified running" below. The engine evaluates on cadence and matches
 correctly; only delivery remains untested, and that needs a channel.
 
+### The dual-write bug, and why the test could not have caught it
+
+Enabling Logfire alongside Phoenix on 2026-08-21 **silently stopped
+Phoenix receiving anything**. Rolled back the same session; fixed
+2026-08-22.
+
+`phoenix.otel`'s TracerProvider is not a plain OpenTelemetry one:
+
+```python
+def add_span_processor(self, *args, replace_default_processor: bool = True, ...):
+    if self._default_processor and replace_default_processor:
+        self._active_span_processor.shutdown()   # discards register()'s exporter
+```
+
+So `provider.add_span_processor(logfire)` shut down the exporter
+`register()` had just installed. Spans kept being produced and simply went
+somewhere else — nothing raised, nothing logged, and the bot looked fine.
+Phoenix even warns about it in its own startup banner ("`add_span_processor`
+will overwrite this default"), which was printed in production logs the
+whole time and read as boilerplate.
+
+The fix is the public opt-out, one keyword: `replace_default_processor=False`.
+
+**The test that should have caught this could not have.** Its fake
+provider was:
+
+```python
+def add_span_processor(self, processor):
+    added.append(processor)          # always appends
+```
+
+Appending is convenient and it is wrong about the exact behaviour under
+test. The test asserted "Logfire's processor was added" — which was true,
+and irrelevant; the failure was what got *removed*. It now models the real
+contract: a default processor that is discarded unless the caller opts out,
+and asserts **both** exporters survive. Reverting the fix turns it red.
+
+The general lesson is worth more than the fix: **a fake that is easier than
+the real thing tests something else.** When the whole point of a call is a
+side effect on a third-party object, the fake has to reproduce that
+object's actual semantics, or the test only confirms the call was made.
+
 ## Gate B: still open
 
 **Does alert evaluation keep running when a project is over quota?**
