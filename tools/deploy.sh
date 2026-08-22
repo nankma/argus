@@ -54,17 +54,21 @@ ok()    { printf '    ok  %s\n' "$*"; }
 warn()  { printf '    !!  %s\n' "$*"; }
 die()   { printf '\n\033[31mFAILED: %s\033[0m\n' "$*"; printf 'logs: %s\n' "$LOGDIR"; exit 1; }
 
-# Runs a command with its output in a log file rather than on screen, and
-# only surfaces the log when it fails. This is the whole cost discipline in
-# one function.
+# Runs a command with its output in a log file rather than on screen. On
+# failure it surfaces only the lines that look like the error, never the
+# whole log: a build log is thousands of lines of progress noise around one
+# real message, and every line printed here is re-sent as input on every
+# later call. The full log stays on disk for a human or an agent.
 run() {
     local name="$1"; shift
     local log="$LOGDIR/$name.log"
     if "$@" > "$log" 2>&1; then
         return 0
     fi
-    printf '\n--- last 30 lines of %s ---\n' "$log"
-    tail -30 "$log"
+    printf '\n    error lines from %s (full log on disk):\n' "$name"
+    grep -iE "^ *(error|fatal)|error:|failed to|cannot |no such |permission denied" "$log" \
+        | grep -viE "0 error|warning" | tail -6 | sed 's/^/        /'
+    printf '        ...full log: %s\n' "$log"
     return 1
 }
 
@@ -278,7 +282,7 @@ host_check() {
         ok "$name"
     else
         warn "$name FAILED -- see $LOGDIR/$name.log"
-        tail -5 "$LOGDIR/$name.log" | sed 's/^/        /'
+        grep -iE "error|failed|refused|timed out" "$LOGDIR/$name.log" | tail -3 | sed 's/^/        /'
         FAILURES=$((FAILURES + 1))
     fi
 }
