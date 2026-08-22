@@ -422,18 +422,38 @@ def _strike_unreachable_subscriber(chat_id: int, now: datetime) -> None:
 
 def _record(chat_id: int, outcome: str, message: str, now: datetime,
             detail: str | None = None) -> None:
-    """Logs a push outcome for a human AND records it as a queryable row,
-    from one call site so the two cannot disagree.
+    """Reports a push outcome three ways, from one call site so they cannot
+    disagree: a log line, a database row, and a span.
 
-    Both halves are needed and neither replaces the other. The print goes
-    to `docker logs`, which is where someone looks when debugging a
-    specific cycle -- but it is free text, carries no timestamp of its
-    own, is destroyed when a deploy swaps the container, and cannot be
-    read at all by this process from inside that container. The row is
-    what an alarm can actually query. See
-    docs/plans/incident-monitoring-plan.md."""
+    Each reaches a different reader and none replaces the others.
+
+    The PRINT goes to `docker logs`, where someone looks when debugging a
+    specific cycle. It is free text with no timestamp of its own, it cannot
+    be read from inside the container, and a deploy destroys it -- fine for
+    a human reading a single cycle, useless as an alarm's input.
+
+    The ROW is what `/status` and any local query read. It survives with no
+    network at all, which is what makes it the floor: if telemetry export
+    breaks, this still answers "what happened".
+
+    The SPAN is what an ALARM can query. Criteria 2 and 3 of
+    docs/plans/incident-monitoring-plan.md live in Logfire, and Logfire can
+    only alert on what it has received -- the SQLite rows sit on the bot VM
+    where the alerting engine cannot see them. A no-op when no tracer
+    provider is configured, which is every test and CI run."""
     print(f"[news_push] chat_id={chat_id}: {message}")
     users_db.record_push_outcome(chat_id, outcome, now, detail=detail)
+    with _tracer.start_as_current_span("push_outcome") as span:
+        # Flat, low-cardinality attributes: an alert query filters on
+        # `outcome` and counts, so it must not have to parse prose.
+        span.set_attribute("push.outcome", outcome)
+        span.set_attribute("push.chat_id", chat_id)
+        # Whether an LLM was paid for this cycle -- criterion 3's
+        # denominator, computed here rather than by re-deriving the outcome
+        # set inside every alert query.
+        span.set_attribute("push.generated", outcome in users_db.PUSH_GENERATED_OUTCOMES)
+        if detail:
+            span.set_attribute("push.detail", detail)
 
 
 def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: datetime) -> bool:
