@@ -20,25 +20,104 @@ as the build was finishing). Building locally and transferring instead
 took a fraction of the time and produced a known-good, already-verified
 image.
 
+## Keep command output small — it is billed, repeatedly
+
+A deploy is the most output-heavy task in this project, and on 2026-08-21
+one cost **184k tokens across 103 tool calls**. Most of that was avoidable.
+
+**The mechanism, because it is not obvious.** Every byte a command prints
+is copied into the agent's context. Context is *cumulative*: a 2,000-line
+build log is not paid for once, it is re-sent as input on every subsequent
+tool call in that session. Spilling a large log early therefore costs
+roughly (its size) x (how many steps remain). Trimming output at the start
+of a deploy is worth far more than trimming it at the end.
+
+**Redirect, check the exit code, and only then look inside.** Keep the
+log on disk where it costs nothing, and grep it when something actually
+fails:
+
+```bash
+LOG=<scratchpad>/build.log
+docker build -t myfirstagent-bot . > "$LOG" 2>&1; echo "build exit=$?"
+# only if that was non-zero:
+grep -iE "error|failed|not found" "$LOG" | tail -20
+```
+
+**Do this rather than `-q` or `| tail`.** Both of those *throw the output
+away*, so a build that fails has to be re-run — several minutes, and the
+failure may not even reproduce. A file keeps full fidelity at zero context
+cost. The same shape works for the transfer:
+
+```bash
+docker save myfirstagent-bot:latest \
+  | ssh -i "$KEY" ubuntu@<vm-ip> "sudo docker load" > "$LOG" 2>&1; echo "load exit=$?"
+grep "Loaded image" "$LOG"
+```
+
+For output that already lives somewhere else, ask for less of it instead:
+
+| Instead of | Run |
+|---|---|
+| `sudo docker logs myfirstagent-bot` | `sudo docker logs --tail 50 myfirstagent-bot` |
+| `pytest` | `pytest -q 2>&1 \| tail -3` |
+| `cat some_file.py` to find one thing | `grep -n 'pattern' some_file.py`, then read that range |
+| `conda list` | `conda list \| grep -i <package>` |
+
+**Two things worth spending on anyway**, so this does not become false
+economy:
+
+- **Verification output you are actually going to read.** The point of a
+  deploy is to know it worked. Trim the noise, never the check.
+- **Investigating a real failure.** The same 2026-08-21 deploy found three
+  genuine problems — a CRLF-broken entrypoint, a telemetry regression, and
+  a live provider outage. A deploy that finds nothing is cheap for the
+  wrong reason.
+
 ## How to do it
 
 1. Build and verify the image locally, same as always:
    ```
-   docker build -t myfirstagent-bot .
+   LOG="$TMPDIR/build.log"   # anywhere off the repo; it is not a deliverable
+   docker build -t myfirstagent-bot . > "$LOG" 2>&1; echo "exit=$?"
    ```
+   Redirected, not `-q` — see "Keep command output small" above. The log
+   costs nothing on disk and is there to grep if the exit code is
+   non-zero, instead of having to rebuild to find out why.
    Test it locally first if the change is nontrivial (see `CLAUDE.md`'s
    Docker section) — cheaper to catch a broken image before it's on the
    only machine actually serving the bot.
+
+   **On a Windows dev machine, sanity-check `docker-entrypoint.sh`'s line
+   endings before trusting the build.** Real incident, 2026-08-21:
+   `docker run --rm myfirstagent-bot python -c "import combined_bot"`
+   passed (it bypasses `ENTRYPOINT`), but the actual entrypoint failed
+   with `env: 'bash\r': No such file or directory` — the working-tree
+   copy of `docker-entrypoint.sh` had CRLF line endings (git's
+   `core.autocrlf=true` converts on checkout even though the committed
+   blob is genuinely LF — confirmed via `git show HEAD:docker-entrypoint.sh
+   | xxd`), and CRLF in the shebang line breaks it. The plain `import
+   combined_bot` sanity check doesn't catch this because it never runs
+   the entrypoint at all. Verify with a check that actually exercises
+   it: `docker run --rm --entrypoint ./docker-entrypoint.sh
+   myfirstagent-bot python -c "print('ok')"`. If it fails this way, strip
+   `\r` from the working-tree file (`sed -i 's/\r$//' docker-entrypoint.sh`)
+   and rebuild — a repo-level fix (`.gitattributes` with `*.sh text
+   eol=lf`) would prevent this recurring on future checkouts but hasn't
+   been added yet; flag it to the caller rather than assuming it's safe
+   to add mid-deploy.
 
 2. Transfer the image directly over SSH — no container registry needed
    for a single personal VM:
    ```bash
    KEY="/path/to/ssh-key.pri.key"
-   docker save myfirstagent-bot:latest | ssh -i "$KEY" ubuntu@<vm-ip> "sudo docker load"
+   docker save myfirstagent-bot:latest | ssh -i "$KEY" ubuntu@<vm-ip> "sudo docker load" > "$LOG" 2>&1
+   echo "exit=$?"; grep "Loaded image" "$LOG"
    ```
    `docker save` streams the image as a tar over stdout; piping straight
    into `ssh ... docker load` on the other end avoids writing a large
-   intermediate file on either machine.
+   intermediate file on either machine. Only the `Loaded image:` line
+   matters — the layer-by-layer progress says nothing that comparing
+   local and remote image ids does not say better.
 
 3. Recreate/restart the container on the VM to pick up the new image
    (`docker stop`/`docker rm` the old one, `docker run` again with the
@@ -103,6 +182,33 @@ nice-to-have. A `FAIL` at the "sending a test message" step means the
 bot itself is unreachable (a different, more urgent problem); a `FAIL`
 at the "polling Phoenix" step with the bot reachable is the specific
 missing-env-var regression this check was built for.
+
+**If a second telemetry backend is ever added alongside Phoenix (e.g.
+Logfire), re-run this Phoenix check even though it "shouldn't" be
+affected.** Real incident, 2026-08-21: enabling `LOGFIRE_ENABLED`
+alongside the existing `PHOENIX_ENABLED` silently stopped Phoenix from
+receiving any spans at all — no error anywhere, container logs looked
+identical, and the bot answered messages normally. Root cause: Phoenix's
+own `register()` banner says outright — "Using a default SpanProcessor.
+`add_span_processor` will overwrite this default." — and
+`agent.setup_telemetry()`'s Logfire branch, when Phoenix is already
+registered, calls `provider.add_span_processor(_logfire_processor(token))`
+on that *same* Phoenix provider. That call doesn't add a second
+processor; it *replaces* Phoenix's lazy default one, so whichever
+backend's `add_span_processor()` runs last is the only one that ever
+gets spans. Diagnosed by querying Logfire's own read API directly
+(`curl .../v1/query` with the resolved `LOGFIRE_API_KEY`, `--data-urlencode
+"sql=SELECT trace_id, span_name, start_timestamp FROM records ORDER BY
+start_timestamp DESC LIMIT 5"`) and finding fresh spans landing there —
+proof they were being exported, just to the wrong (only the newest)
+place. Rolled back by dropping `-e LOGFIRE_ENABLED=true` and restarting
+(no rebuild needed, the whole Logfire path is behind that flag);
+re-ran `check_telemetry.py` and got a clean `OK` again. Don't re-enable
+Logfire until `setup_telemetry()` is fixed to keep both processors live
+at once (e.g. don't call `add_span_processor` on Phoenix's own
+provider — build Logfire's own provider/processor instead, the way the
+Phoenix-absent branch already does), and re-verify with this same check
+afterward.
 
 ## After every deploy: confirm volume-backed directories actually are
 

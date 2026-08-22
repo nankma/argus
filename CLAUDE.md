@@ -52,6 +52,53 @@ scope, since different subscribers care about different topics.
 | News source registry (what's live, how to add one) | `docs/current/ai-news-sources.md` |
 | Diagnosing a live issue (Phoenix traces, hot-patching) | `docs/reference/observability-and-debugging.md` |
 
+## Command output is billed, and billed again
+
+Every byte a command prints enters the context and is re-sent as input on
+every later tool call, so a big log early costs (its size) x (steps
+remaining). One deploy in this repo cost 184k tokens that way, nearly all
+of it build logs and progress bars.
+
+**Redirect long output to a file and read the exit code.** Look inside
+only when something failed, and then `grep` for the part that matters:
+
+```bash
+docker build -t myfirstagent-bot . > "$LOG" 2>&1; echo "exit=$?"
+# only if that was non-zero:
+grep -iE "error|failed" "$LOG" | tail -20
+```
+
+Better than `-q` or `| tail`, which *discard* the output: a failed build
+then has to be re-run to find out why. A file keeps everything at zero
+context cost. Use `--tail`/`grep` for things already on disk elsewhere
+(`docker logs --tail 50`), and `grep -n` to locate before reading a narrow
+range — never `cat` a file to check one line.
+
+Trim noise, never checks. A run that misses a real problem is the
+expensive one.
+
+**A guard enforces this**, globally rather than per-repo — runaway output
+is an account-level problem. `~/.claude/hooks/output_budget.py`, registered
+in `~/.claude/settings.json`, watches every tool result. Saying "continue"
+after a stop raises the ceiling by another budget: a speed bump, not a wall.
+
+Its thresholds are measured, not guessed. Across 4,610 real tool calls in
+this repo, **4.4 MB of tool output produced 3.35 billion billed input
+tokens** — the re-billing effect, in numbers. And the distribution is
+extremely long-tailed:
+
+| | |
+|---|---|
+| p50 / p95 / p99 | 0.2 KB / 4.1 KB / 13.7 KB |
+| 25 calls (0.54%) over 20 KB | 35% of all output |
+| 6 calls (0.13%) over 50 KB | 27% of all output |
+
+So the guard leads with a **per-call** check — warn above 25 KB (just past
+p99), stop above 100 KB (5 calls in 4,610, every one an unfiltered log).
+That fires at the moment the mistake is made and names the command, instead
+of reporting a big number hundreds of calls later. A 2 MB session total is
+kept only as a backstop for the other shape: a long grind of medium calls.
+
 ## Testing
 
 ```powershell

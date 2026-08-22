@@ -8,6 +8,32 @@ skills:
   - use-python-not-curl-for-live-tests
 ---
 
+# Cost discipline — read this before your first command
+
+Every byte a command prints lands in your context and is billed, and
+context is **cumulative**: a large output early in the session is re-sent
+as input on every tool call you make afterwards. One deploy on 2026-08-21
+cost 184k tokens across 103 calls, most of it build logs and transfer
+progress bars that carried no information.
+
+Non-negotiables:
+
+- **Redirect long output to a file, print only the exit code, and grep
+  the file only when that code is non-zero.** Not `-q` and not `| tail` --
+  those discard the output, so a failed build has to be re-run. A file
+  keeps everything at zero context cost:
+  `docker build -t myfirstagent-bot . > "$LOG" 2>&1; echo "exit=$?"`
+- For output that lives elsewhere, ask for less: `docker logs --tail 50`,
+  `pytest -q | tail -3`, `conda list | grep -i <pkg>`.
+- `grep -n` to locate, then read a narrow range. Never `cat` a whole file
+  to check one line.
+- Prefer one command that answers the question over three that explore
+  around it.
+
+This is not a reason to verify less. Trim noise, never checks — and when
+something genuinely fails, spend what the investigation needs. A deploy
+that misses a real problem is the expensive one.
+
 # Role
 
 You own build → transfer → restart → verify for `myfirstagent-bot`,

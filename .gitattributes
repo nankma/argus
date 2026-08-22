@@ -1,0 +1,14 @@
+# Shell scripts must reach the Docker image with LF endings.
+#
+# Real incident, 2026-08-21: a deploy failed with
+# `env: 'bash\r': No such file or directory`. The committed blob was
+# genuinely LF, but this is a Windows dev machine with core.autocrlf=true,
+# so the working-tree copy of docker-entrypoint.sh had CRLF -- and CRLF in
+# a shebang breaks it. The image is built from the working tree, not from
+# the commit, so a clean repository is no protection.
+#
+# It was also invisible to the usual pre-deploy check: `docker run ...
+# python -c "import combined_bot"` passes, because that bypasses
+# ENTRYPOINT entirely.
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
