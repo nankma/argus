@@ -164,3 +164,30 @@ def test_is_output_on_topic_news_query_category_uses_full_check():
         guardrails.OutputCheck(reasoning="test", discusses_own_configuration=False, appropriate_bot_content=False)
     )
     assert guardrails.is_output_on_topic(model, "off-topic content", category="news_query") is False
+
+
+def test_layer2_failure_is_announced_not_just_swallowed(capsys):
+    """Failing open is correct -- a router outage must not take the bot down.
+    Failing open SILENTLY is what let the 2026-08-21 DeepSeek thinking-mode
+    change hide: every settings command was misrouted as a news query for
+    real users, with no error anywhere and no way to tell a provider outage
+    apart from a genuine news question."""
+    class Exploding:
+        def with_structured_output(self, _schema):
+            raise RuntimeError("400 Thinking mode does not support this tool_choice")
+
+    result = guardrails.classify_message(Exploding(), "add robotics to my interests")
+
+    assert result.categories == ["news_query"]          # still fails open
+    err = capsys.readouterr().out
+    assert "layer 2 FAILED" in err
+    assert "Thinking mode" in err                        # the cause survives
+
+
+def test_layer4_failure_is_announced_not_just_swallowed(capsys):
+    class Exploding:
+        def with_structured_output(self, _schema):
+            raise RuntimeError("provider exploded")
+
+    assert guardrails.is_output_on_topic(Exploding(), "<b>anything</b>") is True
+    assert "layer 4 FAILED" in capsys.readouterr().out

@@ -76,8 +76,27 @@ def build_model(env_var: str, default: str = DEFAULT_MODEL):
     second provider is configured yet, so behavior is unchanged until one
     of these env vars is actually set. Before pointing either at a
     different model, re-run tools/measure_guardrails.py and compare against
-    the recorded baseline -- see that doc's "The behavioral caveat"."""
-    return init_chat_model(os.environ.get(env_var, default))
+    the recorded baseline -- see that doc's "The behavioral caveat".
+
+    `reasoning_effort` is passed explicitly because DeepSeek changed the
+    default under us. On 2026-08-21 every with_structured_output call began
+    failing with `400 Thinking mode does not support this tool_choice`:
+    DeepSeek had turned thinking mode on by default for deepseek-v4-flash,
+    and thinking mode rejects the forced `tool_choice` that structured
+    output relies on. The model name never changed -- its behaviour did.
+
+    The damage was invisible, which is the part worth remembering.
+    guardrails.classify_message fails open to `news_query` on any exception
+    and logs nothing, so every settings command (add an interest, start or
+    stop push, set a language) was silently misrouted as a news query for
+    real users, and article classification stopped, with no error anywhere.
+
+    Overridable via LLM_REASONING_EFFORT for a provider that rejects the
+    parameter or a model where thinking is wanted; empty string omits it.
+    """
+    effort = os.environ.get("LLM_REASONING_EFFORT", "none")
+    kwargs = {"reasoning_effort": effort} if effort else {}
+    return init_chat_model(os.environ.get(env_var, default), **kwargs)
 
 # --- Layer 1: tight, always-present identity ----------------------------
 

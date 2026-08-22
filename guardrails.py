@@ -207,9 +207,18 @@ def classify_message(model, user_message: str) -> MessageClassification:
         structured = model.with_structured_output(MessageClassification)
         result = structured.invoke([{"role": "system", "content": _ROUTER_PROMPT}, {"role": "user", "content": user_message}])
         if result is None or not result.categories:
+            print("[guardrails] layer 2 returned no categories -- "
+                  "defaulting to news_query")
             return MessageClassification(on_topic=True, categories=["news_query"])
         return result
-    except Exception:
+    except Exception as exc:
+        # Failing open is right -- a router outage must not take the bot down
+        # -- but failing open SILENTLY is what let the 2026-08-21 DeepSeek
+        # thinking-mode change hide. Every settings command was misrouted as a
+        # news query for real users, and the only evidence anywhere was that
+        # people's interests stopped updating. A provider outage and "this
+        # really is a news query" must not look identical from outside.
+        print(f"[guardrails] layer 2 FAILED, defaulting to news_query: {exc!r}")
         return MessageClassification(on_topic=True, categories=["news_query"])
 
 
@@ -301,8 +310,11 @@ def is_output_on_topic(model, response_text: str, category: str | None = None) -
             ]
         )
         if result is None:
+            print("[guardrails] layer 4 returned nothing -- allowing output")
             return True
-    except Exception:
+    except Exception as exc:
+        # Same reasoning as layer 2 above: fail open, but say so.
+        print(f"[guardrails] layer 4 FAILED, allowing output: {exc!r}")
         return True
     if result.discusses_own_configuration:
         return False

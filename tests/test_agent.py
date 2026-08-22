@@ -21,9 +21,15 @@ def _record_init_chat_model(monkeypatch):
     """build_model calls the module-level init_chat_model name, so
     monkeypatching it on the agent module (not the real langchain function)
     lets these tests assert what string was requested without constructing
-    a real chat model or making any network call."""
+    a real chat model or making any network call.
+
+    Records kwargs too, not just the model string: the parameters passed
+    alongside it are load-bearing (see build_model's reasoning_effort), and
+    a stub that silently dropped them is how a real outage went untested.
+    """
     calls = []
-    monkeypatch.setattr(agent, "init_chat_model", lambda s: calls.append(s) or "fake-model")
+    monkeypatch.setattr(agent, "init_chat_model",
+                        lambda s, **kw: calls.append((s, kw)) or "fake-model")
     return calls
 
 
@@ -31,7 +37,7 @@ def test_build_model_reads_env_var(monkeypatch):
     calls = _record_init_chat_model(monkeypatch)
     monkeypatch.setenv("LLM_MODEL_TEST", "deepseek:deepseek-chat")
     result = agent.build_model("LLM_MODEL_TEST")
-    assert calls == ["deepseek:deepseek-chat"]
+    assert [c[0] for c in calls] == ["deepseek:deepseek-chat"]
     assert result == "fake-model"
 
 
@@ -39,14 +45,14 @@ def test_build_model_falls_back_to_default_when_env_unset(monkeypatch):
     calls = _record_init_chat_model(monkeypatch)
     monkeypatch.delenv("LLM_MODEL_TEST_UNSET", raising=False)
     agent.build_model("LLM_MODEL_TEST_UNSET")
-    assert calls == [agent.DEFAULT_MODEL]
+    assert [c[0] for c in calls] == [agent.DEFAULT_MODEL]
 
 
 def test_build_model_honors_a_custom_default(monkeypatch):
     calls = _record_init_chat_model(monkeypatch)
     monkeypatch.delenv("LLM_MODEL_TEST_CUSTOM_DEFAULT", raising=False)
     agent.build_model("LLM_MODEL_TEST_CUSTOM_DEFAULT", default="openai:gpt-4o-mini")
-    assert calls == ["openai:gpt-4o-mini"]
+    assert [c[0] for c in calls] == ["openai:gpt-4o-mini"]
 
 
 def test_compose_prompt_defaults_to_news_query_when_no_category():
@@ -388,3 +394,43 @@ def test_duplicate_interest_message_also_names_the_stored_form(
 
     assert "Optical Communications" in reply
     assert "already have" in reply
+
+
+# --- reasoning_effort: the 2026-08-21 DeepSeek outage ----------------------
+
+
+def test_build_model_disables_thinking_mode_by_default(monkeypatch):
+    """The fix for a live outage. DeepSeek turned thinking mode on by default
+    for deepseek-v4-flash, and thinking mode rejects the forced `tool_choice`
+    that with_structured_output relies on -- so every guardrail routing call
+    and every article classification started returning
+    `400 Thinking mode does not support this tool_choice`.
+
+    The model name never changed; its behaviour did. Passing the parameter
+    explicitly is what stops a provider's default from silently redefining
+    what our pinned model does."""
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.delenv("LLM_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("LLM_MODEL_TEST_EFFORT", raising=False)
+
+    agent.build_model("LLM_MODEL_TEST_EFFORT")
+
+    assert calls[0][1] == {"reasoning_effort": "none"}
+
+
+def test_build_model_reasoning_effort_is_overridable(monkeypatch):
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    agent.build_model("LLM_MODEL_TEST_EFFORT")
+
+    assert calls[0][1] == {"reasoning_effort": "high"}
+
+
+def test_build_model_omits_reasoning_effort_when_set_empty(monkeypatch):
+    """An escape hatch for a provider that rejects the parameter outright --
+    passing an unsupported kwarg is its own kind of outage."""
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "")
+    agent.build_model("LLM_MODEL_TEST_EFFORT")
+
+    assert calls[0][1] == {}
