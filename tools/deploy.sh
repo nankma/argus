@@ -24,6 +24,7 @@
 #   tools/deploy.sh              # deploy HEAD of main
 #   tools/deploy.sh --dry-run    # preflight only, change nothing
 #   tools/deploy.sh --skip-ci    # deploy without waiting on CI (say why)
+#   tools/deploy.sh --force      # deploy even if the image would be identical
 #
 set -uo pipefail
 
@@ -38,10 +39,12 @@ mkdir -p "$LOGDIR"
 
 DRY_RUN=0
 SKIP_CI=0
+FORCE=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --skip-ci) SKIP_CI=1 ;;
+        --force)   FORCE=1 ;;
         *) echo "unknown argument: $arg"; exit 2 ;;
     esac
 done
@@ -105,10 +108,49 @@ ok "docker-entrypoint.sh is LF"
 
 # Does this change reach the container at all? Files outside the Dockerfile
 # COPY list (docs, tools/, .claude/) change nothing in the image, and
-# rebuilding for them is pure cost -- see CLAUDE.md's deploy policy.
+# rebuilding for them is pure cost -- see CLAUDE.md's deploy policy. Worse
+# than pure cost, in fact: a restart re-runs the push job at first=10s and
+# re-opens the window where a deploy can kill a push cycle between the send
+# and record_push, so a pointless deploy is not a harmless one.
 DEPLOYED_ID=$("${SSH[@]}" "sudo docker inspect -f '{{.Image}}' $CONTAINER" 2>/dev/null | tr -d '\r')
-COPIED=$(sed -n 's/^COPY .*MAMBA_USER \(.*\) \.\/$/\1/p' Dockerfile)
 ok "container currently runs image ${DEPLOYED_ID:0:19}"
+
+COPIED=$(sed -n 's/^COPY .*MAMBA_USER \(.*\) \.\/$/\1/p' Dockerfile)
+COPIED="$COPIED environment.yml Dockerfile"
+DEPLOYED_SHA=$("${SSH[@]}" "sudo docker inspect -f '{{index .Config.Labels \"commit\"}}' $CONTAINER" 2>/dev/null | tr -d '\r')
+if [ -n "$DEPLOYED_SHA" ] && [ "$DEPLOYED_SHA" != "<no value>" ]; then
+    CHANGED=$(git diff --name-only "$DEPLOYED_SHA"..HEAD -- $COPIED 2>/dev/null)
+    if [ -z "$CHANGED" ]; then
+        warn "nothing in the image changed since ${DEPLOYED_SHA:0:8}"
+        [ "$FORCE" -eq 1 ] || die "refusing a no-op deploy. Pass --force if you want the restart itself."
+    fi
+fi
+
+# Is a push about to fire? A deploy is not a neutral act for the push job.
+# `docker stop` kills the container between send() and record_push() if it
+# lands mid-cycle, which leaves last_push_at unadvanced and re-sends the
+# same digest after restart; and `first=10` re-runs the whole cycle ten
+# seconds after start, so anyone already due is pushed immediately rather
+# than at the next quarter hour. Neither is fatal, both are avoidable by
+# not deploying into the window.
+DUE=$("${SSH[@]}" "sudo docker exec -e SUBSCRIBERS_DB_FILE=/data/subscribers.db $CONTAINER \
+    /opt/conda/bin/python -c \"
+import users_db
+from datetime import datetime, timezone
+now = datetime.now(timezone.utc)
+for s in users_db.list_push_enabled_subscribers():
+    lp, iv = s['last_push_at'], s['push_interval_hours']
+    left = 0 if lp is None else iv - (now - lp).total_seconds()/3600
+    if left < 0.25:
+        print(f\\\"{s['chat_id']} due in {max(left,0):.2f}h\\\")
+\"" 2>/dev/null | tr -d '\r')
+if [ -n "$DUE" ]; then
+    warn "a push is due within 15 minutes:"
+    echo "$DUE" | sed 's/^/        /'
+    [ "$FORCE" -eq 1 ] || die "deploying now could re-send or bring forward that push. Wait, or pass --force."
+else
+    ok "no push due within 15 minutes"
+fi
 
 if [ "$SKIP_CI" -eq 0 ]; then
     HEAD_SHA=$(git rev-parse HEAD)
@@ -131,7 +173,7 @@ fi
 # -------------------------------------------------------------------- build
 
 step "Build"
-run build docker build -t "$IMAGE" . || die "docker build failed -- see $LOGDIR/build.log"
+run build docker build --build-arg "GIT_COMMIT=$(git rev-parse HEAD)" -t "$IMAGE" . || die "docker build failed -- see $LOGDIR/build.log"
 LOCAL_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE")
 ok "built ${LOCAL_ID:0:19}"
 
