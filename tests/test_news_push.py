@@ -1018,3 +1018,60 @@ def test_heartbeat_span_carries_the_job_and_the_subscriber_count(monkeypatch):
 
     assert recorded == {"heartbeat.job": "push_tick",
                         "heartbeat.push_enabled_subscribers": 7}
+
+
+def test_record_emits_a_span_an_alert_can_query(monkeypatch, isolated_subscribers_db):
+    """The third reader. Criteria 2 and 3 live in Logfire, and Logfire can
+    only alert on what it receives -- the SQLite rows sit on the bot VM
+    where the alerting engine cannot see them.
+
+    `push.generated` is computed here rather than left for each alert query
+    to re-derive the outcome set: the ratio's denominator has one
+    definition, in users_db, and a query that reimplements it would drift
+    from it silently."""
+    recorded = {}
+
+    class FakeSpan:
+        def set_attribute(self, k, v):
+            recorded[k] = v
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(news_push._tracer, "start_as_current_span",
+                        lambda name: FakeSpan())
+    now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+
+    news_push._record(55, users_db.PUSH_CHAT_NOT_FOUND, "gone", now, detail="BadRequest")
+
+    assert recorded == {
+        "push.outcome": users_db.PUSH_CHAT_NOT_FOUND,
+        "push.chat_id": 55,
+        "push.generated": True,      # billed: the digest was written before the send
+        "push.detail": "BadRequest",
+    }
+
+
+def test_record_marks_a_cycle_that_cost_nothing_as_not_generated(monkeypatch, isolated_subscribers_db):
+    """The other side of the denominator. A subscriber with nothing new
+    costs no LLM call, and counting them would let a crowd of idle
+    subscribers hide a collapsed delivery rate."""
+    recorded = {}
+
+    class FakeSpan:
+        def set_attribute(self, k, v):
+            recorded[k] = v
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(news_push._tracer, "start_as_current_span",
+                        lambda name: FakeSpan())
+
+    news_push._record(56, users_db.PUSH_NOTHING_NEW, "quiet",
+                      datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc))
+
+    assert recorded["push.generated"] is False
+    assert "push.detail" not in recorded      # nothing to say, so nothing sent
