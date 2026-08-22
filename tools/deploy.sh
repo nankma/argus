@@ -189,17 +189,31 @@ ok "entrypoint runs"
 
 # ----------------------------------------------------------------- baseline
 
+# `python` is not on PATH inside the container -- the entrypoint activates
+# the conda env, and docker exec skips the entrypoint. The first run of
+# this script reported an error string as if it were the baseline data,
+# which is worse than not checking: it printed "ok".
+remote_counts() {
+    local out
+    out=$("${SSH[@]}" "sudo docker exec -e SUBSCRIBERS_DB_FILE=/data/subscribers.db $CONTAINER \
+        /opt/conda/bin/python -c \"
+import os, users_db
+print(len(users_db.list_push_enabled_subscribers()),
+      len(os.listdir(os.environ.get('NEWS_CACHE_DIR', '/data/news_cache'))))
+\"" 2>/dev/null | tr -d '\r')
+    # Only numbers are data. Anything else is an error message.
+    case "$out" in
+        *[!0-9\ ]*|"") return 1 ;;
+        *) printf '%s' "$out" ;;
+    esac
+}
+
 step "Baseline from the running container"
-BASE=$("${SSH[@]}" "sudo docker exec $CONTAINER python -c \"
-import users_db, os
-print(len(users_db.list_all_subscribers()) if hasattr(users_db,'list_all_subscribers') else -1,
-      len(users_db.list_push_enabled_subscribers()),
-      len(os.listdir(os.environ.get('NEWS_CACHE_DIR','/data/news_cache'))))
-\"" 2>>"$LOGDIR/baseline.log" | tr -d '\r')
-if [ -n "$BASE" ]; then
-    ok "subscribers/push-enabled/cached-articles: $BASE"
+if BASE=$(remote_counts); then
+    ok "push-enabled subscribers / cached articles: $BASE"
 else
-    warn "could not read a baseline (see $LOGDIR/baseline.log) -- continuing, but post-deploy comparison will be weaker"
+    BASE=""
+    warn "could not read a baseline -- continuing, but the post-deploy comparison is lost"
 fi
 
 # ----------------------------------------------------------------- transfer
@@ -234,31 +248,55 @@ ok "running the new image, restarts=$2"
 
 step "Verify"
 FAILURES=0
-check() {
+
+# Wait for readiness rather than sleeping a fixed amount. A restart has to
+# activate the conda env, fetch four secrets from OCI Vault and register
+# with Phoenix before it prints anything, which took longer than a flat 20s
+# and made the first run of this script report an empty log for a container
+# that was perfectly healthy.
+READY=0
+for _ in $(seq 1 30); do
+    if "${SSH[@]}" "sudo docker logs --tail 200 $CONTAINER 2>&1 | grep -q 'Both bots ready'"; then
+        READY=1; break
+    fi
+    sleep 5
+done
+if [ "$READY" -eq 1 ]; then
+    LOGLINES=$("${SSH[@]}" "sudo docker logs --tail 200 $CONTAINER 2>&1 | wc -l" | tr -d '\r')
+    ok "bots ready, docker logs has $LOGLINES lines"
+else
+    warn "'Both bots ready' never appeared -- see docker logs"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# These three run from HERE, not inside the container: they open their own
+# SSH connections, and tools/ is deliberately not in the image's COPY list.
+PHOENIX_VM=$(grep -oE 'ubuntu@[0-9.]+' "$INFRA" | sort | uniq | grep -v "$VM_IP" | head -1)
+host_check() {
     local name="$1"; shift
-    if "${SSH[@]}" "$@" > "$LOGDIR/$name.log" 2>&1; then
+    if python "$@" > "$LOGDIR/$name.log" 2>&1; then
         ok "$name"
     else
         warn "$name FAILED -- see $LOGDIR/$name.log"
+        tail -5 "$LOGDIR/$name.log" | sed 's/^/        /'
         FAILURES=$((FAILURES + 1))
     fi
 }
 
-# `docker logs` being empty was itself a real incident: the bot ran for two
-# deploys with no output and nobody checked the log itself.
-LOGLINES=$("${SSH[@]}" "sudo docker logs --tail 200 $CONTAINER 2>&1 | wc -l" | tr -d '\r')
-if [ "${LOGLINES:-0}" -gt 3 ]; then ok "docker logs has output ($LOGLINES lines)"
-else warn "docker logs is nearly empty ($LOGLINES lines)"; FAILURES=$((FAILURES + 1)); fi
+if [ -n "$PHOENIX_VM" ]; then
+    host_check telemetry tools/check_telemetry.py \
+        --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
+        --phoenix-vm "$PHOENIX_VM" --phoenix-key "$SSH_KEY" --timeout 90
+else
+    warn "no Phoenix VM found in $INFRA -- skipping the telemetry check"
+fi
 
-check telemetry        "sudo docker exec $CONTAINER python tools/check_telemetry.py"
-check data-persistence "sudo docker exec $CONTAINER python tools/check_data_persistence.py"
+host_check data-persistence tools/check_data_persistence.py \
+    --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
+    --dir-env NEWS_CACHE_DIR --dir-env NEWS_ARCHIVE_DIR \
+    --allow-empty NEWS_ARCHIVE_DIR
 
-AFTER=$("${SSH[@]}" "sudo docker exec $CONTAINER python -c \"
-import users_db, os
-print(len(users_db.list_all_subscribers()) if hasattr(users_db,'list_all_subscribers') else -1,
-      len(users_db.list_push_enabled_subscribers()),
-      len(os.listdir(os.environ.get('NEWS_CACHE_DIR','/data/news_cache'))))
-\"" 2>/dev/null | tr -d '\r')
+AFTER=$(remote_counts)
 if [ -n "$BASE" ] && [ -n "$AFTER" ]; then
     if [ "$BASE" = "$AFTER" ]; then ok "subscriber and cache counts unchanged ($AFTER)"
     else warn "counts changed: before [$BASE] after [$AFTER] -- expected for cache, NOT for subscribers"; fi
@@ -268,19 +306,23 @@ step "Smoke tests"
 # The end-to-end check: this is what caught the DeepSeek thinking-mode
 # outage (3/10 passing, every settings command misrouted) when every other
 # check above was green.
-if python tools/run_smoke_tests.py > "$LOGDIR/smoke.log" 2>&1; then
-    ok "$(grep -oE '[0-9]+/[0-9]+ .*passed' "$LOGDIR/smoke.log" | tail -1)"
+if python tools/run_smoke_tests.py --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
+        > "$LOGDIR/smoke.log" 2>&1; then
+    ok "$(grep -oE '[0-9]+/[0-9]+ .*(passed|pass)' "$LOGDIR/smoke.log" | tail -1)"
 else
     warn "smoke tests FAILED -- see $LOGDIR/smoke.log"
-    grep -iE "^(FAIL|case [0-9]+)" "$LOGDIR/smoke.log" | head -15
+    grep -iE "^(FAIL|case [0-9]+|[0-9]+/[0-9]+)" "$LOGDIR/smoke.log" | head -12 | sed 's/^/        /'
     FAILURES=$((FAILURES + 1))
 fi
 
 # Silence here is the point: these lines only appear when a guardrail layer
 # fell back, which used to happen with no trace at all.
-if "${SSH[@]}" "sudo docker logs --tail 500 $CONTAINER 2>&1 | grep -c 'layer [24] FAILED'" | grep -qv '^0'; then
-    warn "guardrail fail-open occurred since restart -- check docker logs for 'layer 2 FAILED'"
+FAILOPEN=$("${SSH[@]}" "sudo docker logs --tail 500 $CONTAINER 2>&1 | grep -c 'layer [24] FAILED'" | tr -d '\r')
+if [ "${FAILOPEN:-0}" -gt 0 ]; then
+    warn "guardrail fail-open occurred $FAILOPEN time(s) since restart -- grep docker logs for 'layer 2 FAILED'"
     FAILURES=$((FAILURES + 1))
+else
+    ok "no guardrail fail-open since restart"
 fi
 
 # ---------------------------------------------------------------- reporting
