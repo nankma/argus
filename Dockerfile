@@ -42,5 +42,16 @@ ENV PYTHONUNBUFFERED=1
 # wanted (`docker run ... myfirstagent-bot python bot.py`), e.g. if this
 # ever moves to a shape with enough RAM that splitting them back out is
 # preferable for isolation.
+# Which commit is this image? Until 2026-08-22 nothing could answer that:
+# `docker inspect` showed only the base image's labels, so a running
+# container could be compared to another image by id but never traced back
+# to source. tools/deploy.sh sets this and refuses a rebuild when nothing
+# in the COPY list above changed since the deployed commit -- a restart is
+# not free, it re-runs the push job at first=10s.
+#
+# Last so a new commit does not invalidate the expensive micromamba layer.
+ARG GIT_COMMIT=unknown
+LABEL commit=$GIT_COMMIT
+
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["python", "combined_bot.py"]
