@@ -65,29 +65,44 @@ def test_setup_telemetry_raises_when_enabled_without_a_key(monkeypatch):
         agent.setup_telemetry()
 
 
-def test_setup_telemetry_attaches_logfire_to_the_phoenix_provider(monkeypatch):
-    """With both enabled there must be ONE provider carrying both
-    exporters, not two providers racing to be the global one -- otherwise
-    whichever registers second wins and the other silently stops
-    receiving."""
+def test_setup_telemetry_keeps_phoenix_alive_when_logfire_is_added(monkeypatch):
+    """The 2026-08-21 regression, pinned.
+
+    Enabling Logfire alongside Phoenix silently stopped Phoenix receiving
+    anything. Phoenix's TracerProvider is not a plain OTel one: its
+    add_span_processor defaults to replace_default_processor=True, which
+    shuts down the exporter register() just installed. Spans kept being
+    produced and simply went somewhere else, so nothing looked broken.
+
+    The previous version of this test could not have caught it. Its fake
+    provider appended, unconditionally -- convenient, and wrong about the
+    thing under test. This one models the real contract: a default
+    processor that is discarded unless the caller opts out."""
     monkeypatch.setenv("PHOENIX_ENABLED", "true")
     monkeypatch.setenv("LOGFIRE_ENABLED", "true")
     monkeypatch.setenv("LOGFIRE_API_KEY", "pylf_v2_us_" + "x" * 40)
 
-    added = []
+    class PhoenixLikeProvider:
+        """Mirrors phoenix.otel.TracerProvider.add_span_processor."""
+        def __init__(self):
+            self.processors = ["phoenix-default"]
+            self.has_default = True
 
-    class FakeProvider:
-        def add_span_processor(self, processor):
-            added.append(processor)
+        def add_span_processor(self, processor, replace_default_processor=True):
+            if self.has_default and replace_default_processor:
+                self.processors = []          # Phoenix drops its own exporter
+                self.has_default = False
+            self.processors.append(processor)
 
-    provider = FakeProvider()
+    provider = PhoenixLikeProvider()
     monkeypatch.setattr(agent, "register", lambda **kwargs: provider)
-    monkeypatch.setattr(agent, "_logfire_processor", lambda token: f"processor:{token[:11]}")
+    monkeypatch.setattr(agent, "_logfire_processor", lambda token: "logfire")
 
-    returned = agent.setup_telemetry()
+    agent.setup_telemetry()
 
-    assert returned is provider
-    assert added == ["processor:pylf_v2_us_"]
+    # Both, not either. Losing the first line is the regression.
+    assert "phoenix-default" in provider.processors
+    assert "logfire" in provider.processors
 
 
 def test_logfire_endpoint_is_derived_from_the_token_region():

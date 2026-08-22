@@ -476,8 +476,20 @@ def setup_telemetry():
         provider = TracerProvider(resource=Resource.create({"service.name": "myfirstagent"}))
         trace.set_tracer_provider(provider)
         LangChainInstrumentor().instrument(tracer_provider=provider)
+        provider.add_span_processor(_logfire_processor(token))
+        return provider
 
-    provider.add_span_processor(_logfire_processor(token))
+    # Phoenix's provider is NOT a plain OTel one: its add_span_processor
+    # defaults to replace_default_processor=True, which shuts down and
+    # discards the exporter register() just installed. Adding Logfire the
+    # obvious way therefore turns Phoenix OFF -- silently, since spans keep
+    # being produced and simply go elsewhere. Found on 2026-08-21 by a
+    # deploy that enabled Logfire and left Phoenix receiving nothing.
+    #
+    # Its own banner does say so ("add_span_processor will overwrite this
+    # default"), and the parameter to opt out is public.
+    provider.add_span_processor(_logfire_processor(token),
+                                replace_default_processor=False)
     return provider
 
 
