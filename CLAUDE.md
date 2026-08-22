@@ -77,6 +77,10 @@ range — never `cat` a file to check one line.
 Trim noise, never checks. A run that misses a real problem is the
 expensive one.
 
+The `redirect-long-output` skill has the measured numbers, the exact
+pattern, and the rationalizations to refuse. Load it before a build,
+a deploy, or anything else that prints at length.
+
 **A guard enforces this**, globally rather than per-repo — runaway output
 is an account-level problem. `~/.claude/hooks/output_budget.py`, registered
 in `~/.claude/settings.json`, watches every tool result. Saying "continue"
