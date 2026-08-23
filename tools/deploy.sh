@@ -275,25 +275,37 @@ fi
 
 # These three run from HERE, not inside the container: they open their own
 # SSH connections, and tools/ is deliberately not in the image's COPY list.
-PHOENIX_VM=$(grep -oE 'ubuntu@[0-9.]+' "$INFRA" | sort | uniq | grep -v "$VM_IP" | head -1)
-host_check() {
-    local name="$1"; shift
-    if python "$@" > "$LOGDIR/$name.log" 2>&1; then
-        ok "$name"
-    else
-        warn "$name FAILED -- see $LOGDIR/$name.log"
-        grep -iE "error|failed|refused|timed out" "$LOGDIR/$name.log" | tail -3 | sed 's/^/        /'
-        FAILURES=$((FAILURES + 1))
-    fi
-}
+# Check whichever backends the deploy actually enabled, read from the same
+# docker run command that enabled them -- so retiring one backend does not
+# leave a check that fails forever. A check known to fail is worse than no
+# check: it trains you to ignore the output.
+case "$DOCKER_RUN" in
+    *PHOENIX_ENABLED=true*)
+        PHOENIX_VM=$(grep -oE 'ubuntu@[0-9.]+' "$INFRA" | sort | uniq | grep -v "$VM_IP" | head -1)
+        if [ -n "$PHOENIX_VM" ]; then
+            host_check phoenix-telemetry tools/check_telemetry.py \
+                --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
+                --phoenix-vm "$PHOENIX_VM" --phoenix-key "$SSH_KEY" --timeout 90
+        else
+            warn "PHOENIX_ENABLED is set but no Phoenix VM is recorded in $INFRA"
+            FAILURES=$((FAILURES + 1))
+        fi
+        ;;
+    *) ok "Phoenix not enabled -- skipping its check" ;;
+esac
 
-if [ -n "$PHOENIX_VM" ]; then
-    host_check telemetry tools/check_telemetry.py \
-        --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
-        --phoenix-vm "$PHOENIX_VM" --phoenix-key "$SSH_KEY" --timeout 90
-else
-    warn "no Phoenix VM found in $INFRA -- skipping the telemetry check"
-fi
+case "$DOCKER_RUN" in
+    *LOGFIRE_ENABLED=true*)
+        if [ -n "${LOGFIRE_API_KEY:-}" ]; then
+            host_check logfire-telemetry tools/check_logfire.py \
+                --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" --timeout 120
+        else
+            warn "LOGFIRE_ENABLED is set but LOGFIRE_API_KEY is not in this shell -- cannot verify"
+            FAILURES=$((FAILURES + 1))
+        fi
+        ;;
+    *) ok "Logfire not enabled -- skipping its check" ;;
+esac
 
 host_check data-persistence tools/check_data_persistence.py \
     --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
