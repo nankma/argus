@@ -447,7 +447,10 @@ def _record(chat_id: int, outcome: str, message: str, now: datetime,
         # Flat, low-cardinality attributes: an alert query filters on
         # `outcome` and counts, so it must not have to parse prose.
         span.set_attribute("push.outcome", outcome)
-        span.set_attribute("push.chat_id", chat_id)
+        # The opaque id, not chat_id: the row and the log line keep the
+        # real Telegram identifier (they never leave the VM), but a span
+        # does leave. See users_db.external_id.
+        span.set_attribute("push.subscriber", users_db.external_id(chat_id))
         # Whether an LLM was paid for this cycle -- criterion 3's
         # denominator, computed here rather than by re-deriving the outcome
         # set inside every alert query.

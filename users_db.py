@@ -9,8 +9,10 @@ deployment can point both bots at the same file on a shared volume (see
 docs/plans/deployment-plan.md) — same reasoning as agent.py's PHOENIX_ENDPOINT.
 """
 
+import hashlib
 import json
 import os
+import secrets
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -128,6 +130,10 @@ def init_db() -> None:
         # Marks a row created by the local test API rather than by a real
         # Telegram user. See mark_test_account.
         _ensure_column(conn, "subscribers", "is_test", "INTEGER")
+        # A stable identifier safe to send off this machine. See
+        # external_id() -- chat_id is a real Telegram account id and there
+        # is no reason for it to reach a third party.
+        _ensure_column(conn, "subscribers", "external_id", "TEXT")
         _migrate_api_budget_table(conn)
         conn.execute(
             """
@@ -593,6 +599,42 @@ def prune_category_sightings(now: datetime,
     with _connect() as conn:
         cursor = conn.execute("DELETE FROM category_sightings WHERE seen_at < ?", (cutoff,))
         return cursor.rowcount
+
+
+def external_id(chat_id: int) -> str:
+    """A stable, opaque id for this subscriber, minted once and stored.
+
+    `chat_id` is a real Telegram account identifier. Our own database and
+    our own logs may hold it -- they never leave the VM -- but telemetry
+    does, and a trace shared with anyone (or held by a provider) should not
+    carry it. This is hygiene rather than a privacy control: the data here
+    is not sensitive today, and the point is that keeping the mapping on
+    our side costs nothing while un-leaking an identifier later is
+    impossible.
+
+    Stored rather than derived so it survives a change of hashing scheme,
+    and so the mapping is a row someone can look at when a trace needs to
+    be tied back to a person during an incident.
+
+    Falls back to a deterministic value for a chat_id with no subscriber
+    row -- callers should not have to care, and a span attribute is never
+    worth raising over."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT external_id FROM subscribers WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        if row and row[0]:
+            return row[0]
+        new_id = "sub_" + secrets.token_hex(6)
+        cursor = conn.execute(
+            "UPDATE subscribers SET external_id = ? WHERE chat_id = ? AND external_id IS NULL",
+            (new_id, chat_id),
+        )
+        if cursor.rowcount:
+            return new_id
+    # No row to attach it to (a chat that was never a subscriber). Stable
+    # for the lifetime of the database, and not reversible without it.
+    return "anon_" + hashlib.sha256(f"{DB_FILE}:{chat_id}".encode()).hexdigest()[:12]
 
 
 def record_push_outcome(chat_id: int, outcome: str, recorded_at: datetime,
