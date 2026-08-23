@@ -1,10 +1,13 @@
 # Moving observability to Logfire
 
-Written 2026-08-21. Status: **decided, account live, Gate A verified end
-to end — query, schedule and delivery to Telegram.** The behaviour the
-whole decision rested on, alerting on the ABSENCE of data, is proven
-working. **Nothing is deployed**, so it currently watches local test runs
-rather than production.
+Written 2026-08-21. Status: **live in production, three alerts running,
+Phoenix not yet retired.** Logfire receives real traffic under the right
+service name, push outcomes arrive as spans, and criteria 1-3 of
+`incident-monitoring-plan.md` are alerts delivering to Telegram.
+
+Only step 8 is left: turning Phoenix off. Deliberately last — dual-write
+is what makes it safe to stop, and the ratio alert has not yet seen a
+non-empty sample.
 
 This document is about *where telemetry and alerting live*.
 `docs/plans/incident-monitoring-plan.md` is about *what to alert on* and
@@ -518,6 +521,81 @@ Worth remembering as a habit: **when something is missing from the UI,
 check `/api/openapi.json` before concluding it does not exist.** Email
 requires only `type` and `recipients` and would have been the
 zero-infrastructure answer had it been offered.
+
+## Steps 3, 5, 6 and 7 done — 2026-08-23
+
+### The service name, and why every earlier "verified" was weaker than it looked
+
+Production spans were reaching Logfire as `service.name = unknown_service`.
+Phoenix's `register()` sets `openinference.project.name` and nothing else,
+so with Phoenix driving the provider nothing set the attribute Logfire
+groups by.
+
+The consequence is the part worth keeping: **the dead man's switch had
+been querying `service_name = 'myfirstagent'` since the day it was
+created, against production traffic that was not called that.** It was
+watching an empty set. It never false-alarmed only because local test runs
+kept feeding it — those take the Logfire-only branch, which does set the
+name. A green alert and a broken alert looked identical.
+
+And the earlier claim in this document that Logfire was "receiving real
+production traffic" was true but under-verified: that check grouped by
+`span_name` and never looked at `service_name`. The spans were real; their
+identity was not.
+
+`OTEL_SERVICE_NAME` is now set before any provider is built — the SDK reads
+it when constructing the default Resource and never revisits it — from one
+`agent.SERVICE_NAME` constant that `tools/check_logfire.py` imports rather
+than repeats. A check filtering on a different name than the exporter sets
+is a check that always passes or always fails.
+
+### Outcomes as spans, with an opaque subscriber id
+
+`news_push._record` now reports three ways from one call site: a log line,
+a database row, and a span. Each reaches a different reader, and the row
+is the floor — it needs no network, so it still answers "what happened"
+when export is broken, which is exactly the state production was in on
+2026-08-21.
+
+The span carries `users_db.external_id(chat_id)`, not the Telegram id. The
+row and the log keep the real one; they never leave the VM. Hygiene rather
+than a privacy control — the data is not sensitive today, and the point is
+that keeping the mapping on our side costs nothing while un-leaking an
+identifier later is impossible.
+
+`push.generated` is computed in code rather than re-derived by each alert
+query: the ratio's denominator has one definition, and a query
+reimplementing it would drift from it silently.
+
+### The three alerts, live
+
+| Alert | Fires on | Window / cadence |
+|---|---|---|
+| `argus bot liveness` | no span at all | 30 min / 5 min |
+| `argus model errors` | any `model_error` outcome | 30 min / 5 min |
+| `argus delivery ratio` | delivered < 80% of generated | 24 h / 15 min |
+
+All three use `has_matches_changed`, so each fires once on the edge and
+once again on recovery, and all three deliver to `Bot Alert` (webhook →
+Telegram, no endpoint of ours).
+
+Two guards worth keeping:
+
+- The time window is **inside** each query, not left to the engine's
+  `time_window`. If that field ever means something other than assumed,
+  the query still works; omitting it fails the other way, silently.
+- The ratio alert carries `HAVING count(*) >= 5`. Verified against real
+  (empty) data: with the guard it returns nothing, and a control with
+  `>= 0` returns a row — so "no data" cannot masquerade as "0% delivered"
+  and page someone on a quiet night.
+
+### Still unverified
+
+The ratio alert has never seen a non-empty sample. Its SQL is validated
+and its no-data guard is proven, but the threshold arithmetic is not — the
+first real digests since deployment will settle it. Worth checking rather
+than assuming, given how many things in this document looked verified and
+were not.
 
 ## Quota: measured, not estimated
 
