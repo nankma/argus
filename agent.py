@@ -388,6 +388,10 @@ def run_agent(
 # token's own prefix (pylf_v1_us_ / pylf_v2_us_ / ..._eu_), so the endpoint
 # is derived rather than configured -- one fewer env var to get wrong, and
 # it cannot disagree with the credential it authenticates.
+# The name every telemetry backend groups by, and every query filters
+# on. One constant so the exporter and the checks cannot disagree.
+SERVICE_NAME = "myfirstagent"
+
 LOGFIRE_HOSTS = {"us": "https://logfire-us.pydantic.dev",
                  "eu": "https://logfire-eu.pydantic.dev"}
 
@@ -446,11 +450,27 @@ def setup_telemetry():
     Both can run at once, on purpose. Retiring the Phoenix VM is the last
     step of the migration, not the first, and dual-writing is what makes it
     possible to compare the two before committing."""
+    # Set before any provider is built, because the OTel SDK reads it when
+    # it constructs the default Resource and never revisits it.
+    #
+    # Phoenix's register() sets `openinference.project.name` and nothing
+    # else, so with Phoenix driving the provider every span reached Logfire
+    # as `service.name = unknown_service` -- found 2026-08-23. Logfire
+    # groups by service.name, so production traffic was invisible under the
+    # name everything queries by, and the dead man's switch had been
+    # watching an empty set. It only escaped notice because local test runs
+    # (which take the Logfire-only branch below, and do set the name) kept
+    # feeding it.
+    #
+    # setdefault, not assignment: a deployment that wants a different name
+    # per instance should be able to say so from the outside.
+    os.environ.setdefault("OTEL_SERVICE_NAME", SERVICE_NAME)
+
     provider = None
     if os.environ.get("PHOENIX_ENABLED"):
         provider = register(
             endpoint=PHOENIX_ENDPOINT,
-            project_name="myfirstagent",
+            project_name=SERVICE_NAME,
             protocol="grpc",
             auto_instrument=True,
         )
@@ -473,7 +493,7 @@ def setup_telemetry():
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
 
-        provider = TracerProvider(resource=Resource.create({"service.name": "myfirstagent"}))
+        provider = TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
         trace.set_tracer_provider(provider)
         LangChainInstrumentor().instrument(tracer_provider=provider)
         provider.add_span_processor(_logfire_processor(token))

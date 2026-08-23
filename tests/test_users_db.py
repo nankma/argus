@@ -1274,3 +1274,23 @@ def test_disabled_is_not_counted_as_a_generated_digest(isolated_subscribers_db):
     """Striking a subscriber out costs no LLM call, so it must not land in
     the denominator of the delivery ratio."""
     assert users_db.PUSH_DISABLED not in users_db.PUSH_GENERATED_OUTCOMES
+
+
+def test_external_id_is_stable_and_hides_the_chat_id(isolated_subscribers_db):
+    """Telemetry leaves this machine; chat_id is a real Telegram account
+    id. Stored rather than derived so it survives a change of scheme and
+    so the mapping stays a row someone can look up during an incident."""
+    users_db.request_access(778899, "u", "U")
+
+    first = users_db.external_id(778899)
+    assert first == users_db.external_id(778899)      # stable across calls
+    assert "778899" not in first
+    assert users_db.external_id(778899) != users_db.external_id(112233)
+
+
+def test_external_id_survives_without_a_subscriber_row(isolated_subscribers_db):
+    """A span attribute is never worth raising over, so a chat with no row
+    still gets something stable rather than an exception."""
+    got = users_db.external_id(999000)
+    assert got == users_db.external_id(999000)
+    assert "999000" not in got

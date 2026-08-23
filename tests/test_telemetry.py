@@ -1,3 +1,4 @@
+import os
 import agent
 
 
@@ -183,3 +184,45 @@ def test_setup_telemetry_without_phoenix_builds_and_installs_its_own_provider(mo
     assert installed == [provider]
     assert instrumented == [provider]
     assert added == ["logfire-processor"]
+
+
+def test_setup_telemetry_names_the_service_before_building_a_provider(monkeypatch):
+    """Found in production 2026-08-23: every span from the container
+    reached Logfire as `service.name = unknown_service`.
+
+    Phoenix's register() sets `openinference.project.name` and nothing
+    else, so with Phoenix driving the provider nothing ever set the
+    attribute Logfire groups by. Production traffic was invisible under the
+    name every query filters on, and the dead man's switch had been
+    watching an empty set -- saved only by local test runs, which take the
+    Logfire-only branch and do set it.
+
+    The order matters as much as the value: the OTel SDK reads
+    OTEL_SERVICE_NAME when it builds the default Resource and never looks
+    again, so setting it after register() would be too late."""
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setenv("PHOENIX_ENABLED", "true")
+    monkeypatch.delenv("LOGFIRE_ENABLED", raising=False)
+
+    seen = {}
+    def fake_register(**kwargs):
+        seen["name_at_register_time"] = os.environ.get("OTEL_SERVICE_NAME")
+        return object()
+    monkeypatch.setattr(agent, "register", fake_register)
+
+    agent.setup_telemetry()
+
+    assert seen["name_at_register_time"] == agent.SERVICE_NAME
+
+
+def test_setup_telemetry_lets_a_deployment_override_the_service_name(monkeypatch):
+    """setdefault, not assignment: running two instances that need distinct
+    names should not require a code change."""
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "argus-staging")
+    monkeypatch.setenv("PHOENIX_ENABLED", "true")
+    monkeypatch.delenv("LOGFIRE_ENABLED", raising=False)
+    monkeypatch.setattr(agent, "register", lambda **kwargs: object())
+
+    agent.setup_telemetry()
+
+    assert os.environ["OTEL_SERVICE_NAME"] == "argus-staging"

@@ -1045,12 +1045,13 @@ def test_record_emits_a_span_an_alert_can_query(monkeypatch, isolated_subscriber
 
     news_push._record(55, users_db.PUSH_CHAT_NOT_FOUND, "gone", now, detail="BadRequest")
 
-    assert recorded == {
-        "push.outcome": users_db.PUSH_CHAT_NOT_FOUND,
-        "push.chat_id": 55,
-        "push.generated": True,      # billed: the digest was written before the send
-        "push.detail": "BadRequest",
-    }
+    assert recorded["push.outcome"] == users_db.PUSH_CHAT_NOT_FOUND
+    assert recorded["push.generated"] is True   # billed: digest written before the send
+    assert recorded["push.detail"] == "BadRequest"
+    # The opaque id, never the Telegram one -- a span leaves this machine.
+    assert "push.chat_id" not in recorded
+    assert recorded["push.subscriber"] == users_db.external_id(55)
+    assert "55" not in recorded["push.subscriber"]
 
 
 def test_record_marks_a_cycle_that_cost_nothing_as_not_generated(monkeypatch, isolated_subscribers_db):
