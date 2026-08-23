@@ -72,6 +72,27 @@ run() {
     return 1
 }
 
+# Runs one of tools/'s verification scripts from HERE, not inside the
+# container: they open their own SSH connections, and tools/ is
+# deliberately outside the Dockerfile COPY list so nothing under it exists
+# in the image.
+#
+# Defined up here with the other helpers, not next to its callers. A
+# refactor on 2026-08-23 left it defined AFTER the verify section, so bash
+# reported `host_check: command not found` for three checks and the script
+# still printed "Deployed and verified" in green -- a deploy that retired
+# Phoenix while its replacement went unverified.
+host_check() {
+    local name="$1"; shift
+    if "$PY" "$@" > "$LOGDIR/$name.log" 2>&1; then
+        ok "$name"
+    else
+        warn "$name FAILED -- see $LOGDIR/$name.log"
+        grep -iE "error|failed|refused|timed out" "$LOGDIR/$name.log" | tail -3 | sed 's/^/        /'
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # ---------------------------------------------------------------- preflight
 
 step "Preflight"
@@ -89,6 +110,16 @@ esac
 [ -f "$SSH_KEY" ] || die "ssh key not found at $SSH_KEY"
 SSH=(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=20 "$SSH_USER@$VM_IP")
 ok "target $SSH_USER@$VM_IP"
+
+# The project's interpreter, not whatever `python` resolves to. The tools
+# under tools/ import project modules -- check_logfire.py pulls in agent.py
+# for SERVICE_NAME, which needs langchain -- and a bare `python` on this
+# machine has none of that. Found 2026-08-23 when the check finally ran and
+# reported ModuleNotFoundError instead of a telemetry verdict.
+PY=$(conda run -n myfirstagent python -c "import sys; print(sys.executable)" 2>/dev/null | tr -d '')
+[ -x "$PY" ] || PY=python
+"$PY" -c "import langchain" 2>/dev/null     || die "no interpreter with the project's dependencies (tried: $PY). Is the myfirstagent env present?"
+ok "python: $PY"
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 [ "$BRANCH" = "main" ] || warn "on branch '$BRANCH', not main -- deploying it anyway"
@@ -252,6 +283,12 @@ ok "running the new image, restarts=$2"
 
 step "Verify"
 FAILURES=0
+# A helper that does not exist prints "command not found" and moves on, so
+# every check using it silently passes. Refuse to report on a run that
+# could not have checked anything.
+for fn in host_check run; do
+    declare -F "$fn" >/dev/null || die "internal: $fn is not defined -- verification cannot run"
+done
 
 # Wait for readiness rather than sleeping a fixed amount. A restart has to
 # activate the conda env, fetch four secrets from OCI Vault and register
@@ -322,7 +359,7 @@ step "Smoke tests"
 # The end-to-end check: this is what caught the DeepSeek thinking-mode
 # outage (3/10 passing, every settings command misrouted) when every other
 # check above was green.
-if python tools/run_smoke_tests.py --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
+if "$PY" tools/run_smoke_tests.py --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
         > "$LOGDIR/smoke.log" 2>&1; then
     ok "$(grep -oE '[0-9]+/[0-9]+ .*(passed|pass)' "$LOGDIR/smoke.log" | tail -1)"
 else
