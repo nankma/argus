@@ -1,7 +1,8 @@
 # Moving observability to Logfire
 
-Written 2026-08-21. Status: **live in production, three alerts running,
-Phoenix not yet retired.** Logfire receives real traffic under the right
+Written 2026-08-21. Status: **complete.** Logfire is the only telemetry
+backend, three alerts run against real production traffic, and the Phoenix
+VM is powered off. Logfire receives real traffic under the right
 service name, push outcomes arrive as spans, and criteria 1-3 of
 `incident-monitoring-plan.md` are alerts delivering to Telegram.
 
@@ -719,20 +720,53 @@ best done before there is a backlog of spans carrying the raw id.
    alert-only bot. Delivery confirmed by forcing a transition.
 6. Port criteria 2 and 3 from `incident-monitoring-plan.md` as SQL alerts.
 7. Internal id pseudonymisation.
-8. Retire the Phoenix VM — last, and only once everything above is live
+8. ~~Retire the Phoenix VM~~ **done 2026-08-24** — powered off after a
+   full day of clean production data on Logfire. Was: last, and only once everything above is live
    and verified.
 
-## Status
+## Status: migration complete, 2026-08-24
 
-Account registered 2026-08-21, token in Vault and working for both export
-and query. Gate A verified in full — SQL and scheduler. Steps 1-2 built and
-tested (483 tests green). The dead man's switch alert exists and is
-active but has nothing to watch and nowhere to report.
+Every step of the plan is done. Logfire is the only telemetry backend; the
+Phoenix VM is powered off with its 269 MB of traces intact on a persisted
+boot volume, service still `enabled`, so starting the instance from the OCI
+console brings the history back with no further steps.
 
-**Nothing is deployed.** Phoenix remains the live telemetry backend until
-step 8, and Logfire receives nothing from production until a deploy passes
-`LOGFIRE_API_KEY_SECRET_OCID` and `LOGFIRE_ENABLED`. Everything Logfire has
-seen so far came from local test runs.
+A full day of production data after the cutover, before the VM was stopped:
 
-The probe spans from the gate test are in the Logfire project under
-`service.name = argus-gate-probe`; they are throwaway and can be ignored.
+| | |
+|---|---|
+| services seen | `myfirstagent` only — no `unknown_service` |
+| heartbeats in 24h | **96** — exactly 4/hour, not one missed tick |
+| push outcomes | 7 delivered, nothing else |
+| errors after power-off | 0, bot running, restarts 0, 145 spans in 120s |
+
+The 96 is the number worth keeping: it means the push job never skipped a
+tick and the dead man's switch never had a reason to fire, so its silence
+is now informative rather than accidental — which was not true a week ago,
+when it was querying a service name production did not use.
+
+### What this cost, and what it caught
+
+Four defects surfaced during the migration, all of the same shape — a
+check that reported success without having verified anything:
+
+1. `service.name = unknown_service`, so the dead man's switch watched an
+   empty set from the day it was created.
+2. `host_check` undefined, so three verifications printed "command not
+   found" and the deploy still reported "verified" in green — in the very
+   run that retired Phoenix.
+3. That same helper then used a bare `python`, which has none of the
+   project's dependencies.
+4. `data-persistence` had never run at all, hidden behind (2).
+
+Each fix carries a guard rather than just a correction: a missing helper is
+now fatal, the interpreter is resolved in preflight, and `SERVICE_NAME` is
+one constant the checks import rather than repeat.
+
+### Left open, deliberately
+
+`tools/deploy.sh` detects changes to the image but not to the `docker run`
+command, so a flags-only change — retiring Phoenix was exactly that —
+reports "nothing in the image changed" and needs `--force`. True, and
+beside the point. Worth fixing; recorded rather than left implicit.
+
