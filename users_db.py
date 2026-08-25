@@ -244,6 +244,28 @@ def init_db() -> None:
         # Deliberately NOT recorded: the "not due yet" branch. It fires for
         # every subscriber on every tick, carries no signal healthcheck.py
         # doesn't already cover, and would dominate the table.
+        # One row per (subscriber, interest) that has ever been pushed.
+        # Rotation state, and only that: which of a subscriber's interests
+        # went out longest ago, so a cycle capped at
+        # MAX_INTERESTS_PER_PUSH still reaches all of them over time
+        # instead of always serving the first few.
+        #
+        # Keyed on the topic string rather than an index into the
+        # subscribers.interests JSON list, because that list is edited:
+        # removing the second of five interests would silently shift every
+        # index after it onto a different topic. A never-pushed topic has
+        # no row at all, which sorts first -- exactly the right default for
+        # a newly-added interest.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interest_push_state (
+                chat_id INTEGER NOT NULL,
+                topic TEXT NOT NULL,
+                last_pushed_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, topic)
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS push_outcomes (
@@ -280,6 +302,17 @@ def init_db() -> None:
 # verbatim, so wording here directly affects how every article is
 # classified. Kept exactly as they read in the original prompt so seeding
 # is behaviour-neutral.
+# How many interests one subscriber may follow. A cap rather than no cap
+# because every interest is its own retrieval, its own candidate set and
+# (since 2026-08-24) its own push message -- so an unbounded list is an
+# unbounded per-cycle cost and an unbounded number of messages.
+#
+# Set generously: the failure this guards against is a runaway list, not a
+# subscriber with varied tastes. MAX_INTERESTS_PER_PUSH in news_push.py is
+# what actually bounds the noise, and rotation covers the rest.
+MAX_INTERESTS = 10
+
+
 SEED_CATEGORIES: list[tuple[str, str]] = [
     ("AI", "AI models, research, agents, LLMs"),
     ("Software", "software products, dev tools, programming"),
@@ -1194,12 +1227,56 @@ def add_interest(chat_id: int, topic: str) -> list[str]:
     not just exact/case-insensitive, since the topic string is LLM-
     generated free text that varies phrasing between calls even for the
     same underlying interest. Stores the topic as given. Returns the
-    resulting full list."""
+    resulting full list.
+
+    Raises ValueError when the subscriber is already at MAX_INTERESTS,
+    rather than silently dropping the addition -- same convention as
+    set_push_interval_hours, and dispatch_settings turns it into a
+    sentence the subscriber actually reads. Re-adding something already
+    present is never refused, since that changes nothing."""
     interests = get_interests(chat_id)
-    if not any(_is_duplicate_topic(t, topic) for t in interests):
-        interests.append(topic)
-        set_interests(chat_id, interests)
+    if any(_is_duplicate_topic(t, topic) for t in interests):
+        return interests
+    if len(interests) >= MAX_INTERESTS:
+        raise ValueError(
+            f"you already follow {len(interests)} interests, which is the "
+            f"maximum of {MAX_INTERESTS} -- remove one first")
+    interests.append(topic)
+    set_interests(chat_id, interests)
     return interests
+
+
+def interests_by_staleness(chat_id: int, interests: list[str]) -> list[str]:
+    """`interests`, reordered longest-un-pushed first. Never-pushed topics
+    lead, in their existing order.
+
+    Returns a list rather than filtering, so the caller decides how many
+    to serve -- an interest with no new articles must not consume one of
+    the cycle's slots, and that is only knowable after candidate
+    selection."""
+    if not interests:
+        return []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT topic, last_pushed_at FROM interest_push_state WHERE chat_id = ?",
+            (chat_id,)).fetchall()
+    seen = {r[0]: r[1] for r in rows}
+    # "" sorts before any ISO timestamp, so never-pushed comes first.
+    # sorted() is itself stable, and the generator below already yields in
+    # `interests` order, so ties keep their original order for free -- no
+    # secondary key needed.
+    return sorted(interests, key=lambda t: seen.get(t, ""))
+
+
+def mark_interest_pushed(chat_id: int, topic: str, when: datetime) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO interest_push_state (chat_id, topic, last_pushed_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, topic) DO UPDATE SET last_pushed_at = excluded.last_pushed_at
+            """,
+            (chat_id, topic, when.isoformat()))
 
 
 def remove_interest(chat_id: int, topic: str) -> list[str]:

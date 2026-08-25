@@ -341,13 +341,31 @@ P2, hope is not a mechanism.
 flowchart TB
     T["scheduler tick — every 15 min"] --> D{"subscriber due?<br/>deterministic"}
     D -->|no| SKIP["skip, log outcome"]
-    D -->|yes| F["deterministic<br/>fetch across sources<br/>for that user's interests"]
-    F --> FILT["deterministic filter to genuinely new<br/>1. published timestamp<br/>2. previously-sent link set"]
-    FILT -->|nothing new| ADV["advance clock, send nothing"]
+    D -->|yes| ROT["order this user's interests<br/>longest-un-pushed first"]
+    ROT --> F["for each interest, up to<br/>MAX_INTERESTS_PER_PUSH:<br/>deterministic fetch for<br/>THAT interest alone"]
+    F --> FILT["deterministic filter to genuinely new<br/>1. published timestamp<br/>2. previously-sent link set<br/>3. what this cycle already sent"]
+    FILT -->|nothing new| NEXT["next interest —<br/>does not consume a slot"]
     FILT -->|new articles| W["single LLM call<br/>write prose from<br/>this fixed article list"]
     W --> V["Stage 3 verify"]
-    V --> SEND["send digest"]
+    V --> SEND["send one message<br/>for this interest"]
+    SEND --> NEXT
+    NEXT --> ADV["advance clock,<br/>record ONE outcome for the cycle"]
 ```
+
+**One message per interest, not one combined digest** (2026-08-24). The
+interest string *is* the retrieval query, and merging several of them into
+one candidate pool then asking one model call to cover all of it discards
+the specificity that made each one findable — the same "any category layer
+between the interest and the articles costs recall" result measured in
+`docs/analysis/cluster-measurements.md` (100% against 11% on quantum
+computing). `news_push.MAX_INTERESTS_PER_PUSH` bounds how noisy one cycle
+can be, and staleness ordering stops that bound from permanently starving
+whatever sorts last.
+
+Note what did **not** change: a cycle still records exactly one row in
+`push_outcomes`. The three live alert criteria are thresholds over that
+table, so emitting one row per message would have silently rescaled all
+three.
 
 **The LLM is used only for what it's uniquely good at — writing readable
 prose from a list it was handed.** Selection, deduplication, and

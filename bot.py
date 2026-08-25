@@ -335,6 +335,17 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
     # "/interests 光通訊" would otherwise be stored untranslated and search
     # for nothing. Same reasoning as dispatch_settings.
     raw = [t.strip() for t in text_after_command.split(",") if t.strip()]
+    # This command writes the list wholesale rather than going through
+    # users_db.add_interest, so it has to enforce the cap itself -- without
+    # this, "/interests a, b, c, ..." is a way straight past it. Refused
+    # rather than truncated, so the subscriber picks which ones survive
+    # instead of the parser picking for them.
+    if len(raw) > users_db.MAX_INTERESTS:
+        await update.message.reply_text(
+            f"That's {len(raw)} interests, and the maximum is "
+            f"{users_db.MAX_INTERESTS}. Send a shorter list."
+        )
+        return
     model = context.bot_data.get("guard_model")
     # Each interest is disambiguated against the others being set in the
     # same command -- "/interests AAOI, AOI, semiconductors" gives the

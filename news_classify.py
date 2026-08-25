@@ -364,9 +364,25 @@ class NormalizedInterest(BaseModel):
     # the field-order lesson from guardrails.OutputCheck.
     reasoning: str
     english: str
+    # An explicit judgment, made BEFORE the examples, because asking only
+    # for "narrower readings" gets them for everything -- almost any phrase
+    # has a narrower phrase. Measured against the live model on the first
+    # attempt: "Local LLM", "AI Agent" and "Optical communications" all
+    # came back with suggestions, which would have made the hint fire on
+    # nearly every interest and taught subscribers to ignore it.
+    is_umbrella: bool = False
+    # Empty when the interest is already specific enough to retrieve well.
+    # Non-empty means it is a broad umbrella, and these are concrete
+    # narrower readings of it -- used only to HINT, never to block or to
+    # ask a follow-up question, so an over-eager model costs a sentence
+    # rather than an interrogation.
+    #
+    # It rides along on the normalization call that already happens for
+    # every added interest, so the whole feature costs no extra request.
+    narrower_examples: list[str] = []
 
 
-def normalize_interest(model, text: str, alongside: list[str] | None = None) -> str | None:
+def normalize_interest_detailed(model, text: str, alongside: list[str] | None = None) -> "NormalizedInterest | None":
     """Turns a subscriber's stated interest into a short ENGLISH label.
 
     Interest text is not just displayed -- it is used as a live search
@@ -421,7 +437,21 @@ def normalize_interest(model, text: str, alongside: list[str] | None = None) -> 
                 "name: \"AAOI\" becomes \"AAOI Applied Optoelectronics\". "
                 "Prefer the term the industry press would actually use in a "
                 "headline over a literal translation. No punctuation, no "
-                "explanation."},
+                "explanation. "
+                "Also set is_umbrella. It is true ONLY for a whole "
+                "field or industry, the kind of word a newspaper "
+                "would name a section after: AI, tech, crypto, "
+                "software, hardware, robotics, biotech. It is FALSE "
+                "for anything that already names a specific "
+                "technology, product, company, ticker or research "
+                "area, even when a still-narrower phrase exists: AI "
+                "Agent, Local LLM, optical communications, quantum "
+                "sensing, AAOI and RISC-V are all false. When in "
+                "doubt, false. Only if is_umbrella is true, put 2-4 "
+                "concrete narrower readings in narrower_examples; "
+                "otherwise leave it empty. Never narrow it yourself "
+                "-- english stays the faithful label of what they "
+                "actually said."},
             {"role": "user", "content": _interest_request(text, alongside)},
         ])
     except Exception as exc:
@@ -429,4 +459,15 @@ def normalize_interest(model, text: str, alongside: list[str] | None = None) -> 
         return None
     if result is None or not result.english.strip():
         return None
-    return result.english.strip()
+    return result
+
+
+def normalize_interest(model, text: str, alongside: list[str] | None = None) -> str | None:
+    """The English label alone -- see normalize_interest_detailed, which
+    this wraps, for what the call actually does and why.
+
+    Kept as its own function because most callers want a string and
+    nothing else; only the add-an-interest path has any use for the
+    breadth hint."""
+    result = normalize_interest_detailed(model, text, alongside)
+    return result.english.strip() if result else None

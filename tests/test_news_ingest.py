@@ -664,3 +664,112 @@ def test_a_sectionless_source_still_uses_the_plain_source_key(
     no migration needed for rows already in the table."""
     assert news_ingest._cutoff_key("bbc_business", None) == "bbc_business"
     assert news_ingest._cutoff_key("arxiv", "cs.AI") == "arxiv:cs.AI"
+
+
+# --- is_latin_script: the ingestion-time language gate -------------------
+# A SCRIPT test rather than a language test, deliberately -- see the
+# function's own docstring and docs/analysis/cluster-measurements.md's
+# correction section for why the Spanish case below is a pass, not a bug.
+
+def test_non_latin_titles_are_rejected():
+    assert news_ingest.is_latin_script("費半急殺4.98%拖累，日經指數早盤急挫3%") is False
+    assert news_ingest.is_latin_script("Кремль объявил о новых санкциях") is False
+    assert news_ingest.is_latin_script("삼성전자 새로운 반도체 공장 건설 발표") is False
+
+
+def test_english_titles_are_kept():
+    assert news_ingest.is_latin_script(
+        "Genesis joins the giant electric SUV club with new GV90") is True
+
+
+def test_a_latin_script_language_that_is_not_english_is_kept():
+    """Accepted leakage. Catching it needs real language detection, and the
+    zero-dependency substitute (English function-word frequency) misfired on
+    7% of the snapshot's titles -- arxiv headlines barely use function words."""
+    assert news_ingest.is_latin_script(
+        "El Nino y la crisis de los semiconductores en Espana") is True
+
+
+def test_a_few_foreign_characters_do_not_condemn_an_english_title():
+    assert news_ingest.is_latin_script(
+        "OpenAI launches 日本語 support for ChatGPT users worldwide") is True
+
+
+def test_a_mostly_foreign_title_is_rejected_despite_latin_words():
+    """The real huggingface_blog case from the snapshot: a Latin product
+    name in front of an otherwise Japanese title."""
+    assert news_ingest.is_latin_script(
+        "Nemotron-Personas-Japan: ソブリン AI のための合成データセット") is False
+
+
+def test_a_title_with_no_letters_is_kept():
+    """Fails open, like the rest of this pipeline: there is nothing to
+    judge, so judging it would be inventing a verdict."""
+    assert news_ingest.is_latin_script("") is True
+    assert news_ingest.is_latin_script("2026 // 4.98% -- $100") is True
+
+
+def test_emoji_neither_save_nor_condemn_a_title():
+    assert news_ingest.is_latin_script("Baseten on Hugging Face Providers 🔥") is True
+
+
+def test_a_non_latin_article_is_never_cached(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, capsys
+):
+    """The whole point of gating at ingestion rather than at selection: a
+    language outlier that is only filtered from digests still pollutes the
+    embeddings, which is what put a Chinese fund prospectus at the top of
+    "most novel article in Finance"."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        news_sources, "enabled_sources",
+        lambda: [("bbc_business", lambda q, n: [
+            _article("https://e.com/en", title="Chip maker reports record quarter"),
+            _article("https://e.com/zh", title="費半急殺4.98%拖累，日經指數早盤急挫3%"),
+        ])])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Hardware"]}), now)
+
+    links = [a["link"] for a in news_cache.read_all()]
+    assert links == ["https://e.com/en"]
+    assert "dropped 1 non-Latin-script" in capsys.readouterr().out
+
+
+def test_a_cycle_of_only_non_latin_articles_classifies_nothing(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """The dropped articles must not reach the classifier either -- they are
+    the paid step, and a batch of them costs real money for rows that will
+    never be cached."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        news_sources, "enabled_sources",
+        lambda: [("bbc_business", lambda q, n: [
+            _article("https://e.com/zh", title="費半急殺4.98%拖累，日經指數早盤急挫3%"),
+        ])])
+    model = _fake_classifying_model({0: ["Hardware"]})
+
+    news_ingest.run_ingestion_cycle(model, now)
+
+    assert news_cache.read_all() == []
+    model.with_structured_output.return_value.invoke.assert_not_called()
+
+
+def test_a_dropped_article_is_not_counted_as_already_cached(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, capsys
+):
+    """The per-source line derives "already cached" by subtraction, so a new
+    counter that isn't subtracted turns into a silent miscount in the one
+    place a human would look to check this filter's blast radius."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        news_sources, "enabled_sources",
+        lambda: [("bbc_business", lambda q, n: [
+            _article("https://e.com/en", title="Chip maker reports record quarter"),
+            _article("https://e.com/zh", title="費半急殺4.98%拖累，日經指數早盤急挫3%"),
+        ])])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Hardware"]}), now)
+
+    out = capsys.readouterr().out
+    assert "1 new, 0 already cached, 1 dropped as non-Latin" in out

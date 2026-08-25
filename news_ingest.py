@@ -74,6 +74,7 @@ reasoning.
 
 import functools
 import time
+import unicodedata
 from datetime import datetime, timezone
 
 import healthcheck
@@ -102,6 +103,55 @@ DEFAULT_INTERVAL_HOURS = 4
 # other sources' limits aren't always documented, and this is cheap
 # regardless (cycles run every 4h+).
 REQUEST_DELAY_SECONDS = 1.1
+
+# Above this share of non-Latin letters, an article is dropped at ingestion
+# and never cached. Measured on the 2026-08-21 snapshot: 66 of 2,706 titles
+# (2.4%) are over it, 65 of them from newsapi -- Traditional Chinese market
+# reports, a Japanese HuggingFace post, and so on.
+#
+# They were not reaching digests (newsapi is in RESTRICTED_SOURCES, which
+# select_candidate_articles skips), but they were being cached, embedded and
+# clustered, where a language outlier is maximally distant from an
+# English-dominant corpus by construction. That is what put a Chinese fund
+# prospectus at the top of "most novel article in Finance" in
+# docs/analysis/cluster-measurements.md -- a measurement artifact rather
+# than a finding.
+MAX_NON_LATIN_RATIO = 0.30
+
+
+def is_latin_script(text: str) -> bool:
+    """Whether `text` is written predominantly in the Latin alphabet.
+
+    A SCRIPT test, not a language test, and the distinction is the whole
+    design. It drops Chinese, Japanese, Korean, Arabic, Cyrillic,
+    Devanagari, Thai and Hebrew; it does NOT drop Spanish, French or
+    German, and is not meant to -- that leakage is accepted rather than
+    chased, because the alternatives are worse:
+
+    - A language-detection library is a new dependency for a job that a
+      character scan does. This repo has already been bitten once by a
+      dependency's transitive imports (see CLAUDE.md on arize-phoenix).
+    - The obvious zero-dependency substitute -- scoring English function
+      words -- was measured against the same snapshot and flagged 7% of
+      titles wrongly, because headlines drop articles and arxiv titles
+      barely use them at all ("Fast high-dimensional mean testing via
+      logistic regression" reads as non-English to that heuristic).
+
+    Non-letters are ignored entirely, so punctuation, digits and emoji
+    neither save nor condemn a title. Text with no letters at all is
+    kept: there is nothing to judge, and this pipeline fails open
+    everywhere else for the same reason.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return True
+    non_latin = sum(
+        1 for c in letters
+        if not unicodedata.name(c, "").startswith("LATIN")
+    )
+    return non_latin / len(letters) <= MAX_NON_LATIN_RATIO
+
+
 _DEFAULT_QUERY = "technology"
 
 # Per-source pull interval, in hours -- docs/plans/local-news-cache-plan.md's
@@ -274,6 +324,7 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
     # real, paid DeepSeek classification call every cycle for no reason.
     existing_links = {a["link"] for a in news_cache.read_all() if a.get("link")}
     total_duplicates_skipped = 0
+    non_latin_skipped = 0
 
     for source_key, fetch in news_sources.enabled_sources():
         last_pulled_at = users_db.get_source_last_pulled_at(source_key)
@@ -298,6 +349,7 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
         sections = _sections_for_source(source_key, now)
         source_articles = 0
         source_new = 0
+        source_non_latin = 0
         for i, section in enumerate(sections):
             # Read per section, not once for the source -- see _cutoff_key.
             last_article_dt = users_db.get_source_last_article_dt(
@@ -355,6 +407,17 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
                 if link in existing_links:
                     total_duplicates_skipped += 1
                     continue
+                # Checked on the title, not the summary: a summary can
+                # quote a foreign-language statement inside an otherwise
+                # English article, and the title is what every downstream
+                # consumer -- classification, embedding, the digest
+                # listing -- actually reads. Deliberately NOT added to
+                # existing_links, so this costs one string scan per cycle
+                # rather than being remembered as "seen".
+                if not is_latin_script(article.get("title") or ""):
+                    non_latin_skipped += 1
+                    source_non_latin += 1
+                    continue
                 existing_links.add(link)
                 fetched.append((source_key, article))
                 source_new += 1
@@ -373,8 +436,14 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
         print(
             f"[news_ingest] {source_key}: fetched {source_articles} article(s) across "
             f"{len(sections)} section{'' if len(sections) == 1 else 's'} -- "
-            f"{source_new} new, {source_articles - source_new} already cached"
+            f"{source_new} new, "
+            f"{source_articles - source_new - source_non_latin} already cached, "
+            f"{source_non_latin} dropped as non-Latin"
         )
+
+    if non_latin_skipped:
+        print(f"[news_ingest] dropped {non_latin_skipped} non-Latin-script "
+              f"article(s) at ingestion (see is_latin_script)")
 
     if not fetched:
         print(

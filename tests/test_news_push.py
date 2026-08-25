@@ -1076,3 +1076,205 @@ def test_record_marks_a_cycle_that_cost_nothing_as_not_generated(monkeypatch, is
 
     assert recorded["push.generated"] is False
     assert "push.detail" not in recorded      # nothing to say, so nothing sent
+
+
+# --- one message per interest, rotated ------------------------------------
+# The single combined digest these replace merged every interest into one
+# candidate pool and one model call, which discards the specificity that
+# made each interest findable in the first place -- see
+# docs/analysis/cluster-measurements.md on any category layer between the
+# interest and the articles costing recall.
+
+
+def _per_topic_cycle(monkeypatch, chat_id, articles_by_topic, subscriber=None,
+                     now=None, send=None, on_topic=True, record_push=None):
+    """A cycle where each interest has its own candidate articles, so the
+    per-interest loop is actually exercised rather than collapsing onto one."""
+    now = now or datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    sub = subscriber or _subscriber(chat_id, interests=list(articles_by_topic))
+    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [sub])
+    monkeypatch.setattr(users_db, "record_push", record_push or MagicMock())
+    _stub_cache_and_categories(monkeypatch)
+
+    def fake_select(cached, topics, cats, since, already_pushed, **kwargs):
+        topic = topics[0]
+        return [{**_article(link), "topic": topic}
+                for link in articles_by_topic.get(topic, [])
+                if link not in already_pushed]
+
+    monkeypatch.setattr(news_push, "select_candidate_articles", fake_select)
+    # Echoes every candidate's link back, so links_actually_sent sees them.
+    monkeypatch.setattr(
+        news_push, "write_push_digest",
+        lambda model, arts, language=None: "<b>D</b> " + " ".join(
+            f'<a href="{a["link"]}">s</a>' for a in arts))
+    monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
+                        MagicMock(return_value=on_topic))
+    send = send or AsyncMock()
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    return send
+
+
+def test_each_interest_gets_its_own_message(monkeypatch, isolated_subscribers_db):
+    send = _per_topic_cycle(monkeypatch, 40, {
+        "AI": ["https://e.com/ai"],
+        "Robotics": ["https://e.com/robots"],
+    })
+
+    assert send.await_count == 2
+    bodies = " ".join(call.args[1] for call in send.await_args_list)
+    assert "https://e.com/ai" in bodies and "https://e.com/robots" in bodies
+
+
+def test_several_messages_still_record_one_outcome(monkeypatch, isolated_subscribers_db):
+    """One row per subscriber per cycle, NOT one per message. The three live
+    alert criteria are thresholds over this table, and a cycle that emits N
+    rows instead of 1 silently rescales every one of them."""
+    _per_topic_cycle(monkeypatch, 41, {
+        "AI": ["https://e.com/ai"],
+        "Robotics": ["https://e.com/robots"],
+        "Optics": ["https://e.com/optics"],
+    })
+
+    assert users_db.recent_outcomes_for(41) == [users_db.PUSH_DELIVERED]
+
+
+def test_an_interest_with_nothing_new_does_not_consume_a_slot(
+    monkeypatch, isolated_subscribers_db
+):
+    """The cap counts messages sent, not interests examined -- otherwise a
+    quiet interest sitting at the front of the rotation would spend the
+    whole cycle's budget on nothing."""
+    monkeypatch.setattr(news_push, "MAX_INTERESTS_PER_PUSH", 2)
+    send = _per_topic_cycle(monkeypatch, 42, {
+        "AI": ["https://e.com/ai"],
+        "Quiet": [],
+        "Robotics": ["https://e.com/robots"],
+    })
+
+    assert send.await_count == 2
+    bodies = " ".join(call.args[1] for call in send.await_args_list)
+    assert "https://e.com/robots" in bodies
+
+
+def test_the_cap_defers_interests_rather_than_dropping_them(
+    monkeypatch, isolated_subscribers_db
+):
+    """Longest-un-pushed first, so the queue drains over cycles instead of
+    permanently starving whatever sorts last."""
+    monkeypatch.setattr(news_push, "MAX_INTERESTS_PER_PUSH", 1)
+    by_topic = {"AI": ["https://e.com/ai"], "Robotics": ["https://e.com/robots"]}
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+
+    first = _per_topic_cycle(monkeypatch, 43, by_topic, now=now)
+    assert first.await_count == 1
+    assert "https://e.com/ai" in first.await_args_list[0].args[1]
+
+    # Second cycle: AI has now been pushed, Robotics never has.
+    second = _per_topic_cycle(
+        monkeypatch, 43, by_topic,
+        subscriber=_subscriber(43, interests=["AI", "Robotics"]),
+        now=now + timedelta(hours=25))
+    assert second.await_count == 1
+    assert "https://e.com/robots" in second.await_args_list[0].args[1]
+
+
+def test_an_article_matching_two_interests_is_sent_once(
+    monkeypatch, isolated_subscribers_db
+):
+    """record_push only runs at the end of the cycle, so pushed_links cannot
+    know what this cycle already delivered. Without the union, a shared
+    article goes out twice in the same push."""
+    shared = "https://e.com/shared"
+    send = _per_topic_cycle(monkeypatch, 44, {"AI": [shared], "Robotics": [shared]})
+
+    assert send.await_count == 1
+
+
+def test_only_interests_actually_sent_are_marked_pushed(
+    monkeypatch, isolated_subscribers_db
+):
+    _per_topic_cycle(monkeypatch, 45, {"AI": ["https://e.com/ai"], "Quiet": []})
+
+    ordered = users_db.interests_by_staleness(45, ["AI", "Quiet"])
+    assert ordered == ["Quiet", "AI"], "the un-served interest must still lead"
+
+
+def test_a_send_failure_keeps_what_was_already_delivered(
+    monkeypatch, isolated_subscribers_db
+):
+    """A send can succeed and a later one fail. Recording [] there would
+    leave articles the subscriber genuinely received still eligible, and
+    they would be sent again."""
+    record_push = MagicMock()
+    send = AsyncMock(side_effect=[None, Exception("Chat not found")])
+    _per_topic_cycle(monkeypatch, 46, {
+        "AI": ["https://e.com/ai"],
+        "Robotics": ["https://e.com/robots"],
+        "Optics": ["https://e.com/optics"],
+    }, send=send, record_push=record_push)
+
+    assert send.await_count == 2, "the third interest must not be attempted"
+    assert record_push.call_args.args[1] == ["https://e.com/ai"]
+    assert users_db.recent_outcomes_for(46) == [users_db.PUSH_CHAT_NOT_FOUND]
+
+
+def test_every_interest_blocked_records_blocked_not_delivered(
+    monkeypatch, isolated_subscribers_db
+):
+    _per_topic_cycle(monkeypatch, 47, {
+        "AI": ["https://e.com/ai"], "Robotics": ["https://e.com/robots"],
+    }, on_topic=False)
+
+    assert users_db.recent_outcomes_for(47) == [users_db.PUSH_BLOCKED]
+
+
+def test_no_interest_having_anything_new_records_nothing_new(
+    monkeypatch, isolated_subscribers_db
+):
+    _per_topic_cycle(monkeypatch, 48, {"AI": [], "Robotics": []})
+
+    assert users_db.recent_outcomes_for(48) == [users_db.PUSH_NOTHING_NEW]
+
+
+def test_a_partial_block_is_visible_in_the_delivered_detail(
+    monkeypatch, isolated_subscribers_db
+):
+    """Some interests delivered, one blocked, in the same cycle. The
+    delivered-wins branch must not swallow the blocked count -- an
+    intermittently-misfiring guardrail on one interest would otherwise be
+    invisible for as long as the subscriber's other interests kept
+    succeeding."""
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    sub = _subscriber(49, interests=["AI", "Robotics"])
+    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [sub])
+    record_push = MagicMock()
+    monkeypatch.setattr(users_db, "record_push", record_push)
+    _stub_cache_and_categories(monkeypatch)
+
+    by_topic = {"AI": ["https://e.com/ai"], "Robotics": ["https://e.com/robots"]}
+
+    def fake_select(cached, topics, cats, since, already_pushed, **kwargs):
+        topic = topics[0]
+        return [{**_article(link), "topic": topic}
+                for link in by_topic.get(topic, []) if link not in already_pushed]
+
+    monkeypatch.setattr(news_push, "select_candidate_articles", fake_select)
+    monkeypatch.setattr(
+        news_push, "write_push_digest",
+        lambda model, arts, language=None: "<b>D</b> " + " ".join(
+            f'<a href="{a["link"]}">s</a>' for a in arts))
+    # AI's digest passes the guardrail, Robotics' is blocked.
+    monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
+                        lambda model, digest: "https://e.com/ai" in digest)
+
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+
+    assert users_db.recent_outcomes_for(49) == [users_db.PUSH_DELIVERED]
+    record_push.assert_called_once()  # not one call per interest
+    # The detail column, not just the outcome name, must show the block.
+    with users_db._connect() as conn:
+        row = conn.execute(
+            "SELECT detail FROM push_outcomes WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
+            (49,)).fetchone()
+    assert row[0] == "1 interest(s), 1 blocked"

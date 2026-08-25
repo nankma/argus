@@ -1091,3 +1091,165 @@ provide: collapse near-identical vectors (cosine above ~0.95) to one
 representative at candidate-selection time. That serves both purposes at
 once — subscribers stop receiving the same wire story twice, and the
 story-level hotness signal stops counting one syndicated piece as nine.
+
+---
+
+# Correction, 2026-08-24: both "junk" exhibits were measurement artifacts
+
+The section above concluded that "a naive farthest-point pick will surface
+junk before it surfaces genuine novelty -- and it would do so on every
+single digest," and required a quality floor before novelty selection could
+be trusted. It rested on two exhibits. Neither survives inspection: both
+are properties of the measurement harness, not of the corpus.
+
+This is the third finding in this project with that shape, after
+`service.name=unknown_service` (a dead man's switch watching a service name
+production never set) and the 28% coverage artifact corrected earlier in
+this same document. The common cause each time: **the harness did not
+reproduce what production actually does.**
+
+## Exhibit 1 -- "plus infectious disease experts to Gujarat, with AI"
+
+Not a mis-parsed headline. The snapshot collector cut it.
+
+`fetch_cache_snapshot.py` read each field with `grep -m1 '^title:'`, which
+takes only the first *physical* line. PyYAML wraps at 80 columns by
+default, so every title longer than that arrived pre-truncated. Reproduced
+exactly, with the real headline:
+
+```
+title: CIDSCON 2026 to bring 950-plus infectious disease experts to Gujarat, with
+  AI and AMR in focus
+```
+
+`grep -m1` yields `CIDSCON 2026 to bring 950-plus infectious disease experts
+to Gujarat, with`.
+
+The corpus-wide symptom was there to be seen and was missed: **the longest
+title in a 2,706-article snapshot is 94 characters, and every one of the 21
+sources has a p95 near 80** -- including arxiv, whose paper titles routinely
+run past 150.
+
+The full headline is a genuinely good pick for an AI subscriber. A medical
+conference where AI and antimicrobial resistance are on the agenda is
+exactly the "in the area, unlike a typical article in it" shape novelty
+selection is supposed to find. **The vector was right; the string was
+broken.**
+
+Fixed: `yaml_get()` in that collector now joins the continuation lines, with
+a `command -v awk` guard so a container without awk fails loudly instead of
+emitting empty fields.
+
+## Exhibit 2 -- the Chinese-language fund prospectus in an English pool
+
+Real, but production already excludes it. 65 of the 66 non-Latin-script
+titles in the snapshot come from `newsapi`, which is in
+`news_sources.RESTRICTED_SOURCES`; `news_push.select_candidate_articles`
+skips restricted sources unless `include_restricted` is set, so **not one of
+those articles can reach a digest today.**
+
+`measure_hotspots.py` has no source filter at all -- no mention of
+`RESTRICTED_SOURCES`, `newsapi` or `perigon` anywhere in it. It ranked
+novelty over a pool containing 65 articles production would never send.
+
+## What this invalidates
+
+The quality floor the section above called for was already in production for
+the case it was written about. The remaining gap was never in the selection
+logic; it was that the harness measured a different pool than the bot
+serves.
+
+The narrower true finding survives: a language outlier *in the vector space*
+is maximally distant from an English-dominant corpus by construction. That
+matters for embeddings, clustering and centroids -- which those articles
+were still polluting, because being excluded from a digest is not the same
+as being excluded from the cache.
+
+## Decision taken, 2026-08-24: drop non-Latin scripts at ingestion
+
+`news_ingest.is_latin_script` now gates every article before it is cached,
+so a non-English article is never embedded, clustered or classified. It
+drops 66 of 2,706 titles (2.4%) on the snapshot, 65 of them from `newsapi`.
+
+Deliberately a **script** test, not a language test. It drops Chinese,
+Japanese, Korean, Arabic, Cyrillic, Devanagari, Thai and Hebrew. It does not
+drop Spanish, French or German, and is not meant to -- that leakage is
+accepted rather than chased:
+
+- a language-detection library is a new dependency for a job a character
+  scan does, and this repo has been bitten once already by a dependency's
+  transitive imports (CLAUDE.md, on `arize-phoenix`);
+- the zero-dependency substitute, scoring English function words, was
+  measured against this snapshot and **misfired on 7% of titles**, because
+  headlines drop function words and arxiv titles barely use them at all
+  ("Fast high-dimensional mean testing via logistic regression" reads as
+  non-English to it).
+
+Gating at ingestion rather than at selection is the reversibility trade
+being made knowingly: a filtered-at-selection article is still available to
+a later change of mind, a never-cached one is not. The call was that a clean
+corpus is worth more than that option.
+
+## The corrected offbeat score: a gate, not a sum
+
+"Offbeat" is not the same as "novel", and neither is a genre label. The
+distinction that drives the formula: *AI + leak* is ordinary AI news, while
+*AI + stray cats* is offbeat. Offbeat is an unexpected **pairing**, and
+pairings cannot be enumerated in advance the way genres can -- which is
+precisely why it has to be a distance rather than a tag.
+
+The obvious two-term score is wrong:
+
+    score = sim(article, interest_query) - sim(article, area_centroid)
+
+A linear combination lets a high query-match buy back a high centroid-match.
+Measured on the cleaned pool, the top AI result under this score was
+`'Agent Applications: A Reference Architecture for AI Agent Systems'` at
+centroid similarity **+0.622** -- about as central as an article can be.
+
+The working form is a **gate followed by a ranking**:
+
+1. keep articles whose similarity to the interest query is at or above the
+   area median (they must still be in the area);
+2. among the survivors, rank by *lowest* similarity to the area centroid.
+
+Measured with model2vec `potion-base-8M` on the cleaned pool (838 articles:
+2,706 less 65 restricted, 349 truncation-suspect, 1 non-Latin, 1,437 with no
+category, and exact-duplicate titles):
+
+| area | pool | survive gate | top picks by lowest centroid similarity |
+|---|---|---|---|
+| AI | 393 | 197 | `AI may force govt to renegotiate bilateral tax treaties` (c=+0.267); `Run frontier LLMs on sovereign EU infrastructure` (+0.170); `'Mjolnir: Automated Cross-Vendor Adversarial Review'` (+0.257) |
+| Hardware | 126 | 63 | `India, Singapore sign pacts on telecom, food security; discuss SMRs, chips` (+0.282); `Search for Majorana Bound States in Short Chains of Proximitised Quantum...` (+0.270) |
+| Finance | 180 | 90 | `Moderna and Merck shares soar on mRNA cancer vaccine` (+0.206); `'FinRCA-Bench: Benchmarking Evidence Retrieval and Reasoning for Financial...'` (+0.224) |
+
+For contrast, the most central AI articles score c=+0.731 (`AI Influence
+Level (Ail) v1.0`) and +0.707 (`The AI Debate Is About Control, Not AI`).
+
+*AI x international tax law* and *chips x diplomacy x small modular reactors*
+are the target shape. Honest assessment: **roughly three of five picks per
+area are genuinely offbeat, and none are garbage.** The weaker survivors
+(`Seel, Which Manages $6 Billion Of GMV Annually, Launches Resale` in AI,
+`The Pixel 11 paradox` in Hardware) are there because their category tags
+are wrong -- a classification problem, not a scoring one.
+
+## Still open
+
+- **Re-pull a snapshot with the fixed collector.** Every number in this
+  document above the correction line was computed on truncated titles. The
+  349 articles held out as truncation-suspect here are mostly not truncated
+  at all; they were simply longer than 78 characters.
+- **Whether any real source-side truncation exists** is unknown, and cannot
+  be known until that re-pull. Do not build a repair for it first. Of the
+  zero-token detectors tried, only three are worth keeping: a trailing
+  ellipsis, a trailing comma, and merging title with summary on their
+  longest overlap (which recovers the Gujarat headline, but fired on only 4
+  rows corpus-wide, 3 of them duplicates of each other). The "headline opens
+  with a continuation word" rule flagged 14.7% of the corpus and is unusable
+  -- it catches every title starting with "A" or "The".
+- **Exact-duplicate articles are in the cache**, not just near-duplicates:
+  rows 1191 and 1224 of the 0821 snapshot are the same article. The cosine
+  >= 0.95 collapse this document argues for is still wanted, and would
+  subsume this.
+- **The gate threshold is the area median**, chosen for having no better
+  reason. It should be fitted once there is a clean corpus to fit it on.
