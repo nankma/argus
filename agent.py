@@ -308,6 +308,7 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
     if category == "set_interest":
         before = users_db.get_interests(chat_id)
         topic = classification.topic
+        narrower: list[str] = []
         if model is not None:
             # Translated at WRITE time, while the subscriber is here. The
             # alternative -- translating at query time -- would repeat the
@@ -321,9 +322,21 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
             # which is what guessing looks like. With the subscriber's own
             # AAOI/semiconductors/光通訊 alongside it, it resolves to
             # automated optical inspection.
-            topic = news_classify.normalize_interest(
-                model, topic, alongside=before) or topic
-        after = users_db.add_interest(chat_id, topic)
+            detail = news_classify.normalize_interest_detailed(
+                model, topic, alongside=before)
+            if detail is not None:
+                topic = detail.english.strip() or topic
+                # Gated on the explicit judgment, not on the list being
+                # non-empty: the model will happily suggest narrower
+                # phrasings for an already-specific interest.
+                if detail.is_umbrella:
+                    narrower = detail.narrower_examples[:3]
+        try:
+            after = users_db.add_interest(chat_id, topic)
+        except ValueError as exc:
+            # At the cap. Said plainly and with the way out, rather than
+            # accepting the message and silently not storing it.
+            return f"Couldn't add {topic} -- {exc}."
         # `topic`, not classification.topic: the confirmation must name what
         # was actually stored. Saying "Added 光通訊" while the database holds
         # "Optical Communications" is the exact opposite of the reason for
@@ -332,7 +345,24 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
         # would see it.
         if len(after) == len(before):
             return f"You already have {topic} in your interests, so nothing new was added."
-        return f"Added {topic} to your interests."
+        reply = f"Added {topic} to your interests."
+        if narrower:
+            # A hint, deliberately not a question. Asking would need state
+            # ("this subscriber owes me an answer") that the next message
+            # would otherwise be routed straight past, and most people
+            # never come back to a question anyway. A sentence they can
+            # act on now or ignore costs nothing either way.
+            #
+            # Worth saying at all because breadth is the single largest
+            # measured lever on retrieval quality: querying with the
+            # subscriber's own interest string scored 100% against 11% for
+            # the same interest routed through a broad category
+            # (docs/analysis/cluster-measurements.md).
+            reply += (f" One thing though -- {topic} is broad, so its digests "
+                      f"will be scattershot. Something like "
+                      f"{', or '.join(narrower)} pulls far better; tell me one "
+                      f"and I'll add it.")
+        return reply
 
     if category == "remove_interest":
         before = users_db.get_interests(chat_id)

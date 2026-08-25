@@ -58,6 +58,15 @@ import news_sources
 import users_db
 from opentelemetry import trace
 
+# How many messages one push cycle may send to one subscriber -- one per
+# interest, so this is also "how many interests get served this cycle".
+#
+# Bounded because a subscriber at users_db.MAX_INTERESTS on a 8h interval
+# would otherwise receive 30 messages a day. Interests that don't fit
+# aren't dropped, they wait: interests_by_staleness puts the
+# longest-un-pushed first, so the queue drains over successive cycles.
+MAX_INTERESTS_PER_PUSH = 5
+
 MAX_ARTICLES_PER_TOPIC = 5
 
 # Ceiling on how old an article's own publication date may be to still be
@@ -550,92 +559,130 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
         delivered: list[str] | None = None
         try:
             topic_categories = _model_call(resolve_interest_categories, model, interests)
-            new_articles = select_candidate_articles(
-                cached_articles,
-                interests,
-                topic_categories,
-                subscriber["last_push_at"],
-                set(subscriber["pushed_links"]),
-                include_restricted=subscriber["restricted_sources_enabled"],
-                now=now,
-            )
-            if not new_articles:
-                # Nothing new this cycle -- still advance last_push_at so
-                # the next check is a full interval away instead of
-                # re-fetching every tick until something new shows up.
-                _record(chat_id, users_db.PUSH_NOTHING_NEW,
-                        "due, but no new articles -- advancing last_push_at only", now)
-                users_db.record_push(chat_id, [], now)
-                continue
+            # One message per interest, longest-un-pushed first. Two
+            # reasons this replaced a single combined digest:
+            #
+            # Retrieval. The interest string IS the query, and merging
+            # five of them into one candidate pool then asking one model
+            # call to write about all of it discards the specificity that
+            # made each one findable -- the same "any category layer
+            # between the interest and the articles costs recall" result
+            # measured in docs/analysis/cluster-measurements.md.
+            #
+            # Rotation. MAX_INTERESTS_PER_PUSH bounds how noisy a cycle
+            # can be, and staleness ordering is what stops that bound from
+            # permanently starving whatever sorts last. An interest with no
+            # new articles does NOT consume one of the cycle's slots --
+            # only a message that was actually sent does.
+            sent = 0
+            blocked = 0
+            send_failure: tuple[str, str] | None = None
+            for topic in users_db.interests_by_staleness(chat_id, interests):
+                if sent >= MAX_INTERESTS_PER_PUSH:
+                    break
+                new_articles = select_candidate_articles(
+                    cached_articles,
+                    [topic],
+                    topic_categories,
+                    subscriber["last_push_at"],
+                    # What this cycle has already delivered counts as seen
+                    # too. Without the union, an article that matches two
+                    # of a subscriber's interests goes out twice in the
+                    # same push -- record_push only runs at the end, so
+                    # pushed_links cannot know about it yet.
+                    set(subscriber["pushed_links"]) | set(delivered or []),
+                    include_restricted=subscriber["restricted_sources_enabled"],
+                    now=now,
+                )
+                if not new_articles:
+                    continue
 
-            digest = _model_call(write_push_digest, model, new_articles, subscriber["language"])
-            delivered = []          # generated; nothing has reached them yet
+                digest = _model_call(write_push_digest, model, new_articles,
+                                     subscriber["language"])
+                # Generated: the money is spent from here on, so the next
+                # attempt must be a full interval away even if the rest of
+                # this fails. See the module's `delivered` reasoning.
+                if delivered is None:
+                    delivered = []
 
-            if not digest or not digest.strip():
-                # Stage 2 (the model's own content judgment) decided none
-                # of the stage-1 candidates were genuinely relevant -- see
-                # _PUSH_DIGEST_PROMPT's explicit "write nothing" instruction.
-                # Not an error. last_push_at still advances (record_push does
-                # that regardless) so the next attempt is a full interval
-                # away rather than retrying every tick.
-                #
-                # Records NO links, because nothing was sent. Recording the
-                # candidates here would retire articles the subscriber never
-                # saw: pushed_links is the "already seen" filter, and an
-                # article that merely lost this cycle's relevance judgment
-                # has not been seen and must stay eligible for a later
-                # digest. Same rule as the guardrail-blocked branch below
-                # and as links_actually_sent.
-                _record(chat_id, users_db.PUSH_NOT_RELEVANT,
-                        "candidates found but none judged relevant -- not sending", now)
-                users_db.record_push(chat_id, [], now)
-                continue
+                if not digest or not digest.strip():
+                    # Stage 2 judged none of this interest's candidates
+                    # genuinely relevant -- see _PUSH_DIGEST_PROMPT's
+                    # explicit "write nothing" instruction. Not an error,
+                    # and nothing is retired: an article that merely lost a
+                    # relevance judgment has not been seen.
+                    continue
 
-            # A stored interest is user-supplied, unsanitized text (see
-            # agent.py's dispatch_settings) that ends up embedded in the
-            # digest prompt above -- the same output-guardrail check
-            # bot.py runs on chat replies applies here too, since this is
-            # also model output about to be sent to a real user unread.
-            if _model_call(guardrails.is_output_on_topic, model, digest):
+                # A stored interest is user-supplied, unsanitized text that
+                # ends up embedded in the digest prompt, so the same output
+                # guardrail bot.py runs on chat replies applies here.
+                if not _model_call(guardrails.is_output_on_topic, model, digest):
+                    blocked += 1
+                    continue
+
                 try:
                     await send(chat_id, digest)
                 except Exception as exc:
-                    # Generation already happened and was already billed;
-                    # only delivery failed. Recorded as its own outcome so
-                    # "we paid to write digests nobody can receive" is a
-                    # question the data can answer -- the exact shape of
-                    # the 2026-08-21 incident, which until now landed in
-                    # the catch-all below as an ordinary "cycle failed".
-                    outcome = _classify_send_failure(exc)
-                    detail = repr(exc)
-                    _record(chat_id, outcome,
-                            f"digest generated but delivery failed with {detail}",
-                            now, detail=detail)
-                    # No links: nothing was seen, so nothing is retired.
-                    # Same rule as the guardrail-blocked branch below.
-                    users_db.record_push(chat_id, [], now)
-                    if outcome == users_db.PUSH_CHAT_NOT_FOUND:
-                        _strike_unreachable_subscriber(chat_id, now)
-                    continue
-                # Only what the subscriber actually saw is recorded as seen.
-                # A candidate the model left out stays eligible for a later
-                # digest rather than being silently retired unread -- see
-                # links_actually_sent and select_candidate_articles.
-                # The send landed, so retire what they actually saw before
-                # anything below can fail -- see `delivered`'s comment.
-                delivered = links_actually_sent(digest, new_articles)
-                detail = f"{len(delivered)} of {len(new_articles)} candidate(s)"
-                _record(chat_id, users_db.PUSH_DELIVERED,
-                        f"sent digest -- {detail} appeared in it", now, detail=detail)
-            else:
-                # Blocked before delivery, so nothing was seen and nothing is
-                # recorded as seen. last_push_at still advances (below), so
-                # the next attempt is a full interval away rather than
-                # retrying every tick.
-                _record(chat_id, users_db.PUSH_BLOCKED,
-                        "digest blocked by output guardrail, not sent", now)
+                    # Delivery failed, not generation. Recorded as its own
+                    # outcome so "we paid to write digests nobody can
+                    # receive" stays answerable -- the shape of the
+                    # 2026-08-21 incident.
+                    #
+                    # Stops this subscriber's remaining interests rather
+                    # than trying them: whatever makes one send fail
+                    # (blocked bot, deleted chat, Telegram down) applies to
+                    # the next one too, and retrying would multiply the
+                    # failure by MAX_INTERESTS_PER_PUSH.
+                    send_failure = (_classify_send_failure(exc), repr(exc))
+                    break
 
-            users_db.record_push(chat_id, delivered, now)
+                # Only what the subscriber actually saw is retired. A
+                # candidate the model left out stays eligible for a later
+                # digest -- see links_actually_sent.
+                delivered.extend(links_actually_sent(digest, new_articles))
+                users_db.mark_interest_pushed(chat_id, topic, now)
+                sent += 1
+
+            if send_failure is not None:
+                outcome, detail = send_failure
+                _record(chat_id, outcome,
+                        f"{sent} message(s) sent, then delivery failed with {detail}",
+                        now, detail=detail)
+                if outcome == users_db.PUSH_CHAT_NOT_FOUND:
+                    _strike_unreachable_subscriber(chat_id, now)
+            elif sent:
+                # One outcome per subscriber per cycle, NOT one per message.
+                # The three live alert criteria in
+                # docs/plans/incident-monitoring-plan.md are thresholds over
+                # this table; making a cycle emit N rows instead of 1 would
+                # silently rescale every one of them.
+                #
+                # `blocked` folded into the detail rather than dropped: this
+                # branch wins over the `elif blocked` one below whenever
+                # ANY interest got through, so a guardrail misfiring on one
+                # specific interest while the subscriber's others keep
+                # succeeding would otherwise leave no trace anywhere -- not
+                # in this detail, not printed, not in the span. Still
+                # correctly not marked pushed and still retried next cycle;
+                # this only fixes whether a human investigating later has
+                # something to go on.
+                detail = f"{sent} interest(s)" + (f", {blocked} blocked" if blocked else "")
+                _record(chat_id, users_db.PUSH_DELIVERED,
+                        f"sent {sent} message(s), one per interest", now, detail=detail)
+            elif blocked:
+                _record(chat_id, users_db.PUSH_BLOCKED,
+                        f"{blocked} digest(s) blocked by output guardrail, none sent", now)
+            elif delivered is not None:
+                _record(chat_id, users_db.PUSH_NOT_RELEVANT,
+                        "candidates found but none judged relevant -- not sending", now)
+            else:
+                # Nothing anywhere had new articles. last_push_at still
+                # advances so the next check is a full interval away
+                # instead of re-checking every tick.
+                _record(chat_id, users_db.PUSH_NOTHING_NEW,
+                        "due, but no new articles -- advancing last_push_at only", now)
+
+            users_db.record_push(chat_id, delivered or [], now)
         except _ModelStageError as exc:
             # A 402, a rate limit, a provider outage. Unlike everything
             # else here this is never about one subscriber -- if the model

@@ -246,12 +246,36 @@ directly, filters to genuinely-new articles, and only then does one plain
 pre-filtered list. Guarantees no repeats instead of hoping the model
 avoids them.
 
-**"New" is judged two ways** (per the user's explicit request not to
-receive the same news repeatedly): primarily by `published_dt` (skip
-anything published at or before the subscriber's last push), and as a
-fallback for sources whose date didn't parse, by checking against
-`users_db`'s remembered `pushed_links` from recent pushes (capped at 200,
-newest first).
+**Since 2026-08-24 that runs once per interest, not once per subscriber.**
+A cycle walks the subscriber's interests longest-un-pushed first and sends
+up to `MAX_INTERESTS_PER_PUSH` separate messages, each retrieved and
+written for one interest alone. An interest with nothing new does not
+consume a slot. Two limits bound the noise: `users_db.MAX_INTERESTS` on how
+many a subscriber may follow, and `MAX_INTERESTS_PER_PUSH` on how many are
+served per cycle — anything that does not fit waits for the next cycle
+rather than being dropped.
+
+The reason is retrieval quality, not presentation: the interest string is
+the query, and one combined pool for five interests is a broader, vaguer
+query than any of the five. See `docs/analysis/cluster-measurements.md`.
+
+**"New" is judged one way, not two — updated 2026-08-19.** The filter
+used to be `published_dt <= since`, with `pushed_links` as a fallback for
+unparseable dates. That was wrong on two counts, both real production
+failures: GNews publishes ~12h behind, so any subscriber pushed more
+recently than that had every one of its articles filtered out by
+`published_dt` alone, permanently; and an article that qualified but lost
+`select_candidate_articles`'s `max_per_topic` cut would fall behind the
+next `since` and be excluded forever, unsent and unrecorded.
+
+`pushed_links` — the direct record of what a subscriber actually
+received — is now the **only** "already seen" filter. `published_dt` is
+ranking only (newest first among candidates); it filters nothing. See
+`select_candidate_articles`'s own docstring in `news_push.py` for the
+full account. Since 2026-08-24 this filter is scoped to one interest per
+call rather than the subscriber's whole interest list — see the
+per-interest push section above — but the "seen" rule itself is
+unchanged.
 
 **Schema** (`users_db.py`, all migrated via the existing `_ensure_column`
 pattern): `push_interval_hours` (int, default 24), `last_push_at` (ISO

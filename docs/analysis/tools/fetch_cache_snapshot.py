@@ -31,10 +31,35 @@ import tempfile
 # Tabs are stripped from the fields themselves so the format can't be broken
 # by an article whose own text contains one.
 REMOTE_SCRIPT = r"""
+command -v awk >/dev/null 2>&1 || { echo "FATAL: no awk in the container" >&2; exit 1; }
 # The cache moved from /app/news_cache to the mounted volume on
 # 2026-08-19 -- /app was on the container filesystem and every redeploy
 # destroyed it. Falls back so this still works against an older container.
 cd "${NEWS_CACHE_DIR:-/data/news_cache}" 2>/dev/null || cd /app/news_cache || exit 1
+
+# Reads one key's FULL value, joining the continuation lines PyYAML emits.
+#
+# Replaces `grep -m1 '^title:'`, which took only the first physical line
+# and so truncated every title longer than PyYAML's default 80-column
+# wrap. It went unnoticed for weeks because the result still looks like a
+# headline; the corpus-wide symptom was a maximum title length of 94
+# characters across all 21 sources, arxiv included, whose paper titles
+# routinely run past 150.
+#
+# Not a harmless dump bug. docs/analysis/cluster-measurements.md concluded
+# that novelty selection "would surface junk before it surfaces genuine
+# novelty" largely on the strength of one exhibit -- "plus infectious
+# disease experts to Gujarat, with AI" -- which is this truncation rather
+# than a mis-parsed source. The full headline is a perfectly good article.
+yaml_get() {
+  awk -v key="$2" '
+    inkey && /^[^ ]/ { exit }
+    inkey { sub(/^ +/, ""); v = v " " $0; next }
+    $0 ~ "^" key ":" { inkey = 1; v = substr($0, length(key) + 3) }
+    END { print v }
+  ' "$1"
+}
+
 for f in *.yaml; do
   s=$(grep -m1 '^source_key:' "$f" | cut -d' ' -f2)
   d=$(grep -m1 '^published_dt:' "$f" | cut -d' ' -f2 | tr -d "'")
@@ -51,8 +76,8 @@ for f in *.yaml; do
   # category by that name.
   c=$(sed -n '/^categories:/,$p' "$f" | tr '\n' ' ' \
       | sed "s/^categories: *//; s/^null *$//; s/\[//g; s/\]//g; s/- */,/g; s/  */ /g; s/^ *//; s/ *$//; s/^,//")
-  t=$(grep -m1 '^title:' "$f" | sed 's/^title: //' | tr -d '\t')
-  u=$(grep -m1 '^summary:' "$f" | sed 's/^summary: //' | cut -c1-300 | tr -d '\t')
+  t=$(yaml_get "$f" title | tr -d '\t')
+  u=$(yaml_get "$f" summary | cut -c1-300 | tr -d '\t')
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s" "$d" "$a" "$c" "$t" "$u"
 done
 """

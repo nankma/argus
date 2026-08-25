@@ -1059,3 +1059,28 @@ def test_help_is_registered_and_real_commands_are_matched_before_the_catch_all()
                     'CommandHandler("interests"',
                     'CommandHandler("language"'):
         assert src.index(earlier) < catch_all, f"{earlier} must be registered first"
+
+
+def test_interests_command_enforces_the_cap(isolated_subscribers_db):
+    """This command writes the list wholesale rather than going through
+    add_interest, so without its own check it is a way straight past the
+    cap."""
+    too_many = ", ".join(f"topic{i}" for i in range(users_db.MAX_INTERESTS + 1))
+    update = _make_update(chat_id=999, text="/interests " + too_many)
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_interests_command(update, context))
+
+    reply = update.message.reply_text.call_args[0][0]
+    assert str(users_db.MAX_INTERESTS) in reply
+    assert users_db.get_interests(999) == []
+
+
+def test_interests_command_allows_exactly_the_cap(isolated_subscribers_db):
+    at_cap = ", ".join(f"topic{i}" for i in range(users_db.MAX_INTERESTS))
+    update = _make_update(chat_id=999, text="/interests " + at_cap)
+    context = _make_context(admin_chat_id=999)
+
+    asyncio.run(bot.handle_interests_command(update, context))
+
+    assert len(users_db.get_interests(999)) == users_db.MAX_INTERESTS

@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 import agent
 import guardrails
+import news_classify
 import news_sources
 import users_db
 from tests.fakes import FakeToolCallingModel, RecordingCallbackHandler
@@ -315,13 +316,21 @@ def test_run_agent_records_callback_events():
     assert "llm_end" in event_types
 
 
+def _normalized(english, narrower=()):
+    """What normalize_interest_detailed returns. Built as the real model so
+    a field added to it shows up here rather than being silently absent."""
+    return news_classify.NormalizedInterest(
+        reasoning="", english=english, is_umbrella=bool(narrower),
+        narrower_examples=list(narrower))
+
+
 def test_set_interest_stores_the_english_form(isolated_subscribers_db, monkeypatch):
     """Interest text is a live search query, a BM25 match target and a
     classification input, and all three are English-facing -- gnews and
     newsapi both pin lang=en, so a Chinese interest returns nothing at
     all, and BM25 scored 0% recall for 光通訊 against an English corpus."""
-    monkeypatch.setattr(agent.news_classify, "normalize_interest",
-                        lambda model, text, alongside=None: "Optical Communications")
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized("Optical Communications"))
     classification = SimpleNamespace(topic="光通訊")
 
     agent.dispatch_settings("set_interest", 7, classification, model="fake")
@@ -334,9 +343,9 @@ def test_set_interest_passes_existing_interests_as_context(isolated_subscribers_
 
     def fake(model, text, alongside=None):
         seen["alongside"] = alongside
-        return "Automated Optical Inspection"
+        return _normalized("Automated Optical Inspection")
 
-    monkeypatch.setattr(agent.news_classify, "normalize_interest", fake)
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed", fake)
     users_db.add_interest(7, "AAOI")
 
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="AOI"), model="fake")
@@ -347,7 +356,7 @@ def test_set_interest_passes_existing_interests_as_context(isolated_subscribers_
 def test_set_interest_falls_back_to_the_original_when_normalization_fails(
     isolated_subscribers_db, monkeypatch
 ):
-    monkeypatch.setattr(agent.news_classify, "normalize_interest",
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: None)
 
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"), model="fake")
@@ -371,8 +380,8 @@ def test_set_interest_confirmation_names_what_was_actually_stored(
     in the open, and the first place the subscriber would have seen how
     they were understood. The four earlier tests all asserted on
     get_interests and none on the reply, which is why it survived."""
-    monkeypatch.setattr(agent.news_classify, "normalize_interest",
-                        lambda model, text, alongside=None: "Optical Communications")
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized("Optical Communications"))
 
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"),
                                     model="fake")
@@ -385,8 +394,8 @@ def test_set_interest_confirmation_names_what_was_actually_stored(
 def test_duplicate_interest_message_also_names_the_stored_form(
     isolated_subscribers_db, monkeypatch
 ):
-    monkeypatch.setattr(agent.news_classify, "normalize_interest",
-                        lambda model, text, alongside=None: "Optical Communications")
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized("Optical Communications"))
     users_db.add_interest(7, "Optical Communications")
 
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"),
@@ -434,3 +443,92 @@ def test_build_model_omits_reasoning_effort_when_set_empty(monkeypatch):
     agent.build_model("LLM_MODEL_TEST_EFFORT")
 
     assert calls[0][1] == {}
+
+
+# --- breadth hint and the interest cap ----------------------------------
+
+def test_a_broad_interest_is_stored_and_hinted_not_refused(
+    isolated_subscribers_db, monkeypatch
+):
+    """A hint, never a question: asking would need "this subscriber owes me
+    an answer" state that the next message would otherwise route straight
+    past. The broad interest is still stored -- the subscriber asked for
+    it."""
+    monkeypatch.setattr(
+        agent.news_classify, "normalize_interest_detailed",
+        lambda model, text, alongside=None: _normalized(
+            "AI", narrower=["AI Agent", "AI Coding", "Local LLM"]))
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="AI"),
+                                    model="fake")
+
+    assert users_db.get_interests(7) == ["AI"]
+    assert "Added AI to your interests." in reply
+    assert "AI Agent" in reply and "Local LLM" in reply
+
+
+def test_a_specific_interest_gets_no_hint(isolated_subscribers_db, monkeypatch):
+    monkeypatch.setattr(
+        agent.news_classify, "normalize_interest_detailed",
+        lambda model, text, alongside=None: _normalized("Local LLM"))
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="local llm"),
+                                    model="fake")
+
+    assert reply == "Added Local LLM to your interests."
+
+
+def test_at_most_three_narrower_examples_are_offered(isolated_subscribers_db, monkeypatch):
+    """The model is asked for 2-4 and could return more; a confirmation that
+    lists eight alternatives stops reading as a hint."""
+    monkeypatch.setattr(
+        agent.news_classify, "normalize_interest_detailed",
+        lambda model, text, alongside=None: _normalized(
+            "AI", narrower=[f"Thing {i}" for i in range(8)]))
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="AI"),
+                                    model="fake")
+
+    assert "Thing 2" in reply
+    assert "Thing 3" not in reply
+
+
+def test_adding_past_the_cap_is_refused_in_words(isolated_subscribers_db):
+    users_db.set_interests(7, [f"topic {i}" for i in range(users_db.MAX_INTERESTS)])
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="one more"))
+
+    assert "one more" in reply
+    assert str(users_db.MAX_INTERESTS) in reply
+    assert "one more" not in users_db.get_interests(7)
+    assert len(users_db.get_interests(7)) == users_db.MAX_INTERESTS
+
+
+def test_re_adding_an_existing_interest_at_the_cap_is_not_an_error(isolated_subscribers_db):
+    """Being at the cap must not turn a no-op into a failure message."""
+    topics = [f"topic {i}" for i in range(users_db.MAX_INTERESTS)]
+    users_db.set_interests(7, topics)
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="topic 3"))
+
+    assert "already have" in reply
+    assert users_db.get_interests(7) == topics
+
+
+def test_narrower_examples_without_the_umbrella_verdict_are_ignored(
+    isolated_subscribers_db, monkeypatch
+):
+    """The measured failure mode: asked only for narrower readings, the live
+    model produced them for "Local LLM", "AI Agent" and "Optical
+    communications" too. The explicit verdict is what gates the hint, so a
+    populated list on its own must not be enough."""
+    monkeypatch.setattr(
+        agent.news_classify, "normalize_interest_detailed",
+        lambda model, text, alongside=None: news_classify.NormalizedInterest(
+            reasoning="", english="Local LLM", is_umbrella=False,
+            narrower_examples=["On-device AI models", "Edge inference LLM"]))
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="local llm"),
+                                    model="fake")
+
+    assert reply == "Added Local LLM to your interests."
