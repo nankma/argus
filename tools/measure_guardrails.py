@@ -126,6 +126,25 @@ LAYER2_CASES = [
     # a future fix's measurement shows the language-specific gap closing,
     # not just "crypto topics in general got easier."
     {"text": "Add bitcoin to my interests", "on_topic": True, "category": "set_interest", "group": "english_control"},
+    # Multi-topic set_interest -- the 2026-08-25 bug this dataset is meant
+    # to catch a regression of. A single `topic: str` field forced these
+    # through one 2-4-word label; measured live, that sometimes joined
+    # them into one garbled entry, sometimes silently dropped everything
+    # but one item, and sometimes compressed the whole request down to
+    # "AI" -- which then fuzzy-matched an already-stored "AI" interest and
+    # reported nothing was added. `expected_topic_count` is a minimum
+    # (>=), not exact -- if the model splits "AI coding" into two entries
+    # that's still correct behavior, this dataset just needs proof it
+    # didn't collapse to fewer entries than were actually named.
+    {"text": "Add AI agent, AI coding, and LLM to my interests", "on_topic": True,
+     "category": "set_interest", "expects_topic": True, "expected_topic_count": 3,
+     "group": "multi_topic_set_interest"},
+    {"text": "我想追蹤機器人科技、半導體、還有光通訊", "on_topic": True,
+     "category": "set_interest", "expects_topic": True, "expected_topic_count": 3,
+     "group": "multi_topic_set_interest"},
+    {"text": "Remove crypto and robotics from my interests", "on_topic": True,
+     "category": "remove_interest", "expects_topic": True, "expected_topic_count": 2,
+     "group": "multi_topic_set_interest"},
 ]
 
 # --- Layer 2 multi-intent cases (added 2026-08-16, --------------------------
@@ -271,11 +290,17 @@ def measure_layer1(cases: list[dict]) -> list[dict]:
 
 
 def _argument_extraction_correct(case: dict, classification) -> bool:
-    """Checks the router's newly-added argument fields (topic/
+    """Checks the router's newly-added argument fields (topics/
     push_interval_hours/language) against whichever expectation a case
     declares -- see LAYER2_CASES' module docstring for why these are
-    shape checks for `topic`, not exact-string ones."""
-    if case.get("expects_topic") and not (classification.topic and len(classification.topic.split()) <= 4):
+    shape checks for `topics`, not exact-string ones."""
+    if case.get("expects_topic") and not (
+        classification.topics
+        and all(len(t.split()) <= 4 for t in classification.topics)
+    ):
+        return False
+    min_count = case.get("expected_topic_count")
+    if min_count is not None and len(classification.topics or []) < min_count:
         return False
     if "expected_push_interval_hours" in case and classification.push_interval_hours != case["expected_push_interval_hours"]:
         return False
@@ -307,7 +332,7 @@ def measure_layer2(model, cases: list[dict], trials: int) -> list[dict]:
                 {
                     "on_topic": classification.on_topic,
                     "category": classification.categories[0] if classification.categories else None,
-                    "topic": classification.topic,
+                    "topics": classification.topics,
                     "push_interval_hours": classification.push_interval_hours,
                     "language": classification.language,
                     "correct": correct,
@@ -350,7 +375,7 @@ def measure_layer2_multi_intent(model, cases: list[dict], trials: int) -> list[d
                 {
                     "on_topic": classification.on_topic,
                     "category": classification.categories,
-                    "topic": classification.topic,
+                    "topics": classification.topics,
                     "push_interval_hours": classification.push_interval_hours,
                     "language": classification.language,
                     "correct": correct,

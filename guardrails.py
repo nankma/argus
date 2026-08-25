@@ -81,12 +81,24 @@ class MessageClassification(BaseModel):
     # Extracted directly by the router so Route B (docs/plans/context-management-plan.md's
     # settings-dispatch refactor -- agent.dispatch_settings) never needs the
     # agent's own tool-call reasoning to get its arguments. All optional --
-    # None unless the matching category above was chosen. The normalization
-    # rules here (short topic label, corrected/disambiguated language name)
-    # used to live in agent.py's per-category prompt fragments; moved into
-    # _ROUTER_PROMPT below since the agent no longer sees these categories
-    # at all once Route B intercepts them.
-    topic: str | None = None  # set_interest / remove_interest
+    # empty/None unless the matching category above was chosen. The
+    # normalization rules here (short topic label, corrected/disambiguated
+    # language name) used to live in agent.py's per-category prompt
+    # fragments; moved into _ROUTER_PROMPT below since the agent no longer
+    # sees these categories at all once Route B intercepts them.
+    #
+    # `topics` is a LIST, not a single string -- same reason `categories`
+    # above is a list rather than one Category. A single string field
+    # forced "add AI agent, AI coding, LLM" through one 2-4-word label,
+    # and measured live (2026-08-25) that was undefined: sometimes joined
+    # into one garbled string, sometimes silently dropped everything but
+    # one item, and sometimes compressed the whole request down to "AI" --
+    # which then fuzzy-matched an already-stored "AI" interest and
+    # reported nothing was added. An ordinary single-topic message still
+    # produces a one-element list; empty means the category was chosen
+    # but no topic was extracted (should not happen per the prompt, but
+    # handled the same fail-open way an empty `categories` is).
+    topics: list[str] = []  # set_interest / remove_interest
     push_interval_hours: int | None = None  # start_push, only if a frequency was stated
     language: str | None = None  # set_language, only if a new language was named
 
@@ -145,14 +157,22 @@ _ROUTER_PROMPT = (
     "-- treat brevity charitably, since this bot's only purpose is tech "
     "news, a vague question is still almost always a news_query, not "
     "off-topic.\n"
-    "- set_interest: wants to add a topic to their stated interests. Also "
-    "set `topic` to a short 2-4 word label for what they want to add, not "
-    "a full descriptive phrase (e.g. \"robotics\", not \"news about "
-    "robots and automation in general\") -- a short, consistent label "
-    "makes future matches and removal more reliable than a long one.\n"
-    "- remove_interest: wants to remove a topic from their stated "
-    "interests. Also set `topic` to match the phrasing they used to name "
-    "it.\n"
+    "- set_interest: wants to add one or more topics to their stated "
+    "interests. Also set `topics` to a LIST, one short 2-4 word label per "
+    "topic they named, not a full descriptive phrase (e.g. \"robotics\", "
+    "not \"news about robots and automation in general\") -- a short, "
+    "consistent label makes future matches and removal more reliable "
+    "than a long one. If they named several separate topics in one "
+    "message (\"add AI agent, AI coding, and LLMs\"), `topics` must have "
+    "one entry PER topic, e.g. [\"AI agent\", \"AI coding\", \"LLMs\"] -- "
+    "never combine them into a single entry, and never summarize several "
+    "named topics down to a broader umbrella term that covers them "
+    "(\"AI agent\" and \"AI coding\" is two entries, not one \"AI\" "
+    "entry). A single-topic message still produces a one-element list.\n"
+    "- remove_interest: wants to remove one or more topics from their "
+    "stated interests. Also set `topics` to a list, one entry per topic "
+    "named, matching the phrasing they used to name each one -- same "
+    "list rule as set_interest.\n"
     "- start_push: wants to turn on periodic news push notifications, or "
     "change how often an already-enabled push sends (e.g. \"every 6 "
     "hours\", \"switch to daily\"). If they stated a frequency, also set "

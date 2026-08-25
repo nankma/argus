@@ -650,6 +650,52 @@ harness exists, this experiment is a matter of running it over four
 prompt variants rather than building anything new — which is why this is
 sequenced after it rather than before.
 
+## Fixed 2026-08-25: `MessageClassification.topic` (single string) → `topics` (list)
+
+A live user sent "Add AI agent, ai coding, LLM" — one message naming three
+distinct interests. `topic: str | None` gave the router no way to
+represent that; live-reproduced multiple times before fixing, the actual
+behavior was undefined — sometimes joined into one garbled entry,
+sometimes silently dropped all but one item, sometimes compressed the
+whole request down to an umbrella term ("AI") that then fuzzy-duplicate-
+matched (`users_db._is_duplicate_topic`, word-overlap ≥ 0.7) an "AI"
+interest already stored, reporting nothing added. Same shape as
+`categories` already being a list for the same reason (a message can name
+more than one intent) — extended here to `set_interest`/`remove_interest`'s
+own argument, one list entry per named topic, never combined or
+summarized into a broader term.
+
+`agent.dispatch_settings` now loops over `classification.topics`, one
+`_add_one_interest` call per topic; `known` (the subscriber's resolved
+interests) grows in place across the loop so a later topic in the same
+message can disambiguate against an earlier one from the *same* message,
+not just prior interests — passed to `normalize_interest_detailed` as
+`alongside=list(known)`, a copy, not the list itself (an earlier draft
+passed `known` by reference, which let a later loop iteration's mutation
+retroactively change what an earlier `alongside` snapshot looked like to
+a caller holding onto it).
+
+**Measured against the real model before considering this shipped** —
+`tools/measure_guardrails.py --layer 2 --group multi_topic_set_interest
+--trials 5` (3 new cases — two English `set_interest`/`remove_interest`
+multi-topic messages and one Chinese `set_interest` naming three topics —
+15 calls total):
+
+| group | pass rate |
+|---|---|
+| `multi_topic_set_interest` | **100% (15/15)** |
+
+Also confirmed directly against `bot.process_message` (the same pipeline
+`test_api.py`/real Telegram traffic runs, real `ChatDeepSeek` calls, no
+mocks) with the exact live-incident phrasing — `"Add AI agent, ai coding,
+LLM"` stored as three separate interests (`['AI agent', 'AI coding',
+'Large Language Model']`), not collapsed to one. No prior baseline exists
+for this group (the cases are new), so this is the baseline a future
+change should be measured against, not evidence of a regression fixed —
+tracked here per this doc's own convention of recording every dataset
+addition's first measurement, not just re-measurements of an existing
+one.
+
 ## Open questions
 
 - ~~Exact wording/pattern list for layer 1~~ — built in `guardrails.py`'s

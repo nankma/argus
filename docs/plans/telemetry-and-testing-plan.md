@@ -14,7 +14,7 @@ they're constructed, rather than hardcoded.
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
 | 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker. **2026-08-21: a second backend (Logfire) added alongside it** — `agent.setup_telemetry()` now wires Phoenix, Logfire, both or neither onto one shared `TracerProvider`; see `docs/plans/observability-platform-plan.md` for the platform decision and migration status (nothing deployed yet, Phoenix remains live in production). |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
-| 5 | Test cases (actual scenarios) | Done — 16 tests, see below for what's covered vs. not |
+| 5 | Test cases (actual scenarios) | Done — 545 tests as of 2026-08-25 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
@@ -373,11 +373,25 @@ without-a-key contract, one shared `TracerProvider` when both backends are
 on, and the token-prefix → region derivation (`logfire_traces_endpoint`).
 
 **This "Test cases" section and its counts are stale project-wide** (the
-suite is now 486 tests, not 16 — `qa-engineer` tracks the current total,
-this doc doesn't attempt to stay in sync test-by-test). Two additions
-specifically from the 2026-08-21 push-outcomes/telemetry work, since
-those are new *categories* of behaviour rather than more of an existing
-one:
+suite is now 545 tests, not 16 — `qa-engineer` tracks the current total,
+this doc doesn't attempt to stay in sync test-by-test). Notable additions
+since, called out specifically because each is a new *category* of
+behaviour rather than more of an existing one:
+
+- **`tests/test_agent.py`'s multi-topic `set_interest`/`remove_interest`
+  tests (2026-08-25)** — `MessageClassification.topic` (single string) →
+  `topics` (list), fixing a live bug where "Add AI agent, ai coding, LLM"
+  could silently collapse to one interest. Covers: multiple topics each
+  stored; `known` (disambiguation context) growing across topics *within*
+  one message, not just across messages; `alongside=list(known)` being an
+  independent snapshot rather than a reference that a later loop
+  iteration's `known[:] = after` could retroactively mutate; a cap-
+  refused topic not polluting `known` for a later topic in the same
+  message; and empty-`topics` handling. See
+  `docs/plans/guardrails-plan.md`'s "Fixed 2026-08-25" section for the
+  live-model measurement. Two gaps noted at review (2026-08-25) were
+  closed the same day: `test_two_topics_normalizing_to_the_same_label_report_a_duplicate_not_a_double_add`
+  and `test_removing_the_same_topic_twice_in_one_message_is_not_an_error`.
 
 - **`tests/test_news_push.py`/`tests/test_users_db.py`** — `push_outcomes`
   recording (`news_push._record`, `users_db.record_push_outcome` and its

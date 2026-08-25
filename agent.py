@@ -293,12 +293,91 @@ TOOLS = [save_note, search_news]
 ROUTE_B_CATEGORIES = {"set_interest", "remove_interest", "start_push", "stop_push", "set_language"}
 
 
+def _add_one_interest(chat_id: int, topic: str, model, known: list[str]) -> str:
+    """Normalizes and stores ONE interest, returning its confirmation
+    sentence. `known` is the subscriber's interests resolved so far --
+    prior interests plus any earlier topic from the SAME "add X, Y, Z"
+    message -- and is mutated in place so the next call sees this one too.
+
+    Split out of dispatch_settings's set_interest branch so a multi-topic
+    request ("add AI agent, AI coding, LLM") can call this once per topic
+    instead of forcing all of them through one label -- see that branch's
+    docstring for the failure this replaced."""
+    narrower: list[str] = []
+    if model is not None:
+        # Translated at WRITE time, while the subscriber is here. The
+        # alternative -- translating at query time -- would repeat the
+        # call on every push cycle for a value that never changes.
+        #
+        # `known` goes in as disambiguation context: an ambiguous ticker
+        # expanded blind picks the wrong company, and is then worse than
+        # not expanding at all. "AOI" came back as "Africa Oil Corp" on
+        # one run and "Applied Optoelectronics" on the next -- two
+        # different wrong answers to the same input, which is what
+        # guessing looks like. With the subscriber's own
+        # AAOI/semiconductors/光通訊 alongside it, it resolves to
+        # automated optical inspection.
+        # A copy, not the list itself: `known` is mutated in place below
+        # once this topic resolves, and a caller that holds onto
+        # `alongside` beyond this call (a test double capturing it for a
+        # later assertion, say) must see the state at call time, not
+        # whatever `known` grows into afterward.
+        detail = news_classify.normalize_interest_detailed(
+            model, topic, alongside=list(known))
+        if detail is not None:
+            topic = detail.english.strip() or topic
+            # Gated on the explicit judgment, not on the list being
+            # non-empty: the model will happily suggest narrower
+            # phrasings for an already-specific interest.
+            if detail.is_umbrella:
+                narrower = detail.narrower_examples[:3]
+    before = list(known)
+    try:
+        after = users_db.add_interest(chat_id, topic)
+    except ValueError as exc:
+        # At the cap. Said plainly and with the way out, rather than
+        # accepting the message and silently not storing it. `known` is
+        # NOT updated -- this topic was never stored, so a later item in
+        # the same message must not treat it as already-following.
+        return f"Couldn't add {topic} -- {exc}."
+    known[:] = after
+    # `topic`, not the caller's original string: the confirmation must
+    # name what was actually stored. Saying "Added 光通訊" while the
+    # database holds "Optical Communications" is the exact opposite of
+    # the reason for normalizing in the open -- the subscriber should be
+    # able to see how the system understood them, and this is the first
+    # place they would see it.
+    if len(after) == len(before):
+        return f"You already have {topic} in your interests, so nothing new was added."
+    reply = f"Added {topic} to your interests."
+    if narrower:
+        # A hint, deliberately not a question. Asking would need state
+        # ("this subscriber owes me an answer") that the next message
+        # would otherwise be routed straight past, and most people never
+        # come back to a question anyway. A sentence they can act on now
+        # or ignore costs nothing either way.
+        #
+        # Worth saying at all because breadth is the single largest
+        # measured lever on retrieval quality: querying with the
+        # subscriber's own interest string scored 100% against 11% for
+        # the same interest routed through a broad category
+        # (docs/analysis/cluster-measurements.md).
+        reply += (f" One thing though -- {topic} is broad, so its digests "
+                  f"will be scattershot. Something like "
+                  f"{', or '.join(narrower)} pulls far better; tell me one "
+                  f"and I'll add it.")
+    return reply
+
+
 def dispatch_settings(category: str, chat_id: int, classification, model=None) -> str:
     """Performs the state change for one Route B category and returns an
     English confirmation string. `classification` is the
     guardrails.MessageClassification the router produced -- its
-    topic/push_interval_hours/language fields carry whatever argument this
-    category needs, already extracted and normalized by the router.
+    topics/push_interval_hours/language fields carry whatever argument this
+    category needs, already extracted by the router. `topics` is a list
+    (set_interest/remove_interest may each name more than one item in a
+    single message, e.g. "add AI agent, AI coding, LLM") and is processed
+    one item at a time, returning one confirmation sentence per item.
 
     `model` is used only to translate a new interest into English (see
     news_classify.normalize_interest for why every consumer of interest
@@ -306,70 +385,43 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
     without one and so a missing model degrades to storing the original
     text rather than refusing the change."""
     if category == "set_interest":
-        before = users_db.get_interests(chat_id)
-        topic = classification.topic
-        narrower: list[str] = []
-        if model is not None:
-            # Translated at WRITE time, while the subscriber is here. The
-            # alternative -- translating at query time -- would repeat the
-            # call on every push cycle for a value that never changes.
-            #
-            # Their existing interests go in as disambiguation context: an
-            # ambiguous ticker expanded blind picks the wrong company, and
-            # is then worse than not expanding at all. "AOI" came back as
-            # "Africa Oil Corp" on one run and "Applied Optoelectronics" on
-            # the next -- two different wrong answers to the same input,
-            # which is what guessing looks like. With the subscriber's own
-            # AAOI/semiconductors/光通訊 alongside it, it resolves to
-            # automated optical inspection.
-            detail = news_classify.normalize_interest_detailed(
-                model, topic, alongside=before)
-            if detail is not None:
-                topic = detail.english.strip() or topic
-                # Gated on the explicit judgment, not on the list being
-                # non-empty: the model will happily suggest narrower
-                # phrasings for an already-specific interest.
-                if detail.is_umbrella:
-                    narrower = detail.narrower_examples[:3]
-        try:
-            after = users_db.add_interest(chat_id, topic)
-        except ValueError as exc:
-            # At the cap. Said plainly and with the way out, rather than
-            # accepting the message and silently not storing it.
-            return f"Couldn't add {topic} -- {exc}."
-        # `topic`, not classification.topic: the confirmation must name what
-        # was actually stored. Saying "Added 光通訊" while the database holds
-        # "Optical Communications" is the exact opposite of the reason for
-        # normalizing in the open -- the subscriber should be able to see
-        # how the system understood them, and this is the first place they
-        # would see it.
-        if len(after) == len(before):
-            return f"You already have {topic} in your interests, so nothing new was added."
-        reply = f"Added {topic} to your interests."
-        if narrower:
-            # A hint, deliberately not a question. Asking would need state
-            # ("this subscriber owes me an answer") that the next message
-            # would otherwise be routed straight past, and most people
-            # never come back to a question anyway. A sentence they can
-            # act on now or ignore costs nothing either way.
-            #
-            # Worth saying at all because breadth is the single largest
-            # measured lever on retrieval quality: querying with the
-            # subscriber's own interest string scored 100% against 11% for
-            # the same interest routed through a broad category
-            # (docs/analysis/cluster-measurements.md).
-            reply += (f" One thing though -- {topic} is broad, so its digests "
-                      f"will be scattershot. Something like "
-                      f"{', or '.join(narrower)} pulls far better; tell me one "
-                      f"and I'll add it.")
-        return reply
+        # A list, not a single string, mirroring MessageClassification's
+        # own categories field -- same shape, same reason: "Add AI agent,
+        # AI coding, LLM" is three intents inside one category, and a
+        # single string cannot represent that. Measured live, 2026-08-25:
+        # forcing the whole phrase through one 2-4-word label sometimes
+        # compressed it down to "AI" (a fuzzy duplicate of an interest
+        # already stored), other times dropped everything but one item,
+        # other times produced "AI agents/LLM coding" -- undefined
+        # behavior on the model's part because the schema gave it no way
+        # to say "these are three separate things."
+        topics = classification.topics or []
+        if not topics:
+            return "Didn't catch what you wanted to add -- try naming a topic."
+        # Grows as topics are resolved, so the SECOND item in "add AAOI,
+        # semiconductors" can disambiguate against the first even though
+        # neither was in the database yet when the message arrived -- the
+        # same reason `before` was passed at all, extended to cover
+        # same-message context, not just prior interests.
+        known = users_db.get_interests(chat_id)
+        replies = []
+        for topic in topics:
+            replies.append(_add_one_interest(chat_id, topic, model, known))
+        return "\n\n".join(replies)
 
     if category == "remove_interest":
-        before = users_db.get_interests(chat_id)
-        after = users_db.remove_interest(chat_id, classification.topic)
-        if len(after) == len(before):
-            return f"{classification.topic} wasn't in your interests, so there was nothing to remove."
-        return f"Removed {classification.topic} from your interests."
+        topics = classification.topics or []
+        if not topics:
+            return "Didn't catch what you wanted to remove -- try naming a topic."
+        replies = []
+        for topic in topics:
+            before = users_db.get_interests(chat_id)
+            after = users_db.remove_interest(chat_id, topic)
+            if len(after) == len(before):
+                replies.append(f"{topic} wasn't in your interests, so there was nothing to remove.")
+            else:
+                replies.append(f"Removed {topic} from your interests.")
+        return "\n\n".join(replies)
 
     if category == "start_push":
         users_db.set_push_enabled(chat_id, True)
