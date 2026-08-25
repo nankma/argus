@@ -11,9 +11,9 @@ in docs/reference/local-testing-api-plan.md's "Resolved issue" section: -4,
 ServerAlive*, ExitOnForwardFailure, always a fresh tunnel, never reused
 from an earlier session) rather than assuming one is already open.
 
-Covers checklist cases 1, 2, 3, 4, 5, 7, 8, 9, 12, 14 -- everything that's
-a plain message through process_message's pipeline. Cases 6, 10, 11, 13,
-15, 16 (/interests, /language, /start, /help, and an unrecognised
+Covers checklist cases 1, 2, 3, 4, 5, 7, 8, 9, 12, 14, 17 -- everything
+that's a plain message through process_message's pipeline. Cases 6, 10,
+11, 13, 15, 16 (/interests, /language, /start, /help, and an unrecognised
 command) are command handlers that don't route through test_api.py at
 all (see docs/reference/local-testing-api-plan.md's "What it does and
 doesn't cover") -- listed explicitly as NOT COVERED in the report rather
@@ -230,6 +230,30 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
             "14 multi-category (settings + news_query in one message)",
             r["blocked_at"] is None and "quantum computing" in reply.lower() and has_report_marker,
             f"blocked_at={r['blocked_at']} category={r['category']} has_report_marker={has_report_marker}",
+        )
+    )
+
+    # Case 17 -- multi-topic set_interest: several distinct topics named in
+    # one message (the 2026-08-25 bug -- see this checklist's own table).
+    # A single `topic: str` router field made this undefined: sometimes
+    # joined into one garbled label, sometimes silently dropped all but one
+    # item, sometimes compressed down to an umbrella term ("AI") that
+    # fuzzy-duplicate-matched an already-stored interest and reported
+    # nothing added. Checks for three separate "Added ..." confirmations,
+    # not just that the category routed correctly -- the bug produced a
+    # valid set_interest category with the wrong number of things stored.
+    #
+    # Fresh chat_id, same reasoning as case 14 -- keeps this independent of
+    # whatever interests earlier cases left on the shared id.
+    multi_topic_chat_id = chat_id + 2
+    r = send(multi_topic_chat_id, "Add AI agent, AI coding, and LLM to my interests", timeout)
+    reply = r["reply"]
+    added_count = reply.lower().count("added ")
+    results.append(
+        _check(
+            "17 multi-topic set_interest (three topics, one message)",
+            r["blocked_at"] is None and r["category"] == "set_interest" and added_count == 3,
+            f"blocked_at={r['blocked_at']} category={r['category']} added_count={added_count} reply={reply!r}",
         )
     )
 

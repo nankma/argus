@@ -67,11 +67,24 @@ def test_classify_message_multiple_categories():
     # A message with more than one distinct intent -- see
     # docs/plans/context-management-plan.md's multi-category routing.
     model = _fake_structured_model(
-        guardrails.MessageClassification(on_topic=True, categories=["set_interest", "news_query"], topic="robotics")
+        guardrails.MessageClassification(on_topic=True, categories=["set_interest", "news_query"], topics=["robotics"])
     )
     result = guardrails.classify_message(model, "Add robotics to my interests and tell me what's new with it")
     assert result.categories == ["set_interest", "news_query"]
-    assert result.topic == "robotics"
+    assert result.topics == ["robotics"]
+
+
+def test_classify_message_multiple_topics_in_one_category():
+    """"Add A, B, C" is one category (set_interest) naming several topics --
+    see the 2026-08-25 bug this list-shaped field replaced a single string
+    field to fix."""
+    model = _fake_structured_model(
+        guardrails.MessageClassification(
+            on_topic=True, categories=["set_interest"],
+            topics=["AI agent", "AI coding", "LLM"])
+    )
+    result = guardrails.classify_message(model, "Add AI agent, AI coding, and LLM")
+    assert result.topics == ["AI agent", "AI coding", "LLM"]
 
 
 def test_classify_message_fails_open_on_exception():

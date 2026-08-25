@@ -121,27 +121,27 @@ def _classification(category, **kwargs):
 
 
 def test_dispatch_settings_set_interest_adds_new_topic(isolated_subscribers_db):
-    result = agent.dispatch_settings("set_interest", 201, _classification("set_interest", topic="robotics"))
+    result = agent.dispatch_settings("set_interest", 201, _classification("set_interest", topics=["robotics"]))
     assert "Added robotics" in result
     assert users_db.get_interests(201) == ["robotics"]
 
 
 def test_dispatch_settings_set_interest_already_covered(isolated_subscribers_db):
     users_db.set_interests(202, ["robotics"])
-    result = agent.dispatch_settings("set_interest", 202, _classification("set_interest", topic="robotics"))
+    result = agent.dispatch_settings("set_interest", 202, _classification("set_interest", topics=["robotics"]))
     assert "already have robotics" in result
     assert users_db.get_interests(202) == ["robotics"]
 
 
 def test_dispatch_settings_remove_interest_removes_existing(isolated_subscribers_db):
     users_db.set_interests(203, ["robotics", "AI"])
-    result = agent.dispatch_settings("remove_interest", 203, _classification("remove_interest", topic="robotics"))
+    result = agent.dispatch_settings("remove_interest", 203, _classification("remove_interest", topics=["robotics"]))
     assert "Removed robotics" in result
     assert users_db.get_interests(203) == ["AI"]
 
 
 def test_dispatch_settings_remove_interest_not_present(isolated_subscribers_db):
-    result = agent.dispatch_settings("remove_interest", 204, _classification("remove_interest", topic="robotics"))
+    result = agent.dispatch_settings("remove_interest", 204, _classification("remove_interest", topics=["robotics"]))
     assert "wasn't in your interests" in result
 
 
@@ -331,7 +331,7 @@ def test_set_interest_stores_the_english_form(isolated_subscribers_db, monkeypat
     all, and BM25 scored 0% recall for 光通訊 against an English corpus."""
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: _normalized("Optical Communications"))
-    classification = SimpleNamespace(topic="光通訊")
+    classification = SimpleNamespace(topics=["光通訊"])
 
     agent.dispatch_settings("set_interest", 7, classification, model="fake")
 
@@ -348,7 +348,7 @@ def test_set_interest_passes_existing_interests_as_context(isolated_subscribers_
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed", fake)
     users_db.add_interest(7, "AAOI")
 
-    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="AOI"), model="fake")
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AOI"]), model="fake")
 
     assert seen["alongside"] == ["AAOI"]
 
@@ -359,7 +359,7 @@ def test_set_interest_falls_back_to_the_original_when_normalization_fails(
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: None)
 
-    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"), model="fake")
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["光通訊"]), model="fake")
 
     assert users_db.get_interests(7) == ["光通訊"], "stored, just not translated"
 
@@ -367,7 +367,7 @@ def test_set_interest_falls_back_to_the_original_when_normalization_fails(
 def test_set_interest_without_a_model_stores_the_raw_topic(isolated_subscribers_db):
     """The settings path stays usable without a model -- tests and the CLI
     both exercise it that way."""
-    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="robotics"))
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["robotics"]))
 
     assert users_db.get_interests(7) == ["robotics"]
 
@@ -383,7 +383,7 @@ def test_set_interest_confirmation_names_what_was_actually_stored(
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: _normalized("Optical Communications"))
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"),
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["光通訊"]),
                                     model="fake")
 
     assert "Optical Communications" in reply
@@ -398,7 +398,7 @@ def test_duplicate_interest_message_also_names_the_stored_form(
                         lambda model, text, alongside=None: _normalized("Optical Communications"))
     users_db.add_interest(7, "Optical Communications")
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="光通訊"),
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["光通訊"]),
                                     model="fake")
 
     assert "Optical Communications" in reply
@@ -459,7 +459,7 @@ def test_a_broad_interest_is_stored_and_hinted_not_refused(
         lambda model, text, alongside=None: _normalized(
             "AI", narrower=["AI Agent", "AI Coding", "Local LLM"]))
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="AI"),
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI"]),
                                     model="fake")
 
     assert users_db.get_interests(7) == ["AI"]
@@ -472,7 +472,7 @@ def test_a_specific_interest_gets_no_hint(isolated_subscribers_db, monkeypatch):
         agent.news_classify, "normalize_interest_detailed",
         lambda model, text, alongside=None: _normalized("Local LLM"))
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="local llm"),
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["local llm"]),
                                     model="fake")
 
     assert reply == "Added Local LLM to your interests."
@@ -486,7 +486,7 @@ def test_at_most_three_narrower_examples_are_offered(isolated_subscribers_db, mo
         lambda model, text, alongside=None: _normalized(
             "AI", narrower=[f"Thing {i}" for i in range(8)]))
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="AI"),
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI"]),
                                     model="fake")
 
     assert "Thing 2" in reply
@@ -496,7 +496,7 @@ def test_at_most_three_narrower_examples_are_offered(isolated_subscribers_db, mo
 def test_adding_past_the_cap_is_refused_in_words(isolated_subscribers_db):
     users_db.set_interests(7, [f"topic {i}" for i in range(users_db.MAX_INTERESTS)])
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="one more"))
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["one more"]))
 
     assert "one more" in reply
     assert str(users_db.MAX_INTERESTS) in reply
@@ -509,7 +509,7 @@ def test_re_adding_an_existing_interest_at_the_cap_is_not_an_error(isolated_subs
     topics = [f"topic {i}" for i in range(users_db.MAX_INTERESTS)]
     users_db.set_interests(7, topics)
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="topic 3"))
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["topic 3"]))
 
     assert "already have" in reply
     assert users_db.get_interests(7) == topics
@@ -528,7 +528,176 @@ def test_narrower_examples_without_the_umbrella_verdict_are_ignored(
             reasoning="", english="Local LLM", is_umbrella=False,
             narrower_examples=["On-device AI models", "Edge inference LLM"]))
 
-    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topic="local llm"),
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["local llm"]),
                                     model="fake")
 
     assert reply == "Added Local LLM to your interests."
+
+
+# --- multi-topic set_interest / remove_interest --------------------------
+# The 2026-08-25 bug: MessageClassification.topic used to be a single
+# string, so "Add AI agent, AI coding, LLM" had no way to become three
+# interests. Measured live: the router sometimes joined them into one
+# garbled entry, sometimes silently dropped everything but one item, and
+# normalize_interest_detailed sometimes compressed the whole request down
+# to "AI" -- which then fuzzy-duplicate-matched an existing "AI" interest
+# and reported nothing was added, exactly what the user hit.
+
+def test_set_interest_with_multiple_topics_adds_each_one(
+    isolated_subscribers_db, monkeypatch
+):
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized(text))
+
+    reply = agent.dispatch_settings(
+        "set_interest", 7,
+        SimpleNamespace(topics=["AI agent", "AI coding", "LLM"]), model="fake")
+
+    assert users_db.get_interests(7) == ["AI agent", "AI coding", "LLM"]
+    assert "Added AI agent" in reply
+    assert "Added AI coding" in reply
+    assert "Added LLM" in reply
+
+
+def test_a_later_topic_in_the_same_message_sees_earlier_ones_as_context(
+    isolated_subscribers_db, monkeypatch
+):
+    """`known` grows as topics resolve within one message, not just across
+    messages -- the second item in "add AAOI, AOI" should get to
+    disambiguate against the first even though neither was stored yet when
+    the message arrived."""
+    seen_alongside = []
+
+    def fake(model, text, alongside=None):
+        seen_alongside.append(list(alongside or []))
+        return _normalized(text)
+
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed", fake)
+
+    agent.dispatch_settings(
+        "set_interest", 7, SimpleNamespace(topics=["AAOI", "AOI"]), model="fake")
+
+    assert seen_alongside[0] == []
+    assert seen_alongside[1] == ["AAOI"]
+
+
+def test_normalize_interest_detailed_is_never_given_a_list_that_later_mutates(
+    isolated_subscribers_db, monkeypatch
+):
+    """Regression for a bug caught while writing this fix: `known` used to
+    be passed BY REFERENCE and then mutated in place after the call, so a
+    caller holding onto `alongside` (a test double, or any future
+    consumer) would see later topics leak into what should be a snapshot
+    of state at call time."""
+    captured = []
+    monkeypatch.setattr(
+        agent.news_classify, "normalize_interest_detailed",
+        lambda model, text, alongside=None: (captured.append(alongside), _normalized(text))[1])
+
+    agent.dispatch_settings(
+        "set_interest", 7, SimpleNamespace(topics=["AAOI", "AOI"]), model="fake")
+
+    assert captured[0] == [], "must still be empty, not mutated by the second topic's add"
+
+
+def test_one_topic_hitting_the_cap_does_not_stop_the_others(
+    isolated_subscribers_db, monkeypatch
+):
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized(text))
+    users_db.set_interests(7, [f"x{i}" for i in range(users_db.MAX_INTERESTS - 1)])
+
+    reply = agent.dispatch_settings(
+        "set_interest", 7, SimpleNamespace(topics=["room for one", "no room for two"]),
+        model="fake")
+
+    assert "Added room for one" in reply
+    assert "Couldn't add no room for two" in reply
+    assert users_db.get_interests(7) == [f"x{i}" for i in range(users_db.MAX_INTERESTS - 1)] + ["room for one"]
+
+
+def test_a_cap_refused_topic_is_not_treated_as_known_by_a_later_topic(
+    isolated_subscribers_db, monkeypatch
+):
+    """A topic that failed to store must not appear in the `alongside`
+    context handed to the next topic's normalization call -- it was never
+    actually added, so it isn't a real interest to disambiguate against."""
+    seen_alongside = []
+
+    def fake(model, text, alongside=None):
+        seen_alongside.append(list(alongside or []))
+        return _normalized(text)
+
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed", fake)
+    users_db.set_interests(7, [f"x{i}" for i in range(users_db.MAX_INTERESTS)])
+
+    agent.dispatch_settings(
+        "set_interest", 7, SimpleNamespace(topics=["refused", "second"]), model="fake")
+
+    assert "refused" not in seen_alongside[1]
+
+
+def test_set_interest_with_no_topics_extracted_does_not_crash(isolated_subscribers_db):
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=[]))
+    assert "Didn't catch" in reply
+    assert users_db.get_interests(7) == []
+
+
+def test_remove_interest_with_multiple_topics_removes_each_one(isolated_subscribers_db):
+    users_db.set_interests(7, ["AI agent", "AI coding", "LLM", "robotics"])
+
+    reply = agent.dispatch_settings(
+        "remove_interest", 7, SimpleNamespace(topics=["AI agent", "LLM"]))
+
+    assert users_db.get_interests(7) == ["AI coding", "robotics"]
+    assert "Removed AI agent" in reply
+    assert "Removed LLM" in reply
+
+
+def test_remove_interest_reports_a_topic_that_was_never_there(isolated_subscribers_db):
+    users_db.set_interests(7, ["robotics"])
+
+    reply = agent.dispatch_settings(
+        "remove_interest", 7, SimpleNamespace(topics=["robotics", "nonexistent"]))
+
+    assert "Removed robotics" in reply
+    assert "nonexistent wasn't in your interests" in reply
+    assert users_db.get_interests(7) == []
+
+
+def test_remove_interest_with_no_topics_extracted_does_not_crash(isolated_subscribers_db):
+    reply = agent.dispatch_settings("remove_interest", 7, SimpleNamespace(topics=[]))
+    assert "Didn't catch" in reply
+
+def test_two_topics_normalizing_to_the_same_label_report_a_duplicate_not_a_double_add(
+    isolated_subscribers_db, monkeypatch
+):
+    """"machine learning" and "ML" both normalize to the same stored label
+    within one message. add_interest's duplicate check reads the DB fresh
+    each call, which stays in sync with `known` because every successful
+    add updates both together -- the second one must report already-have,
+    not silently add a second copy."""
+    monkeypatch.setattr(
+        agent.news_classify, "normalize_interest_detailed",
+        lambda model, text, alongside=None: _normalized("Machine Learning"))
+
+    reply = agent.dispatch_settings(
+        "set_interest", 7, SimpleNamespace(topics=["machine learning", "ML"]),
+        model="fake")
+
+    assert users_db.get_interests(7) == ["Machine Learning"]
+    assert "Added Machine Learning" in reply
+    assert "already have Machine Learning" in reply
+
+
+def test_removing_the_same_topic_twice_in_one_message_is_not_an_error(
+    isolated_subscribers_db
+):
+    users_db.set_interests(7, ["AI"])
+
+    reply = agent.dispatch_settings(
+        "remove_interest", 7, SimpleNamespace(topics=["AI", "AI"]))
+
+    assert users_db.get_interests(7) == []
+    assert "Removed AI" in reply
+    assert "AI wasn't in your interests" in reply

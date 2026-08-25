@@ -227,7 +227,7 @@ def _bypass_guardrails(monkeypatch, category="news_query", **classification_kwar
     """Used by tests that aren't about guardrail behavior itself (message
     formatting, the BadRequest fallback, etc.) so those stay focused on
     what they're actually testing. classification_kwargs lets a caller set
-    a Route B argument field (topic/push_interval_hours/language) as the
+    a Route B argument field (topics/push_interval_hours/language) as the
     real router would."""
     monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
     monkeypatch.setattr(
@@ -373,7 +373,7 @@ def test_handle_message_normalizes_stray_markdown_before_sending(isolated_subscr
     # path is the translated confirmation, so this test exercises that --
     # a plain (untranslated) template is our own fixed string and can't
     # contain stray markdown in the first place.
-    _bypass_guardrails(monkeypatch, category="set_interest", topic="AI")
+    _bypass_guardrails(monkeypatch, category="set_interest", topics=["AI"])
     users_db.set_language(999, "Traditional Chinese")
     monkeypatch.setattr(bot, "_translate_confirmation", MagicMock(return_value="已將 **AI** 加入你的興趣清單"))
     update = _make_update(chat_id=999, text="Add AI to my interests")
@@ -470,7 +470,7 @@ def test_handle_message_dispatches_route_b_without_calling_run_agent(isolated_su
     # Route B categories (set_interest/remove_interest/start_push/
     # stop_push/set_language) bypass the agent loop entirely -- see
     # docs/plans/context-management-plan.md's settings-dispatch refactor.
-    _bypass_guardrails(monkeypatch, category="set_interest", topic="robotics")
+    _bypass_guardrails(monkeypatch, category="set_interest", topics=["robotics"])
     run_agent_mock = MagicMock()
     monkeypatch.setattr(bot, "run_agent", run_agent_mock)
     translate_mock = MagicMock()
@@ -538,7 +538,7 @@ def test_handle_message_route_b_blocked_by_output_guardrail_on_translated_reply(
     # never reaches a layer-4 check at all. This one sets a language
     # preference so translation (and therefore the check) actually runs
     # on the Route B path itself.
-    _bypass_guardrails(monkeypatch, category="set_interest", topic="robotics")
+    _bypass_guardrails(monkeypatch, category="set_interest", topics=["robotics"])
     users_db.set_language(999, "French")
     monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=False))
     monkeypatch.setattr(bot, "_translate_confirmation", MagicMock(return_value="Ajouté robotics à vos intérêts."))
@@ -561,7 +561,7 @@ def test_handle_message_multi_category_dispatches_both_and_joins_replies(isolate
         "classify_message",
         MagicMock(
             return_value=guardrails.MessageClassification(
-                on_topic=True, categories=["set_interest", "news_query"], topic="robotics"
+                on_topic=True, categories=["set_interest", "news_query"], topics=["robotics"]
             )
         ),
     )
@@ -594,7 +594,7 @@ def test_handle_message_multi_category_blocks_whole_reply_if_any_segment_blocked
         "classify_message",
         MagicMock(
             return_value=guardrails.MessageClassification(
-                on_topic=True, categories=["set_interest", "news_query"], topic="robotics"
+                on_topic=True, categories=["set_interest", "news_query"], topics=["robotics"]
             )
         ),
     )
