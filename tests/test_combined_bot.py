@@ -11,13 +11,15 @@ FAKE_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 def test_build_info_app_wires_bot_data(monkeypatch, isolated_subscribers_db):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", FAKE_TOKEN)
     app = combined_bot.build_info_app(
-        agent="fake-agent", admin_chat_id=999, admin_bot_token="admin-token", guard_model="fake-guard-model"
+        agent="fake-agent", admin_chat_id=999, admin_bot_token="admin-token",
+        guard_model="fake-guard-model", embedder="fake-embedder",
     )
 
     assert app.bot_data["agent"] == "fake-agent"
     assert app.bot_data["admin_chat_id"] == 999
     assert app.bot_data["admin_bot_token"] == "admin-token"
     assert app.bot_data["guard_model"] == "fake-guard-model"
+    assert app.bot_data["embedder"] == "fake-embedder"
     # build_info_app grants the admin restricted-source access at startup
     # (news_sources.RESTRICTED_SOURCES: NewsAPI, Perigon) -- confirm it
     # actually happened, not just that it didn't crash.

@@ -2,14 +2,16 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import news_cache
+import news_embed
 import news_ingest
 import news_push
 import news_sources
 import users_db
+from tests.fakes import FakeEmbedder
 
 
-def _article(link, title="Some title", source="TestSource", published_dt=None):
-    return {"title": title, "link": link, "source": source, "summary": None, "published": None, "published_dt": published_dt}
+def _article(link, title="Some title", source="TestSource", published_dt=None, summary=None):
+    return {"title": title, "link": link, "source": source, "summary": summary, "published": None, "published_dt": published_dt}
 
 
 def _fake_classifying_model(categories_by_index=None):
@@ -773,3 +775,115 @@ def test_a_dropped_article_is_not_counted_as_already_cached(
 
     out = capsys.readouterr().out
     assert "1 new, 0 already cached, 1 dropped as non-Latin" in out
+
+
+# --- embedding wiring at ingestion --------------------------------------
+
+def test_a_cycle_with_no_embedder_caches_articles_with_no_embedding(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """The default -- every existing test and call site gets this, and the
+    pipeline must behave exactly as it did before news_embed.py existed."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [_article("https://e.com/1")])])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Hardware"]}), now)
+
+    assert news_cache.read_all()[0]["embedding"] is None
+
+
+def test_a_cycle_with_an_embedder_stores_a_real_embedding(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        news_sources, "enabled_sources",
+        lambda: [("bbc_business", lambda q, n: [_article("https://e.com/1", title="Nvidia launches new GPU")])])
+
+    news_ingest.run_ingestion_cycle(
+        _fake_classifying_model({0: ["Hardware"]}), now, embedder=FakeEmbedder())
+
+    embedding = news_cache.read_all()[0]["embedding"]
+    assert embedding is not None
+    assert len(embedding) == FakeEmbedder.DIM
+
+
+def test_each_article_in_a_batch_gets_its_own_correctly_aligned_embedding(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """Regression for an index-alignment mistake that would be very easy
+    to make here: embeddings must line up with the SAME article as
+    categories does (both indexed against `fetched`), not with each
+    other by construction coincidence."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        news_sources, "enabled_sources",
+        lambda: [("bbc_business", lambda q, n: [
+            _article("https://e.com/1", title="Nvidia launches new GPU"),
+            _article("https://e.com/2", title="Bitcoin price surges"),
+        ])])
+
+    news_ingest.run_ingestion_cycle(
+        _fake_classifying_model({0: ["Hardware"], 1: ["Finance"]}), now, embedder=FakeEmbedder())
+
+    by_link = {a["link"]: a for a in news_cache.read_all()}
+    sim_to_gpu_article = news_embed.cosine_similarity(
+        by_link["https://e.com/1"]["embedding"],
+        news_embed.embed_one(FakeEmbedder(), "Nvidia launches new GPU"))
+    sim_to_bitcoin_article = news_embed.cosine_similarity(
+        by_link["https://e.com/2"]["embedding"],
+        news_embed.embed_one(FakeEmbedder(), "Bitcoin price surges"))
+    assert sim_to_gpu_article > 0.99
+    assert sim_to_bitcoin_article > 0.99
+
+
+def test_ingestion_embeds_title_and_summary_together(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """Measured 2026-08-25 (docs/analysis/cluster-measurements.md,
+    'Title+summary embedding') to matter for headlines written in a
+    business-outcome style with no topic vocabulary in them -- the
+    on-topic content lives only in the summary. A business-outcome
+    headline plus a summary naming a query's actual vocabulary must
+    embed closer to that query than the headline alone would."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        news_sources, "enabled_sources",
+        lambda: [("bbc_business", lambda q, n: [_article(
+            "https://e.com/1",
+            title="Company ships faster with new tools",
+            summary="Nvidia unveils a new GPU architecture for AI training",
+        )])])
+
+    news_ingest.run_ingestion_cycle(
+        _fake_classifying_model({0: ["Hardware"]}), now, embedder=FakeEmbedder())
+
+    cached_embedding = news_cache.read_all()[0]["embedding"]
+    query_embedding = news_embed.embed_one(FakeEmbedder(), "Nvidia GPU architecture")
+    title_only_embedding = news_embed.embed_one(FakeEmbedder(), "Company ships faster with new tools")
+
+    sim_to_cached = news_embed.cosine_similarity(cached_embedding, query_embedding)
+    sim_title_only = news_embed.cosine_similarity(title_only_embedding, query_embedding)
+    assert sim_to_cached > sim_title_only
+
+
+def test_an_embedder_failure_does_not_block_caching(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """embed_texts already fails open (tested in test_news_embed.py) --
+    this confirms the ingestion cycle actually relies on that rather than
+    wrapping its own call in a try/except that could diverge from it."""
+    now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [_article("https://e.com/1")])])
+
+    class Boom:
+        def encode(self, texts):
+            raise RuntimeError("model died")
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Hardware"]}), now, embedder=Boom())
+
+    cached = news_cache.read_all()
+    assert len(cached) == 1
+    assert cached[0]["embedding"] is None

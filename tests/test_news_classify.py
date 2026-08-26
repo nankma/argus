@@ -469,3 +469,73 @@ def test_empty_interest_text_is_rejected_without_calling_the_model():
             raise AssertionError("should not reach the model")
 
     assert news_classify.normalize_interest(NeverCalled(), "   ") is None
+
+
+# --- expand_interest_for_retrieval (2026-08-25) ---------------------------
+# The retrieval-query-expansion cache: news_push's relevance filter and
+# offbeat gate embed this definition instead of the bare interest string,
+# because the bare string was measured to rank genuinely relevant articles
+# below unrelated ones for topics whose real coverage uses different
+# vocabulary than the topic name (see this function's own docstring).
+
+def _echo_expansion_model(definition):
+    class _M:
+        seen = None
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+        def invoke(self, messages):
+            _M.seen = messages
+            return self.schema.model_validate({"reasoning": "r", "definition": definition})
+    return _M()
+
+
+def test_expand_interest_returns_the_definition():
+    model = _echo_expansion_model("AI systems that assist developers in writing code.")
+    assert news_classify.expand_interest_for_retrieval(model, "AI coding") == \
+        "AI systems that assist developers in writing code."
+
+
+def test_expand_interest_sends_the_interest_in_the_user_message():
+    model = _echo_expansion_model("some definition")
+    news_classify.expand_interest_for_retrieval(model, "AI coding")
+    assert "AI coding" in type(model).seen[-1]["content"]
+
+
+def test_expand_interest_instructs_english_output():
+    model = _echo_expansion_model("some definition")
+    news_classify.expand_interest_for_retrieval(model, "光通訊")
+    assert "ENGLISH" in type(model).seen[0]["content"]
+
+
+def test_expand_interest_failure_returns_none(monkeypatch):
+    class Boom:
+        def with_structured_output(self, schema):
+            return self
+        def invoke(self, messages):
+            raise RuntimeError("model down")
+
+    assert news_classify.expand_interest_for_retrieval(Boom(), "AI coding") is None
+
+
+def test_expand_interest_none_result_returns_none():
+    class NoneModel:
+        def with_structured_output(self, schema):
+            return self
+        def invoke(self, messages):
+            return None
+
+    assert news_classify.expand_interest_for_retrieval(NoneModel(), "AI coding") is None
+
+
+def test_expand_interest_blank_definition_returns_none():
+    model = _echo_expansion_model("   ")
+    assert news_classify.expand_interest_for_retrieval(model, "AI coding") is None
+
+
+def test_expand_interest_empty_input_is_rejected_without_calling_the_model():
+    class NeverCalled:
+        def with_structured_output(self, schema):
+            raise AssertionError("should not reach the model")
+
+    assert news_classify.expand_interest_for_retrieval(NeverCalled(), "   ") is None

@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -701,3 +702,83 @@ def test_removing_the_same_topic_twice_in_one_message_is_not_an_error(
     assert users_db.get_interests(7) == []
     assert "Removed AI" in reply
     assert "AI wasn't in your interests" in reply
+
+
+# --- retrieval query expansion, cached on first add (2026-08-25) ---------
+
+def test_a_new_interest_gets_its_retrieval_expansion_generated_and_cached(
+    isolated_subscribers_db, monkeypatch
+):
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized("AI coding"))
+    expand = MagicMock(return_value="AI systems that assist developers writing code.")
+    monkeypatch.setattr(agent.news_classify, "expand_interest_for_retrieval", expand)
+
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]), model="fake-model")
+
+    expand.assert_called_once_with("fake-model", "AI coding")
+    assert users_db.get_interest_query_expansion("AI coding") == \
+        "AI systems that assist developers writing code."
+
+
+def test_an_already_cached_expansion_is_not_regenerated(isolated_subscribers_db, monkeypatch):
+    """The cache is global (users_db.interest_query_expansions), not per
+    subscriber -- a topic another subscriber already caused to be
+    generated must not cost a second LLM call just because a different
+    chat_id adds the same normalized topic."""
+    users_db.set_interest_query_expansion("AI coding", "already cached")
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized("AI coding"))
+    expand = MagicMock()
+    monkeypatch.setattr(agent.news_classify, "expand_interest_for_retrieval", expand)
+
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]), model="fake-model")
+
+    expand.assert_not_called()
+    assert users_db.get_interest_query_expansion("AI coding") == "already cached"
+
+
+def test_no_model_means_no_expansion_attempt(isolated_subscribers_db, monkeypatch):
+    """Settings path stays usable without a model -- same convention as
+    normalize_interest_detailed being skipped when model is None."""
+    expand = MagicMock()
+    monkeypatch.setattr(agent.news_classify, "expand_interest_for_retrieval", expand)
+
+    agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]))
+
+    expand.assert_not_called()
+    assert users_db.get_interest_query_expansion("AI coding") is None
+
+
+def test_expansion_generation_failure_does_not_block_adding_the_interest(
+    isolated_subscribers_db, monkeypatch
+):
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized("AI coding"))
+    monkeypatch.setattr(agent.news_classify, "expand_interest_for_retrieval",
+                        MagicMock(return_value=None))
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]), model="fake-model")
+
+    assert "Added AI coding" in reply
+    assert users_db.get_interests(7) == ["AI coding"]
+    assert users_db.get_interest_query_expansion("AI coding") is None
+
+
+def test_expansion_is_generated_once_even_when_the_add_itself_is_a_duplicate(
+    isolated_subscribers_db, monkeypatch
+):
+    """The expansion cache exists for every future subscriber who adds this
+    topic, not just this call -- so it's still worth populating even when
+    THIS subscriber already has the interest and the add is a no-op."""
+    users_db.set_interests(7, ["AI coding"])
+    monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
+                        lambda model, text, alongside=None: _normalized("AI coding"))
+    expand = MagicMock(return_value="a definition")
+    monkeypatch.setattr(agent.news_classify, "expand_interest_for_retrieval", expand)
+
+    reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]), model="fake-model")
+
+    assert "already have AI coding" in reply
+    expand.assert_called_once()
+    assert users_db.get_interest_query_expansion("AI coding") == "a definition"

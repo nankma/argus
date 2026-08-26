@@ -37,6 +37,7 @@ import admin_bot
 import guardrails
 import healthcheck
 import news_classify
+import news_embed
 import news_ingest
 import news_push
 import test_api
@@ -632,7 +633,10 @@ async def _push_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     async def send(chat_id: int, text: str) -> None:
         await send_push_digest(context.bot, chat_id, text)
 
-    await news_push.run_push_cycle(model, send)
+    # .get(), not [] -- an embedder is an enhancement (near-duplicate
+    # collapse, offbeat selection), never something run_push_cycle
+    # requires to function. See news_embed's module docstring.
+    await news_push.run_push_cycle(model, send, embedder=context.bot_data.get("embedder"))
 
 
 def register_push_job(app: Application) -> None:
@@ -651,7 +655,9 @@ async def _ingest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # run_ingestion_cycle does synchronous network calls across every
     # enabled source -- offloaded the same way handle_message offloads
     # run_agent, so a slow cycle can't block the bot's event loop.
-    await asyncio.to_thread(news_ingest.run_ingestion_cycle, model)
+    await asyncio.to_thread(
+        news_ingest.run_ingestion_cycle, model, embedder=context.bot_data.get("embedder")
+    )
     await review_category_proposals(
         model, context.bot_data["admin_bot_token"], context.bot_data["admin_chat_id"]
     )
@@ -755,10 +761,16 @@ def main():
     model = build_model("LLM_MODEL")
     guard_model = build_model("LLM_MODEL_CLASSIFIER")
     agent = build_agent(model)
+    # None on any failure (missing package, missing model files, out of
+    # memory) rather than raising -- an embedder is an enhancement to
+    # push quality, never something startup depends on. See news_embed's
+    # module docstring.
+    embedder = news_embed.build_embedder()
 
     app = Application.builder().token(token).post_init(_start_test_api).post_shutdown(_stop_test_api).build()
     app.bot_data["agent"] = agent
     app.bot_data["guard_model"] = guard_model
+    app.bot_data["embedder"] = embedder
     app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
     app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
     # Idempotent -- safe to run every startup. Only the admin gets

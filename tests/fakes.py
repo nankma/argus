@@ -9,6 +9,10 @@ live before writing this. FakeToolCallingModel below overrides bind_tools()
 to return self, ignoring the schema, since responses are pre-scripted.
 """
 
+import hashlib
+import re
+
+import numpy as np
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -56,3 +60,36 @@ class RecordingCallbackHandler(BaseCallbackHandler):
 
     def on_tool_end(self, output, **kwargs):
         self.events.append({"type": "tool_end", "output": str(output)})
+
+
+class FakeEmbedder:
+    """Deterministic stand-in for model2vec's StaticModel -- same
+    `.encode(list[str]) -> ndarray of L2-normalized rows` interface, no
+    real model load, no network. Hashes each word into a fixed-size space
+    and sums, so cosine similarity tracks WORD OVERLAP: "Nvidia launches
+    new GPU" and "Nvidia unveils new GPU" land close together, "Bitcoin
+    price surges" lands far from both. Real enough to exercise near-
+    duplicate collapse and offbeat gate/rank logic meaningfully with
+    ordinary English test fixtures, rather than requiring hand-crafted
+    vectors for every case.
+
+    Never call this with an empty text list -- exactly like the real
+    model2vec, it raises rather than silently degrading, so a test
+    exercising news_embed.embed_texts's own empty-input guard still needs
+    that guard to be real."""
+
+    DIM = 32
+
+    def encode(self, texts: list[str]) -> "np.ndarray":
+        if not texts:
+            raise ValueError("need at least one array to concatenate")
+        vectors = np.zeros((len(texts), self.DIM), dtype=np.float32)
+        for i, text in enumerate(texts):
+            for word in re.findall(r"[a-z0-9]+", text.lower()):
+                digest = int(hashlib.sha256(word.encode()).hexdigest(), 16)
+                dim = digest % self.DIM
+                sign = 1.0 if (digest // self.DIM) % 2 == 0 else -1.0
+                vectors[i, dim] += sign
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0  # an all-punctuation/empty string stays the zero vector
+        return vectors / norms

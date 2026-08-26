@@ -515,6 +515,21 @@ def test_set_interest_categories_upserts(isolated_subscribers_db):
     assert users_db.get_cached_interest_categories(["AI"]) == {"AI": ["AI", "Research"]}
 
 
+def test_get_interest_query_expansion_none_when_never_generated(isolated_subscribers_db):
+    assert users_db.get_interest_query_expansion("AI coding") is None
+
+
+def test_set_interest_query_expansion_round_trips(isolated_subscribers_db):
+    users_db.set_interest_query_expansion("AI coding", "AI systems that assist developers...")
+    assert users_db.get_interest_query_expansion("AI coding") == "AI systems that assist developers..."
+
+
+def test_set_interest_query_expansion_upserts(isolated_subscribers_db):
+    users_db.set_interest_query_expansion("AI coding", "first version")
+    users_db.set_interest_query_expansion("AI coding", "second version")
+    assert users_db.get_interest_query_expansion("AI coding") == "second version"
+
+
 def test_get_restricted_sources_enabled_defaults_false(isolated_subscribers_db):
     assert users_db.get_restricted_sources_enabled(1) is False
 

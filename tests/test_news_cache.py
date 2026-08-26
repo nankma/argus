@@ -92,6 +92,22 @@ def test_write_article_preserves_none_summary(isolated_news_cache):
     assert news_cache.read_all()[0]["summary"] is None
 
 
+def test_write_article_without_an_embedding_stores_none(isolated_news_cache):
+    """The default -- an article cached before news_embed.py existed, or
+    one whose embed call failed, must round-trip as None, not a missing
+    key (every consumer checks `is not None`, not `"embedding" in article`)."""
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    news_cache.write_article("hackernews", _article(), [], now)
+    assert news_cache.read_all()[0]["embedding"] is None
+
+
+def test_write_article_stores_and_round_trips_an_embedding(isolated_news_cache):
+    now = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+    vector = [0.1, -0.2, 0.3]
+    news_cache.write_article("hackernews", _article(), [], now, embedding=vector)
+    assert news_cache.read_all()[0]["embedding"] == vector
+
+
 def test_cleanup_archives_instead_of_deleting_when_an_archive_is_configured(
     isolated_news_cache, monkeypatch, tmp_path
 ):

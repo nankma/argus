@@ -42,6 +42,7 @@ import agent as agent_module
 from agent import build_agent, build_model, run_agent, setup_telemetry
 import bot as info_bot
 import admin_bot
+import news_embed
 import telemetry_monitor
 import test_api
 import users_db
@@ -61,13 +62,18 @@ import users_db
 # docs/plans/telemetry-and-testing-plan.md.
 
 
-def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None) -> Application:
+def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None, embedder=None) -> Application:
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.bot_data["agent"] = agent
     # guard_model is independently configurable from agent's own model via
     # LLM_MODEL_CLASSIFIER -- see agent.build_model and
     # docs/plans/model-portability-plan.md's Level 2 per-stage routing.
     app.bot_data["guard_model"] = guard_model
+    # None on any failure -- an enhancement to push quality, never
+    # something the push/ingest jobs (bot.py's _push_job/_ingest_job,
+    # reused here via register_push_job/register_ingest_job) require to
+    # run. See news_embed's module docstring.
+    app.bot_data["embedder"] = embedder
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["admin_bot_token"] = admin_bot_token
     # Idempotent -- see bot.py's main() for the same call and its reasoning.
@@ -163,8 +169,9 @@ def main():
     model = build_model("LLM_MODEL")
     guard_model = build_model("LLM_MODEL_CLASSIFIER")
     agent = build_agent(model)
+    embedder = news_embed.build_embedder()
 
-    info_app = build_info_app(agent, admin_chat_id, admin_bot_token, guard_model=guard_model)
+    info_app = build_info_app(agent, admin_chat_id, admin_bot_token, guard_model=guard_model, embedder=embedder)
     admin_app = build_admin_app(admin_chat_id, info_bot_token)
 
     asyncio.run(run_both(info_app, admin_app, admin_bot_token, admin_chat_id))

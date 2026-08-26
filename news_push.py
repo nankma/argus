@@ -54,6 +54,7 @@ import guardrails
 import healthcheck
 import news_cache
 import news_classify
+import news_embed
 import news_sources
 import users_db
 from opentelemetry import trace
@@ -68,6 +69,83 @@ from opentelemetry import trace
 MAX_INTERESTS_PER_PUSH = 5
 
 MAX_ARTICLES_PER_TOPIC = 5
+
+# Of MAX_ARTICLES_PER_TOPIC, how many go to an article that's ON topic but
+# UNLIKE the typical article in it, rather than always the newest. See
+# select_candidate_articles's docstring and
+# docs/analysis/cluster-measurements.md's "offbeat score" section for the
+# measurement this implements. 0 disables the feature entirely and falls
+# back to pure recency -- a safe rollback with no code change.
+OFFBEAT_SLOTS_PER_TOPIC = 2
+
+# _filter_by_relevance keeps at most this many of a topic's pool, ranked
+# by similarity to the topic's retrieval query -- not a fixed fraction
+# any more. Three real findings, all from the same 2026-08-25
+# measurement session, forced this shape:
+#
+# 1. A fixed fraction cannot work across different pool sizes. This
+#    session's measurement pulled the REAL production cache and found
+#    999 live "AI"-category articles within one 48h cache TTL window at
+#    once -- a fraction tuned for a small pool either starves a 999-item
+#    one or barely filters it at all, depending which end you tune for.
+# 2. A fixed fraction cannot work across different topic PHRASINGS
+#    either, independent of pool size -- "AI Agent"'s genuinely-relevant
+#    articles scored 0.53-0.72 cosine similarity on one corpus, while
+#    "Large Language Model" against the SAME corpus topped out at 0.166
+#    for its single best candidate. Absolute score, and therefore any
+#    fraction-of-the-score-range framing, isn't comparable across
+#    queries.
+# 3. Recall past a certain point stops being worth chasing. Measured
+#    with a carefully hand-verified 24-article ground truth on the real
+#    999-article corpus (not the earlier, since-retracted 40-article
+#    sample -- see docs/analysis/cluster-measurements.md): every fraction
+#    from 60% to 90% recovers at least 22 of 24, and the last 2 --
+#    "How Virgin Atlantic ships faster with Codex", "Asana cleared 5
+#    years of engineering work in 2 weeks with Codex" -- only clear a
+#    'business outcome' headline with none of the definition's technical
+#    vocabulary in it, ranking near the very bottom of a 999-item pool
+#    even though the content is genuinely on-topic. Chasing literally
+#    every last one means keeping ~90% of the pool, which stops being a
+#    filter. The project's own standard (this session, discussing where
+#    to draw this exact line): missing a couple of genuine matches out
+#    of a pool already offering 20+ good candidates is fine, since only
+#    MAX_ARTICLES_PER_TOPIC=5 are ever pushed regardless -- a candidate
+#    ranked near the bottom of a 20+ item pool was never going to be one
+#    of the 5 sent anyway.
+#
+# So: an ABSOLUTE count, clamped between a floor and a ceiling rather
+# than a percentage of a variable-sized, variable-scaled pool --
+#
+#   n_keep = min(RELEVANCE_KEEP_MAX, max(round(pool * RELEVANCE_KEEP_FRACTION), RELEVANCE_KEEP_MIN))
+#
+# RELEVANCE_KEEP_FRACTION=0.10 with a 20-50 clamp: a narrow topic's small
+# pool gets the 20-item floor rather than being starved by 10% of a small
+# number; a broad topic's pool (hundreds, per the 999-article measurement
+# -- and uncapped by count going in, see the raw_pool loop below) gets
+# capped at 50 rather than passing hundreds of candidates through to
+# write_push_digest's single LLM judgment call. All three numbers are
+# first-cut, not re-validated end to end -- adjust freely; they're
+# independent named constants specifically so that's cheap.
+RELEVANCE_KEEP_FRACTION = 0.10
+RELEVANCE_KEEP_MIN = 20
+RELEVANCE_KEEP_MAX = 50
+
+# The relevance-filtered pool is capped here again before recency/offbeat
+# selection runs -- matches RELEVANCE_KEEP_MAX exactly, not some smaller
+# number, specifically so THIS cap is never the tighter, silently-binding
+# one. It was 30 until 2026-08-25 (a guess made before RELEVANCE_KEEP_MAX
+# existed), which would have made RELEVANCE_KEEP_MAX=50 a dead ceiling --
+# the exact bug this whole revision exists to stop repeating.
+OFFBEAT_POOL_SIZE = RELEVANCE_KEEP_MAX
+
+# Above this cosine similarity, two articles collapse to one -- the same
+# wire story cached under two links, or two outlets syndicating one
+# piece. Not a title-match: docs/analysis/cluster-measurements.md found
+# genuine duplicates (9 gnews copies of one syndicated story) and
+# same-titled non-duplicates (BBC's "Tech Now"/"Tech Life" programme
+# titles, a different episode every time) indistinguishable by title
+# alone -- only content similarity tells them apart.
+NEAR_DUPLICATE_SIMILARITY = 0.95
 
 # Ceiling on how old an article's own publication date may be to still be
 # pushed, regardless of when we downloaded it. Needed as of 2026-08-19,
@@ -150,6 +228,8 @@ def select_candidate_articles(
     include_restricted: bool = False,
     max_per_topic: int = MAX_ARTICLES_PER_TOPIC,
     now: datetime | None = None,
+    embedder=None,
+    offbeat_slots: int = OFFBEAT_SLOTS_PER_TOPIC,
 ) -> list[dict]:
     """Stage 1 (category filter): narrows the shared cache to one
     subscriber's candidate articles, before the digest-writing model
@@ -221,7 +301,34 @@ def select_candidate_articles(
     only because callers already pass it and removing it would be a
     breaking change for no gain. `now` is a parameter rather than read from
     the clock so the age guard is deterministic in tests, same convention
-    as run_push_cycle's own `now`."""
+    as run_push_cycle's own `now`.
+
+    Three more steps run per topic before the `max_per_topic` cut, all new
+    2026-08-25 and all optional (a missing embedder, or an article
+    missing its own embedding, degrades each one independently rather
+    than failing the whole call -- see news_embed's module docstring):
+
+    - **Near-duplicate collapse** -- the same wire story cached under two
+      links, or two outlets syndicating one piece, counts once. See
+      NEAR_DUPLICATE_SIMILARITY and docs/analysis/cluster-measurements.md
+      on why this can't be title matching (BBC's "Tech Now"/"Tech Life"
+      programme titles repeat with different content every episode; 9
+      gnews copies of one syndicated story were genuine duplicates under
+      DIFFERENT titles).
+    - **Relevance filter** -- a fine pass after the coarse category one,
+      using the TOPIC STRING itself (not its category) as a retrieval
+      query. Found necessary from a live user report: "AI", "AI Agent",
+      "AI coding" and "Large Language Model" all map to category `AI`,
+      so all four drew from the same undifferentiated pool of generic
+      AI-industry news -- the category filter alone cannot tell them
+      apart. See _filter_by_relevance for why this keeps an absolute,
+      clamped count of the pool's top scorers (RELEVANCE_KEEP_MIN to
+      RELEVANCE_KEEP_MAX), not a fixed threshold or a fraction of the
+      pool -- both were tried and measured not to generalize.
+    - **Offbeat selection** -- of the final `max_per_topic`,
+      `offbeat_slots` go to an article that's still on-topic but unlike
+      the typical article in this topic's own pool, rather than always
+      the newest. See _pick_for_topic."""
     now = now or datetime.now(timezone.utc)
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     ordered = sorted(
@@ -234,10 +341,34 @@ def select_candidate_articles(
     candidates = []
     for topic in topics:
         topic_cats = set(topic_categories.get(topic, []))
-        count_for_topic = 0
+        # The embedding query text -- NOT necessarily `topic` itself. See
+        # _resolve_query_text: a cached, LLM-generated definition of the
+        # topic outperforms the bare topic string as a retrieval query,
+        # measurably (docs/analysis/cluster-measurements.md). `topic`
+        # itself is still what's used for the category-match check right
+        # below and for tagging candidates -- only the embedding calls
+        # use `query_text`.
+        query_text = _resolve_query_text(topic)
+        # Newest-first, deduplicated, gathered BEFORE the max_per_topic cut
+        # (unlike the old single-pass loop), because offbeat selection
+        # needs a pool bigger than the final cut to have anything to
+        # choose from beyond what recency already picked, and the
+        # relevance filter right below needs a big-enough sample to
+        # compute a meaningful median over.
+        #
+        # Not truncated by count here (no RELEVANCE_SAMPLE_SIZE-style cap,
+        # removed 2026-08-25): per-article embeddings are precomputed at
+        # ingestion time (news_ingest.py), so scoring a larger pool here
+        # costs a few hundred more 256-dim dot products, not more model
+        # calls -- negligible. A recency pre-cut ahead of the relevance
+        # filter risked discarding a genuinely more-relevant but slightly
+        # older article before the filter ever saw it. The only bound on
+        # this loop's input is however much `cached_articles` the caller
+        # passed in -- in production, whatever news_cache.read_all()
+        # returns, itself bounded by the 48h TTL (DEFAULT_TTL_HOURS) that
+        # cleanup_expired enforces, not by a count.
+        raw_pool = []
         for article in ordered:
-            if count_for_topic >= max_per_topic:
-                break
             link = article.get("link")
             if not link or link in seen_links:
                 continue
@@ -256,26 +387,269 @@ def select_candidate_articles(
             published_dt = article.get("published_dt")
             if published_dt is not None and now - published_dt > max_age:
                 continue
+            # Near-duplicate collapse. An article with no embedding never
+            # matches anything here -- cosine_similarity(None, x) is -1.0
+            # by construction -- so it's always kept, same fail-open shape
+            # as every other check in this loop. Deliberately does NOT
+            # add `link` to seen_links: being a near-duplicate within
+            # THIS topic's pool doesn't mean it should be unavailable to
+            # a DIFFERENT topic later in this same call, which may have
+            # an entirely different pool to be a duplicate within.
+            embedding = article.get("embedding")
+            if embedding is not None and any(
+                news_embed.cosine_similarity(embedding, p.get("embedding")) >= NEAR_DUPLICATE_SIMILARITY
+                for p in raw_pool
+            ):
+                continue
             seen_links.add(link)
+            raw_pool.append(article)
+
+        # The fine filter after the coarse one -- see _filter_by_relevance.
+        # Capped at OFFBEAT_POOL_SIZE afterward, same reasoning as before
+        # this existed: bigger than the final max_per_topic cut, so
+        # offbeat selection has survivors to choose from.
+        pool = _filter_by_relevance(raw_pool, embedder, query_text)[:OFFBEAT_POOL_SIZE]
+
+        for article in _pick_for_topic(pool, embedder, query_text, max_per_topic, offbeat_slots):
             candidates.append({**article, "topic": topic})
-            count_for_topic += 1
     return candidates
 
 
-def write_push_digest(model, articles: list[dict], language: str | None = None) -> str:
+def _resolve_query_text(topic: str) -> str:
+    """The bare topic string is a weak embedding query -- measured,
+    2026-08-25: for "AI coding", three genuinely relevant real articles
+    ("Claude Cowork...") scored BELOW an unrelated stock-picking article,
+    because model2vec's static embeddings can't connect a product name to
+    a category word without shared vocabulary. A generated definition,
+    rich in the concrete tool/technique vocabulary a real article on the
+    subject would use, measurably ranks genuine matches much higher (the
+    same worst case dropped from needing the top 83% of a pool kept down
+    to 44%). See news_classify.expand_interest_for_retrieval for what's
+    generated and cached, and agent.py's _add_one_interest for when.
+
+    Falls back to the bare `topic` when nothing is cached -- an interest
+    added before this feature existed, or one whose generation call
+    failed and was never retried. Never calls the LLM itself: this runs
+    on every push cycle, and generation is deliberately a write-time,
+    cached, once-per-interest cost, not a read-time one."""
+    return users_db.get_interest_query_expansion(topic) or topic
+
+
+def _filter_by_relevance(pool: list[dict], embedder, query_text: str) -> list[dict]:
+    """The fine filter after the coarse category one: cuts `pool` (already
+    category-matched, newest-first) down to the top-scoring articles by
+    similarity to `query_text`, where "top" means RELEVANCE_KEEP_MIN to
+    RELEVANCE_KEEP_MAX articles depending on pool size -- see that
+    constant's own comment for the full reasoning (an absolute,
+    clamped count, not a fraction; a fraction was tried first and measured
+    not to generalize, across both pool size and topic phrasing).
+    `query_text` is resolved by the caller (see _resolve_query_text) -- a
+    cached generated definition of the topic when one exists, the bare
+    topic string otherwise; this function doesn't know or care which.
+
+    Found necessary live, 2026-08-25: "AI", "AI Agent", "AI coding" and
+    "Large Language Model" all map to category ['AI'], so a subscriber
+    following all four got four near-identical digests drawn from the
+    same generic AI-industry pool -- the category filter has no way to
+    tell them apart, because it was never asked to; only the topic
+    STRING carries that distinction, and until this filter existed
+    nothing downstream used it before write_push_digest's single LLM
+    judgment call, which was measured (same session) to keep every
+    off-target candidate for both "AI Agent" and "AI coding" given the
+    identical input.
+
+    This makes the filter a blunt tool, not the fine-grained relevance
+    decision an earlier version of this docstring implied it could make
+    alone: RELEVANCE_KEEP_MAX's own comment documents two articles that
+    are genuinely on-topic but rank near the bottom of a 999-article real
+    corpus, because their headlines use business-outcome language with
+    none of the definition's technical vocabulary in it -- no clamp
+    shape fixes that specific case on its own, only embedding richer
+    source text does (title+summary rather than title alone -- see
+    news_ingest.py's run_ingestion_cycle, which is what this filter's
+    embeddings actually come from). The precision work still rests on
+    write_push_digest's own topic-framed judgment (see that function's
+    docstring) -- this filter's honest job is trimming the pool down to
+    a workable size that's disproportionately on-topic, not guaranteeing
+    every genuine match survives.
+
+    Falls back to `pool` unchanged -- no filtering at all -- when there's
+    no embedder, no topic vector, or fewer than 2 embedded articles to
+    compute a gate over (same fail-open shape as everywhere else
+    embeddings touch this pipeline). An article with no embedding of its
+    own always survives this filter too -- there is nothing to judge it
+    by, and the pipeline's convention throughout is that a missing
+    embedding excludes an article from an embedding-based FEATURE, never
+    from being a candidate at all."""
+    if not pool:
+        return pool
+    query_vector = news_embed.embed_one(embedder, query_text)
+    if query_vector is None:
+        return pool
+    scored = [(a, news_embed.cosine_similarity(a["embedding"], query_vector))
+             for a in pool if a.get("embedding") is not None]
+    if len(scored) < 2:
+        return pool
+    # Computed from the KEEP side and rounded, not `int(n * (1 - frac))`
+    # -- that subtraction hits float imprecision (1 - 0.9 == 0.09999999999999998
+    # in Python) that silently changes cut_index for specific pool sizes.
+    # Caught by a real test: n=10 computed cut_index=0 instead of 1,
+    # keeping a zero-relevance article that should have been the single
+    # excluded outlier.
+    #
+    # Clamped to len(scored) at the end -- RELEVANCE_KEEP_MIN=20 is bigger
+    # than plenty of real pools (a narrow interest's whole category-matched
+    # pool can be smaller than 20 outright), and without this clamp
+    # n_kept > len(scored) drives cut_index negative, which Python indexes
+    # from the END of the sorted list -- the single highest score becomes
+    # the gate, and the filter would exclude nearly everything instead of
+    # keeping everything.
+    n_kept = min(RELEVANCE_KEEP_MAX, max(round(len(scored) * RELEVANCE_KEEP_FRACTION), RELEVANCE_KEEP_MIN))
+    n_kept = min(n_kept, len(scored))
+    cut_index = len(scored) - n_kept
+    gate = sorted(sim for _, sim in scored)[cut_index]
+    relevant_links = {a["link"] for a, sim in scored if sim >= gate}
+    return [a for a in pool if a.get("embedding") is None or a["link"] in relevant_links]
+
+
+def _pick_for_topic(
+    pool: list[dict], embedder, query_text: str, max_per_topic: int, offbeat_slots: int,
+) -> list[dict]:
+    """`pool` is already newest-first and deduplicated (select_candidate_
+    articles' job). `query_text` is resolved by the caller -- see
+    _resolve_query_text -- and may be a cached generated definition of
+    the topic rather than the bare topic string. Splits the pool into a
+    recency cut and an offbeat cut:
+
+        score = sim(article, query_text) with a floor at
+                the REMAINDER's own median (still genuinely about the
+                topic, not a stray outlier), ranked by LOWEST similarity
+                to the pool's centroid (unlike a typical article in it).
+
+    A single-term "farthest from what's already selected" was measured
+    and rejected in docs/analysis/cluster-measurements.md: it surfaces
+    parsing garbage and language outliers, which are maximally distant
+    from EVERYTHING by construction, before it surfaces genuine novelty.
+    The gate is what fixes that -- both garbage exhibits from that
+    measurement failed it (neither was a good match for its own topic
+    query to begin with).
+
+    Falls back to pure recency -- the pre-2026-08-25 behavior -- for
+    whichever slots don't have a usable signal: no embedder, no topic
+    vector, or fewer than 2 embedded candidates left over after the
+    recency cut (not enough to make a median split meaningful). This is
+    also how `offbeat_slots=0` cleanly disables the feature.
+
+    The gate threshold (the remainder's own median) is a provisional
+    choice, not a fitted one -- see cluster-measurements.md's "Still
+    open" section. It hasn't been re-validated against a corpus pulled
+    with the fixed (non-title-truncating) snapshot collector."""
+    recency_n = max(max_per_topic - offbeat_slots, 0)
+    recency_pick = pool[:recency_n]
+    remainder = pool[recency_n:]
+
+    def fallback():
+        filler_needed = max_per_topic - len(recency_pick)
+        return recency_pick + remainder[:filler_needed]
+
+    if not remainder or offbeat_slots <= 0:
+        return fallback()
+
+    query_vector = news_embed.embed_one(embedder, query_text)
+    embedded_remainder = [a for a in remainder if a.get("embedding") is not None]
+    if query_vector is None or len(embedded_remainder) < 2:
+        return fallback()
+
+    query_sims = [news_embed.cosine_similarity(a["embedding"], query_vector) for a in embedded_remainder]
+    gate = sorted(query_sims)[len(query_sims) // 2]
+    # The centroid represents a typical article FOR THIS TOPIC, so it's
+    # computed over the fuller `pool`, not just the narrower `remainder`
+    # left over after the recency cut.
+    centroid = news_embed.mean_vector([a["embedding"] for a in pool if a.get("embedding") is not None])
+
+    survivors = [(a, sim) for a, sim in zip(embedded_remainder, query_sims) if sim >= gate]
+    survivors.sort(key=lambda pair: news_embed.cosine_similarity(pair[0]["embedding"], centroid))
+    offbeat_pick = [a for a, _sim in survivors[:offbeat_slots]]
+
+    filler_needed = max_per_topic - len(recency_pick) - len(offbeat_pick)
+    if filler_needed > 0:
+        # Not enough offbeat survivors to fill every slot -- top up with
+        # the next most recent article not already picked, rather than
+        # sending a short digest.
+        chosen_links = {a["link"] for a in recency_pick + offbeat_pick}
+        offbeat_pick += [a for a in remainder if a["link"] not in chosen_links][:filler_needed]
+    return recency_pick + offbeat_pick
+
+
+def write_push_digest(model, articles: list[dict], topic: str | None = None,
+                      language: str | None = None) -> str:
     """A single direct model call (no tool loop -- see module docstring)
     that turns a stage-1-filtered candidate list into a Telegram HTML
     digest, applying stage-2 (content) filtering itself per the prompt
     above. `language`, when set, is the subscriber's stored reply-language
     preference (users_db.get_language) -- pushes go through this module's
     own prompt rather than agent.py's dynamic_prompt middleware, so the
-    preference has to be threaded in here too, not just in _compose_prompt."""
+    preference has to be threaded in here too, not just in _compose_prompt.
+
+    `topic` is an explicit parameter, passed by the caller (which already
+    has it in scope -- see run_push_cycle's per-interest loop), NOT read
+    off `articles`. Until 2026-08-25 it wasn't a parameter at all: each
+    candidate carried its own `"topic"` field (stamped on by
+    select_candidate_articles) and the listing repeated `[{topic}]` as a
+    prefix on every single line. Two things wrong with that, found via a
+    live user report of near-identical digests across different
+    interests:
+
+    1. It was a fossil. Before push became one-message-per-interest
+       (2026-08-24), one call covered a subscriber's WHOLE interest list,
+       and the per-line tag genuinely distinguished which of several
+       DIFFERENT interests each candidate belonged to. Once every call
+       covers exactly one interest, every line in one listing carries the
+       identical value -- zero information content, confirmed by grep:
+       no code anywhere reads `article["topic"]` except this f-string.
+    2. It was actively misleading, not just useless. `_PUSH_DIGEST_PROMPT`
+       explicitly tells the model to be skeptical -- "some candidates may
+       not actually be about the subscriber's topic... use your own
+       judgment" -- but the listing FORMAT presented `[AI Agent]` as a
+       per-article, seemingly-confirmed classification sitting right next
+       to each headline. The instruction said "doubt this," the
+       presentation said "this is verified." Reproduced live: given 5
+       generic AI-industry articles (an earnings-reaction piece, a
+       funding round, a job-market study -- none actually about agents or
+       coding), write_push_digest kept every single one under BOTH
+       topic="AI Agent" and topic="AI coding", producing near-identical
+       reports. Stage 1's category filter is coarse by design; stage 2
+       (this function) is supposed to be the fine filter, and the old
+       format gave it nothing to be fine WITH.
+
+    The fix here is necessary but not sufficient: stating the topic once,
+    plainly, with an explicit instruction to judge specificity rather
+    than category membership, gives the model a chance to filter
+    correctly -- it does not guarantee it will, since the model still has
+    no signal stronger than its own semantic judgment of a headline
+    against a topic word. A stricter fix (embedding-based relevance
+    filtering ahead of this call, using the topic string as a retrieval
+    query the way the offbeat gate in select_candidate_articles already
+    does) is discussed but not yet built -- see
+    docs/analysis/cluster-measurements.md."""
     listing = "\n".join(
-        f"- [{a.get('topic')}] {a['title']} ({a.get('source')}, "
+        f"- {a['title']} ({a.get('source')}, "
         f"published {a.get('published') or 'date unknown'}) — {a.get('link')}"
         for a in articles
     )
     system_prompt = _PUSH_DIGEST_PROMPT
+    if topic:
+        system_prompt += (
+            f"\n\nThe subscriber's interest is: {topic}. The candidates "
+            "below already passed a coarse category filter, which only "
+            "confirms they share a broad category with this interest -- "
+            "it does NOT confirm they are actually, specifically about "
+            f"{topic}. Generic industry news that merely mentions the "
+            "same broad field (earnings, funding, market moves, general "
+            f"research) does not count as being about {topic} unless it "
+            "genuinely is. Apply this before applying your usual "
+            "relevance judgment from the instructions above."
+        )
     if language:
         system_prompt += (
             f"\n\nWrite your ENTIRE reply in {language}, regardless of what "
@@ -475,7 +849,7 @@ def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: d
     return elapsed_hours >= interval_hours
 
 
-async def run_push_cycle(model, send: "callable", now: datetime | None = None) -> None:
+async def run_push_cycle(model, send: "callable", now: datetime | None = None, embedder=None) -> None:
     """One scheduler tick: for every push-enabled, due subscriber with at
     least one interest, select candidate articles from the shared cache,
     and if there are any, write and send a digest. `send` is
@@ -489,6 +863,11 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
     including ticks where nobody was due -- not just when something
     actually sends. See _record for why both, and
     docs/plans/incident-monitoring-plan.md for what reads the rows.
+
+    `embedder=None` (the default) threads straight through to every
+    select_candidate_articles call, which degrades near-duplicate
+    collapse and offbeat selection to their pre-2026-08-25 behavior
+    rather than failing -- see news_embed's module docstring.
 
     The cache is read ONCE per cycle and reused across every subscriber
     -- matches docs/plans/local-news-cache-plan.md's stated efficiency argument
@@ -593,19 +972,37 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None) -
                     set(subscriber["pushed_links"]) | set(delivered or []),
                     include_restricted=subscriber["restricted_sources_enabled"],
                     now=now,
+                    embedder=embedder,
                 )
                 if not new_articles:
                     continue
 
                 digest = _model_call(write_push_digest, model, new_articles,
-                                     subscriber["language"])
+                                     topic, subscriber["language"])
                 # Generated: the money is spent from here on, so the next
                 # attempt must be a full interval away even if the rest of
                 # this fails. See the module's `delivered` reasoning.
                 if delivered is None:
                     delivered = []
 
-                if not digest or not digest.strip():
+                # Checked by presence of a real source link, not just
+                # "is the string empty" -- _PUSH_DIGEST_PROMPT's "write
+                # nothing" instruction asks for a literal empty reply
+                # when nothing is relevant, but the model doesn't always
+                # comply with that literally; it can instead write a
+                # non-empty sentence explaining that nothing was relevant
+                # ("No genuinely relevant AI coding stories emerged..."),
+                # which `not digest.strip()` would miss entirely and send
+                # to the subscriber as if it were real content.
+                # TREND_REPORT_STRUCTURE requires every genuine item to
+                # carry a real <a href> link, so a digest with none is
+                # equivalent to an empty one regardless of what prose
+                # surrounds that fact. Reproduced live, 2026-08-25, right
+                # after tightening the "be skeptical of the topic label"
+                # instruction below -- a stricter prompt makes the model
+                # MORE likely to reject everything, which makes this
+                # exact gap more likely to fire, not less.
+                if not digest or not _HREF_RE.search(digest):
                     # Stage 2 judged none of this interest's candidates
                     # genuinely relevant -- see _PUSH_DIGEST_PROMPT's
                     # explicit "write nothing" instruction. Not an error,

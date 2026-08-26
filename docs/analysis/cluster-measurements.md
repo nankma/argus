@@ -1253,3 +1253,273 @@ are wrong -- a classification problem, not a scoring one.
   subsume this.
 - **The gate threshold is the area median**, chosen for having no better
   reason. It should be fitted once there is a clean corpus to fit it on.
+
+## Shipped, 2026-08-25: embeddings landed in production
+
+The near-duplicate collapse and the offbeat gate/rank score described
+above are now implemented and wired into the live pipeline, not just
+measured on a snapshot. `news_embed.py` (model2vec `potion-base-8M`,
+per this document's own backend comparison), `news_cache.write_article`
+storing one embedding per article, `news_ingest.py` computing it at
+ingestion time, and `news_push.select_candidate_articles`/
+`_pick_for_topic` applying `NEAR_DUPLICATE_SIMILARITY` and
+`OFFBEAT_SLOTS_PER_TOPIC` per subscriber-topic.
+
+Two adaptations from what was measured here, both load-bearing:
+
+- **"Area" is now a per-topic candidate pool, not one of the 13 named
+  categories.** Push moved to one message per subscriber interest
+  (2026-08-24, `docs/plans/bot-features-plan.md`) before this landed, so
+  there is no fixed "AI"/"Finance"/"Hardware" pool to compute a centroid
+  over any more -- the centroid and gate are computed fresh, per topic,
+  per push, over that topic's own candidate pool
+  (`OFFBEAT_POOL_SIZE = 30`).
+- **The gate is the REMAINDER's own median**, not the pool's -- the
+  remainder (what's left after the recency cut) is what the offbeat
+  slots actually choose from, so that's what needs a meaningful split.
+
+**Still not done, unchanged from above**: the gate threshold remains a
+provisional choice, not a fitted one -- shipping it doesn't fit it. A
+fresh snapshot pull with the fixed collector, and fitting this threshold
+against it, are both still open. `hot` (story-level clustering across
+outlets) was explicitly out of scope for this pass; only near-duplicate
+collapse and offbeat/novelty selection shipped.
+
+## Stage-1 retrieval precision: the fine filter, 2026-08-25
+
+A live bug exposed the gap this section closes: a subscriber with four
+interests (`AI`, `AI Agent`, `AI coding`, `Large Language Model`) got four
+push messages, three of them titled with the same generic
+`AI產業趨勢報告` fallback and carrying near-identical article lists. Root
+cause was structural, not cosmetic: all four interests map to the same
+coarse category (`AI`), and nothing after that coarse filter narrowed the
+pool per interest -- `write_push_digest` received the same ~200-article
+candidate set for all four topics and had no signal to tell them apart.
+This is the same finding as [*Any category layer between the interest and
+the articles costs recall*](#any-category-layer-between-the-interest-and-the-articles-costs-recall)
+from the other direction: the coarse category is necessary for recall, but
+recall alone isn't precision, and nothing downstream was providing the
+missing precision layer.
+
+**The `[topic]` prefix made this worse, not better.** `write_push_digest`
+prefixed every candidate line with `[AI Agent]`/`[AI coding]`/etc., visually
+presenting the *coarse* category tag as if it were confirmed per-article
+metadata. Reproduced live: the same candidate list under `topic="AI Agent"`
+vs. `topic="AI coding"` produced near-identical digests with the model doing
+essentially no filtering of its own -- the prefix read as "already sorted,"
+so the model trusted it instead of judging relevance itself. Removed; the
+topic is now stated once in the system prompt with explicit
+skepticism-calibration language instead of repeated per-line as pseudo-metadata.
+
+### A fixed similarity threshold cannot work across topics
+
+First attempt was a fixed cosine cutoff after the coarse filter. Measured
+against real per-topic queries on the same corpus: "AI Agent" genuine
+matches scored 0.53-0.72 cosine; "Large Language Model" genuine matches
+topped out at 0.166 on the *same* corpus. Absolute cosine scores are not
+comparable across different queries with model2vec -- there is no single
+threshold that works for both. This ruled out any fixed-threshold design
+and motivated a relative cut instead (a percentile/gate on the pool's own
+score distribution), which became the shape everything below refines.
+
+### Recall-based measurement, not raw keep-counts
+
+Early self-checks eyeballed keep-counts and top-ranked titles. Corrected
+methodology, stated directly: *if a topic genuinely has only one relevant
+article in the pool and everything else gets filtered out, that is the
+correct result -- filtering hard is not itself a problem. The actual test is
+recall: if 5 articles in the pool are genuinely about "AI coding" and 8 are
+genuinely about "AI Agent," the filter must keep all 5 and all 8. Keeping
+10 or 16 (i.e. some false positives alongside them) is fine. Losing even
+one of the 5 or 8 is not.*
+
+Building a real ground-truth set to measure this against caught two of my
+own labeling errors, both corrected directly by spot-checking summaries
+rather than trusting titles:
+
+- **Over-inclusion by loose association**: articles about a Cowork "memory
+  feature" were first counted as "AI coding" ground truth because Cowork is
+  a coding-adjacent tool -- wrong; the articles are about a generic
+  memory/privacy feature, not about coding. Correction as stated: *not*
+  "Cowork is unrelated," but "Cowork is not *strongly* related" -- relevance
+  is a matter of degree, not a binary in/out flag, and the ground truth set
+  needs to reflect that.
+- **Under-inclusion by headline style**: two low-ranked "AI coding" ground
+  truth items (Virgin Atlantic, Asana) were initially waved off as
+  business-outcome headlines nobody reading "AI coding" would care about.
+  Pulling their actual summaries showed they genuinely describe concrete
+  coding/testing work ("near-total unit test coverage," "replace an
+  outdated testing system") -- legitimately on-topic, just written in a
+  business-outcome headline style with no technical vocabulary in the
+  title. This is a real, distinct failure mode from the Cowork case: not
+  "loosely related," but "correctly related, harder for a title-only
+  embedding to see."
+
+That second finding is what made title+summary embedding non-negotiable
+rather than a nice-to-have (see below): a title-only vector has no way to
+see past a headline-writing-style gap when the actual on-topic content
+lives in the summary.
+
+### What model2vec (static embeddings) cannot do
+
+Two capability ceilings, confirmed empirically rather than assumed:
+
+- **No negation.** Appending "not about memory/privacy/pricing/UI" to a
+  topic's definition query was tried as a way to push the Cowork articles
+  down. Measured effect: their rank got *slightly worse* (closer to the
+  top), not better -- the literal word "memory" added to the query vector
+  pulled it *closer* to memory-related articles, the opposite of the
+  intended effect. Static embeddings have no mechanism to represent "not,"
+  so negated instructions in the query text actively backfire. Not
+  attempted again.
+- **HyDE has fast diminishing returns.** Tested embedding a full
+  hypothetical-document outline for a topic against a short one-sentence
+  definition. Needed-keep-fraction (the recall metric above) moved from
+  44% to 41% -- most of the gain comes from having *any* real definition
+  instead of the bare topic phrase, not from how elaborate that definition
+  is. `expand_interest_for_retrieval` (`news_classify.py`) generates a
+  short glossary-style definition per interest, cached in
+  `interest_query_expansions` (`users_db.py`) -- the cheap, mostly-there
+  version of this, not the expensive outline.
+
+### Title+summary embedding: a measured trade-off, not a clean win
+
+Confirmed first that no full article body exists anywhere in the system --
+`news_sources.py` caps RSS summaries at 300 characters, `hackernews`
+articles carry `summary: None`. Title+summary is the richest text
+available, not a step toward something richer still available but unused.
+
+Measured switching the embedded text from title-only to title+summary on
+the same corpus: Virgin Atlantic's needed-keep rank moved from the 87th
+percentile to the 68th, Asana similarly -- both real recall improvements,
+matching the headline-style gap found above. But the Cowork memory
+article's rank *also* improved, from the 25th percentile to the 12th (i.e.
+became *more* prominent, not less) -- the richer text amplifies the
+loosely-related false positive along with the genuinely-related items. Net
+assessed as worth it (more of the real signal than of the false-positive
+signal), but explicitly not a strict improvement on every axis -- the
+remaining precision cost is left to `write_push_digest`'s own LLM judgment
+as the final layer, per [*Merging fixes exactly one of the three failure
+modes*](#merging-fixes-exactly-one-of-the-three-failure-modes)'s established
+division of labor between retrieval and generation.
+
+**Shipped**: `news_ingest.py`'s `run_ingestion_cycle` now embeds
+title+summary, not title alone, wiring the finding above into the
+ingestion path the same day it was measured. No backfill was needed --
+the ~48-hour cache TTL (`DEFAULT_TTL_HOURS`) phased out the older
+title-only vectors on its own.
+
+### Brand-name matching contributes, but isn't the dominant signal
+
+Ablation: stripped `\bcodex\b` (case-insensitive) from titles and summaries
+in the "AI coding" corpus and re-ran the ranking, keeping the un-stripped
+text alongside in the output for comparison. Worst-needed-keep rank moved
+from the 68th to the 83rd percentile after stripping -- Codex-name matching
+is worth roughly 15 percentage points of rank, a real and measurable
+contribution, but most mid-rank items barely moved. Brand-name string
+matching helps; it is not what the ranking is actually built on.
+
+### The keep-count formula: absolute clamp, not a fixed fraction or a fixed number
+
+Neither a fixed top-N nor a fixed percentage survives contact with real
+pool-size variance: a fixed N over-keeps for a small pool and a fixed
+percentage over-keeps for a very large one (999 articles in the "AI"
+category alone, in a real production-cache pull). Landed on:
+
+```
+n_kept = min(RELEVANCE_KEEP_MAX,
+             max(round(pool_size * RELEVANCE_KEEP_FRACTION), RELEVANCE_KEEP_MIN))
+```
+
+with `RELEVANCE_KEEP_FRACTION = 0.10`, `RELEVANCE_KEEP_MIN = 20`,
+`RELEVANCE_KEEP_MAX = 50` -- chosen after reviewing ranked 24-item and
+top-50 CSV exports of real production-cache data by hand and confirming top
+50 is a reasonable range for what a subscriber-facing digest should draw
+from.
+
+The raw pool fed into this formula went through two revisions the same
+day. First, `RELEVANCE_SAMPLE_SIZE` (a count-based pre-cap on the
+category-matched pool, applied before this formula ever saw it) was
+raised from 60 to 600: 60 was never measured, just an unexamined 2x
+multiple of `OFFBEAT_POOL_SIZE`, and at that size the 10% fraction can
+never exceed `RELEVANCE_KEEP_MAX` for any real topic -- making the MAX
+ceiling permanently dead code. Then, once it was clear per-article
+embeddings are precomputed at ingestion time (not recomputed per push),
+`RELEVANCE_SAMPLE_SIZE` was removed outright rather than re-tuned again:
+a recency-based count cap ahead of the relevance filter costs almost
+nothing to keep raising, but it also risks discarding a genuinely
+more-relevant, slightly-older article before the filter ever scores it,
+for a savings (a few hundred more 256-dim dot products) too small to be
+worth that risk. The pool this formula now sees is bounded only by
+whatever the 48h cache TTL (`DEFAULT_TTL_HOURS`) leaves on disk -- 999
+"AI"-category articles were measured live within that window, so the
+ceiling still engages for a broad topic, just for a naturally-occurring
+reason rather than a tuned one.
+
+`OFFBEAT_POOL_SIZE` was changed from a separately-hardcoded 30 to
+`= RELEVANCE_KEEP_MAX` for the same reason applied one level down: a
+tighter, silently-binding cap two constants away from where you'd look for
+it defeats the outer one without any test noticing.
+
+Two implementation bugs caught only because a real test failed, not by
+inspection:
+
+- `int(pool_size * (1 - RELEVANCE_KEEP_FRACTION))` is not the same as
+  computing from the keep side: `1 - 0.9 == 0.09999999999999998` in Python
+  float arithmetic, so for `pool_size=10` this computed `cut_index=0`
+  instead of `1`. Fixed by computing `n_kept` directly and deriving
+  `cut_index = len(scored) - n_kept`, never the subtraction-first form.
+- Without clamping `n_kept = min(n_kept, len(scored))`, a pool smaller than
+  `RELEVANCE_KEEP_MIN` drives `cut_index` negative, and Python silently
+  indexes a negative index from the *end* of the sorted-ascending list --
+  making the single highest score the gate and excluding almost
+  everything, the exact opposite of the intended fail-open behavior for
+  small pools.
+
+**Mutation-testing gotcha, worth keeping in mind for any test over
+`FakeEmbedder`-scored pools**: `FakeEmbedder` (`tests/fakes.py`) is a
+hash-based deterministic word-overlap embedding, and at moderate pool
+sizes (~500 items) it produces real tie-clusters wide enough to absorb the
+difference between a capped and uncapped keep-count -- a test built at that
+scale passed identically whether `RELEVANCE_KEEP_MAX` was applied or
+deleted from the code, silently failing to prove the ceiling did anything.
+Confirmed by deliberately mutating the formula and rerunning: not caught at
+pool=520 (capped and uncapped survivor counts landed in the same tie
+cluster), caught cleanly at pool=3000 (208 capped vs. 370 uncapped
+survivors, a gap no tie cluster spans). When a test's job is to prove a
+numeric ceiling changes behavior, size the fixture from a real diagnostic
+run showing separation, not from "big enough to look thorough."
+
+**Still open, same shape as the corpus-side items above**: the gate
+threshold inside `_filter_by_relevance` is itself provisional (a relative
+cut on the pool's own distribution, described above) -- fitting it against
+a large clean corpus, and the `pushed_links`-as-relational-table question
+raised alongside this investigation, both remain deferred.
+
+### Real end-to-end confirmation, same day
+
+Ran the actual `news_push._filter_by_relevance` and
+`news_classify.expand_interest_for_retrieval` -- real model2vec, real
+DeepSeek call, no fakes -- against the full 999-article "AI"-category pool
+from the same production-cache pull used throughout this section, for the
+three topics that originally collapsed into one generic digest (the bug
+that started this investigation): "AI Agent," "AI coding," "Large Language
+Model."
+
+Result: each topic now gets a genuinely distinct top-8, on-topic for its
+own definition and clearly different from the other two --
+
+- AI Agent top hit: `Prime Agent: A Self-Improving RLM Harness` (+0.678)
+- AI coding top hit: `Claude Code costs up to $200 a month. Goose does the
+  same thing for free.` (+0.646)
+- Large Language Model top hit: `Advancing voice intelligence with new
+  models in the API` (+0.627)
+
+`RELEVANCE_KEEP_MAX=50` engaged correctly for all three (999 in, 50 kept,
+matching `round(999*0.10)=100` clamped down to 50) confirming the raw pool
+is genuinely uncapped-by-count going in, not silently still bounded by the
+removed `RELEVANCE_SAMPLE_SIZE`. Absolute top scores are also markedly
+higher than the pre-title+summary measurement earlier in this document
+("Large Language Model" topped at 0.166 there; 0.627 here) -- consistent
+with, not proof of, the title+summary and generated-definition changes
+compounding rather than fighting each other.
