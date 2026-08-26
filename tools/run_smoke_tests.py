@@ -243,9 +243,19 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
     # not just that the category routed correctly -- the bug produced a
     # valid set_interest category with the wrong number of things stored.
     #
-    # Fresh chat_id, same reasoning as case 14 -- keeps this independent of
-    # whatever interests earlier cases left on the shared id.
+    # Dedicated chat_id, same reasoning as case 14 -- keeps this independent
+    # of whatever interests earlier cases left on the shared id. NOT
+    # actually fresh across separate runs, though: this id is a fixed
+    # constant (SMOKE_TEST_CHAT_ID + 2), so once a run's "Add ..." message
+    # below succeeds, all three topics stay stored on it forever, and every
+    # later deploy's run starts from "already covered" instead of "new" --
+    # a real false-failure caught live on the first deploy after PR #36
+    # shipped multi-topic set_interest (added_count=0, reply confirmed all
+    # three as already-present, not a routing/storage regression). Explicit
+    # teardown first, rather than trusting the id to still be empty, so
+    # this case is actually idempotent across repeated deploys.
     multi_topic_chat_id = chat_id + 2
+    send(multi_topic_chat_id, "Remove AI agent, AI coding, and LLM from my interests", timeout)
     r = send(multi_topic_chat_id, "Add AI agent, AI coding, and LLM to my interests", timeout)
     reply = r["reply"]
     added_count = reply.lower().count("added ")
