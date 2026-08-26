@@ -128,6 +128,23 @@ the same incidents inline.
    been added yet; flag it to the caller rather than assuming it's safe
    to add mid-deploy.
 
+   **Don't trust `docker images`' SIZE column for this image on this
+   Windows/Docker Desktop machine — it overstates real size by ~5x.**
+   Real finding, 2026-08-25 (`myfirstagent-bot` after the model2vec/
+   `news_embed.py` change): `docker images myfirstagent-bot` reported
+   `1.86GB`, which looked like a real regression against the ~383MB this
+   change was supposed to land at. `docker inspect myfirstagent-bot
+   --format '{{.Size}}'` and an actual `docker save -o image.tar` (the
+   literal bytes that get transferred to the VM in step 2 below) both
+   agreed on `382722712` / `382748160` bytes — i.e. genuinely ~383MB, no
+   regression. The `docker images` SIZE column is not authoritative on
+   this setup (observed cause: it appears to double-count layers shared
+   with the `mambaorg/micromamba` base and/or a prior locally-built tag
+   rather than deduplicating them). **Verify image size with `docker
+   inspect --format '{{.Size}}'` or a real `docker save`, not `docker
+   images`** — the latter is fine for a quick "did this build at all"
+   glance but not for a size comparison against a target number.
+
 2. Transfer the image directly over SSH — no container registry needed
    for a single personal VM:
    ```bash
