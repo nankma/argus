@@ -167,6 +167,27 @@ def init_db() -> None:
             )
             """
         )
+        # Same shape and reasoning as interest_categories above: global,
+        # not per-subscriber (the same interest text means the same
+        # definition no matter who added it), keyed on the stable
+        # normalized-English interest string so this is a cache hit for
+        # any interest that's been added by any subscriber before.
+        # See news_classify.expand_interest_for_retrieval for what's
+        # stored here and why -- a generated definition used as the
+        # embedding query in news_push's relevance filter and offbeat
+        # gate, instead of the bare interest string, because the bare
+        # string was measured to rank genuinely relevant articles below
+        # unrelated ones for topics whose real coverage uses different
+        # vocabulary than the topic name itself (e.g. "AI coding" vs.
+        # articles about a product literally named "Cowork").
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interest_query_expansions (
+                interest TEXT PRIMARY KEY,
+                expansion TEXT NOT NULL
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS health_state (
@@ -991,6 +1012,31 @@ def set_interest_categories(interest: str, categories: list[str]) -> None:
             ON CONFLICT(interest) DO UPDATE SET categories = excluded.categories
             """,
             (interest, json.dumps(categories)),
+        )
+
+
+def get_interest_query_expansion(interest: str) -> str | None:
+    """None means never generated (agent.py's _add_one_interest calls
+    news_classify.expand_interest_for_retrieval and caches it via
+    set_interest_query_expansion below on a cache miss) -- callers
+    (news_push.py's _resolve_query_text) fall back to the bare interest
+    string in that case, same fail-open shape as everywhere else this
+    session's embedding work touches the pipeline."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT expansion FROM interest_query_expansions WHERE interest = ?", (interest,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_interest_query_expansion(interest: str, expansion: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO interest_query_expansions (interest, expansion) VALUES (?, ?)
+            ON CONFLICT(interest) DO UPDATE SET expansion = excluded.expansion
+            """,
+            (interest, expansion),
         )
 
 

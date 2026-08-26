@@ -80,6 +80,7 @@ from datetime import datetime, timezone
 import healthcheck
 import news_cache
 import news_classify
+import news_embed
 import news_sources
 import users_db
 
@@ -288,11 +289,17 @@ def _report_category_proposals(now: datetime) -> None:
           f"(last {users_db.CATEGORY_SIGHTING_RETENTION_DAYS}d): {summary}")
 
 
-def run_ingestion_cycle(model, now: datetime | None = None) -> None:
+def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> None:
     """One scheduler tick. Every outcome is printed -- same reasoning as
     news_push.py's run_push_cycle: a silent per-source/per-cycle failure
     was a real incident there (docs/reference/observability-and-debugging.md),
-    worth not repeating here."""
+    worth not repeating here.
+
+    `embedder=None` (the default, and what every existing test and
+    call site gets without changes) means every article is cached with
+    embedding=None -- see news_embed's module docstring on why a missing
+    embedder must degrade the pipeline, never break it. Pass one built
+    by news_embed.build_embedder() to actually populate it."""
     now = now or datetime.now(timezone.utc)
     # Recorded unconditionally, before any per-source due-check -- this is
     # what healthcheck.py's liveness check reads to answer "is this job
@@ -462,6 +469,24 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
             label, now, article.get("link"), article.get("title")
         ),
     )
+    # Title+summary, not title alone -- measured 2026-08-25
+    # (docs/analysis/cluster-measurements.md, "Title+summary embedding")
+    # to genuinely improve recall for articles whose headline is written
+    # in a business-outcome style with no topic vocabulary in it (the
+    # actual on-topic content lives only in the summary). No article body
+    # exists anywhere in this system to embed instead -- RSS summaries are
+    # capped at 300 chars in news_sources.py, and that's the richest text
+    # available. `summary` is None for some sources (e.g. hackernews), so
+    # this falls back to title alone for those rather than embedding "None".
+    # One batch call for the whole cycle (never per-article -- see
+    # news_embed.embed_texts's own docstring on why), aligned back to
+    # `fetched` by plain list index: unlike classify_articles, embed_texts
+    # never drops an item, so there's no _by_index dict to look up, just
+    # a same-length list.
+    embeddings = news_embed.embed_texts(
+        embedder,
+        [f"{a.get('title') or ''} {a.get('summary') or ''}".strip() for _, a in fetched],
+    )
     unclassified = 0
     for i, (source_key, article) in enumerate(fetched):
         # Three distinct outcomes, three distinct records. `.get(i)` is None
@@ -473,7 +498,7 @@ def run_ingestion_cycle(model, now: datetime | None = None) -> None:
             categories = [users_db.UNCLASSIFIABLE]
         if categories is None:
             unclassified += 1
-        news_cache.write_article(source_key, article, categories, now)
+        news_cache.write_article(source_key, article, categories, now, embedding=embeddings[i])
     if unclassified:
         print(f"[news_ingest] {unclassified} of {len(fetched)} article(s) cached "
               f"WITHOUT being classified -- the classifier failed for them")

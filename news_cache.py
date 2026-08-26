@@ -85,7 +85,7 @@ def _parse_iso(raw: str | None) -> datetime | None:
 
 
 def write_article(source_key: str, article: dict, categories: list[str] | None,
-                  fetched_at: datetime) -> Path:
+                  fetched_at: datetime, embedding: list[float] | None = None) -> Path:
     """`source_key` is the registry key (e.g. "bbc_business", matching
     SOURCE_REGISTRY in news_sources.py), not the article's own "source"
     field (a display name like "BBC Business") -- the filename needs the
@@ -94,7 +94,15 @@ def write_article(source_key: str, article: dict, categories: list[str] | None,
     (title/link/source/summary/published/published_dt). Overwrites
     silently if this exact link was already cached (from an earlier cycle,
     or a different source pulling the same story) -- the newer fetch and
-    classification simply replace the older one."""
+    classification simply replace the older one.
+
+    `embedding` is optional and None by default -- an article cached
+    before news_embed.py existed, or one whose embedding call failed
+    (see news_embed's module docstring on why that must never block
+    caching), simply has none. Every consumer (near-duplicate collapse,
+    offbeat selection in news_push.select_candidate_articles) already
+    treats a missing embedding as "skip this feature for this article",
+    the same fail-open shape as a missing `categories`."""
     link = article["link"]
     record = {
         "source": article.get("source"),
@@ -111,6 +119,7 @@ def write_article(source_key: str, article: dict, categories: list[str] | None,
         # indistinguishable from normal operation. news_ingest writes
         # users_db.UNCLASSIFIABLE for the first case.
         "categories": list(categories) if categories is not None else None,
+        "embedding": list(embedding) if embedding is not None else None,
     }
     path = _file_path(source_key, link)
     with open(path, "w", encoding="utf-8") as f:

@@ -21,6 +21,7 @@ the network per request.
 | 5 | `search_news` rewritten to read the cache instead of live sources | **Not built — deliberately deferred.** Changes live, user-facing agent behavior (`agent.py`'s tool, and `guardrails.classify_message`'s output schema); items 1–3 are additive and don't touch anything currently running, so they shipped first. See "Next step" below. |
 | 6 | `news_push.py` converging onto the same cache | **Built 2026-08-15** — see "Interaction with `news_push.py`" below, rewritten in place rather than left as a follow-on. |
 | 7 | Since-based ingestion for query-capable sources (replacing the flat top-N cap) | **Built 2026-08-16** — see "Since-based ingestion" below |
+| 8 | Article/topic embeddings — near-duplicate collapse and offbeat/novelty selection | **Built 2026-08-25** — `news_embed.py` (model2vec), computed at ingestion, consumed by `news_push.select_candidate_articles`. See `docs/analysis/cluster-measurements.md`'s "Shipped, 2026-08-25" section for the measurement behind it and what's still provisional (the offbeat gate threshold). |
 
 **Why item 6 moved from "optional" to "built" ahead of item 5:** a real
 incident forced it. `news_push.py` calling live, query-blind RSS sources

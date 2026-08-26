@@ -7,8 +7,19 @@ COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/environment.yml
 RUN micromamba install -y -n base -f /tmp/environment.yml && \
     micromamba clean --all --yes
 
+# Bakes the embedding model's weights (~30 MB) into this layer at build
+# time, with real network access -- so the running container never needs
+# to reach huggingface.co. news_embed.py sets HF_HUB_OFFLINE=1 at import
+# time specifically so a 1-OCPU VM with no guaranteed outbound access to
+# that host gets a loud ValueError on any unexpected download attempt at
+# runtime, never a silent hang or a slow ingestion cycle. Placed before
+# the app-code COPY below so an ordinary commit doesn't invalidate this
+# layer -- same reasoning as the micromamba install layer above it.
+RUN micromamba run -n base python -c \
+    "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M')"
+
 WORKDIR /app
-COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py healthcheck.py guardrails.py users_db.py test_api.py docker-entrypoint.sh ./
+COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_embed.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py healthcheck.py guardrails.py users_db.py test_api.py docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
 # Real incident, 2026-08-09: `docker logs` returned zero lines for this

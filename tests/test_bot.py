@@ -836,6 +836,43 @@ def test_send_push_digest_falls_back_to_plain_text_on_bad_request():
     assert "parse_mode" not in second_kwargs
 
 
+def test_push_job_threads_the_bot_datas_embedder_through(monkeypatch):
+    context = _make_context()
+    context.bot_data["embedder"] = "fake-embedder"
+    context.bot = MagicMock()
+    run_push_cycle = AsyncMock()
+    monkeypatch.setattr(bot.news_push, "run_push_cycle", run_push_cycle)
+
+    asyncio.run(bot._push_job(context))
+
+    assert run_push_cycle.call_args.kwargs["embedder"] == "fake-embedder"
+
+
+def test_push_job_with_no_embedder_in_bot_data_passes_none(monkeypatch):
+    """bot_data.get(), not [] -- a deployment where build_embedder() failed
+    at startup must not KeyError the push job, it must degrade."""
+    context = _make_context()
+    context.bot = MagicMock()
+    run_push_cycle = AsyncMock()
+    monkeypatch.setattr(bot.news_push, "run_push_cycle", run_push_cycle)
+
+    asyncio.run(bot._push_job(context))
+
+    assert run_push_cycle.call_args.kwargs["embedder"] is None
+
+
+def test_ingest_job_threads_the_bot_datas_embedder_through(monkeypatch):
+    context = _make_context()
+    context.bot_data["embedder"] = "fake-embedder"
+    run_ingestion_cycle = MagicMock()
+    monkeypatch.setattr(bot.news_ingest, "run_ingestion_cycle", run_ingestion_cycle)
+    monkeypatch.setattr(bot, "review_category_proposals", AsyncMock())
+
+    asyncio.run(bot._ingest_job(context))
+
+    assert run_ingestion_cycle.call_args.kwargs["embedder"] == "fake-embedder"
+
+
 def test_register_push_job_schedules_one_repeating_job():
     from telegram.ext import Application
 

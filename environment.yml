@@ -25,3 +25,28 @@ dependencies:
   - python-telegram-bot
   - apscheduler
   - oci-cli
+  # news_embed.py -- article/topic embeddings for near-duplicate collapse
+  # and offbeat/novelty selection in news_push.select_candidate_articles.
+  # docs/analysis/cluster-measurements.md is the measurement behind this
+  # specific choice: fastembed and sentence-transformers were both
+  # measured too heavy for the deploy target's available RAM, and TF-IDF
+  # was measured to have NEGATIVE separation on this corpus (a false
+  # positive outscored a true match).
+  #
+  # Installed via pip, NOT as a conda-forge package -- confirmed the hard
+  # way (a local Docker build here on 2026-08-25, +1.88 GB on one layer)
+  # that conda-forge's model2vec recipe declares pytorch, onnx,
+  # transformers, scikit-learn, lightning, rich and skops as HARD runtime
+  # dependencies of the conda package, even though PyPI's own metadata
+  # marks every one of them an optional "distill"/"onnx"/"train"/
+  # "quantization" extra that model2vec's actual encode()/from_pretrained()
+  # path never imports. `conda search -c conda-forge model2vec --info`
+  # confirms this directly. Same shape as the CLAUDE.md arize-phoenix
+  # lesson: a package's declared dependencies do not transfer identically
+  # between packaging ecosystems, so don't assume they do -- measure the
+  # actual install. The pip wheel's base install really is just
+  # jinja2/joblib/numpy/safetensors/tokenizers/tqdm, confirmed the same
+  # way (`pip show model2vec`, and the built image's own `pip list`).
+  - pip
+  - pip:
+      - model2vec

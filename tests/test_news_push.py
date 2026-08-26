@@ -5,10 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 from langchain_core.messages import AIMessage
 
 import news_cache
+import news_embed
 import news_push
 import news_sources
 import users_db
-from tests.fakes import FakeToolCallingModel
+from tests.fakes import FakeEmbedder, FakeToolCallingModel
 
 
 # Selection keys on fetched_at (when we downloaded it), not published_dt --
@@ -16,7 +17,7 @@ from tests.fakes import FakeToolCallingModel
 # so the many tests that only care about ordering stay readable; tests about
 # the delay case set them apart explicitly.
 def _article(link, published_dt=None, title="Some title", source="TestSource", categories=None,
-             source_key="test", fetched_at=None):
+             source_key="test", fetched_at=None, embedding=None):
     return {
         "title": title,
         "link": link,
@@ -26,6 +27,7 @@ def _article(link, published_dt=None, title="Some title", source="TestSource", c
         "published_dt": published_dt,
         "fetched_at": fetched_at if fetched_at is not None else published_dt,
         "categories": categories or [],
+        "embedding": embedding,
     }
 
 
@@ -38,7 +40,7 @@ NOW = datetime(2026, 8, 6, tzinfo=timezone.utc)
 # --- select_candidate_articles (stage 1: category filter) -----------------
 
 
-def test_select_candidate_articles_ignores_dates_when_deciding_already_seen():
+def test_select_candidate_articles_ignores_dates_when_deciding_already_seen(isolated_subscribers_db):
     """A date ranks; it never filters. Both of these were published well
     before the subscriber's last push, and neither has been sent -- so both
     must come through. This is the GNews case: a source publishing ~12h
@@ -55,7 +57,7 @@ def test_select_candidate_articles_ignores_dates_when_deciding_already_seen():
     assert [a["link"] for a in result] == ["https://example.com/a", "https://example.com/b"]
 
 
-def test_select_candidate_articles_keeps_offering_an_unsent_article():
+def test_select_candidate_articles_keeps_offering_an_unsent_article(isolated_subscribers_db):
     """An article that lost the max_per_topic cut is not "seen" -- it stays a
     candidate until it is actually sent or ages out of the cache. Under the
     previous timestamp-based filter it would have been excluded forever,
@@ -75,7 +77,7 @@ def test_select_candidate_articles_keeps_offering_an_unsent_article():
     assert [a["link"] for a in second] == ["https://example.com/3", "https://example.com/4"]
 
 
-def test_select_candidate_articles_drops_articles_older_than_the_age_guard():
+def test_select_candidate_articles_drops_articles_older_than_the_age_guard(isolated_subscribers_db):
     """Guards the fetched_at rule against genuinely ancient content: Perigon's
     one successful fetch returned 50 articles whose newest was over a year
     old (security-plan.md finding 21). Freshly downloaded, but not news."""
@@ -91,7 +93,7 @@ def test_select_candidate_articles_drops_articles_older_than_the_age_guard():
     assert [a["link"] for a in result] == ["https://example.com/recent"]
 
 
-def test_select_candidate_articles_keeps_articles_with_unparseable_published_dt():
+def test_select_candidate_articles_keeps_articles_with_unparseable_published_dt(isolated_subscribers_db):
     """Fails open, same instinct as the rest of the pipeline -- an article
     whose date didn't parse isn't assumed ancient."""
     undated = _article("https://example.com/undated", published_dt=None, fetched_at=NOW)
@@ -101,7 +103,7 @@ def test_select_candidate_articles_keeps_articles_with_unparseable_published_dt(
     assert [a["link"] for a in result] == ["https://example.com/undated"]
 
 
-def test_select_candidate_articles_never_resends_a_pushed_link():
+def test_select_candidate_articles_never_resends_a_pushed_link(isolated_subscribers_db):
     """already_pushed_links is now checked unconditionally, not only when the
     date is unparseable -- so it guards every path."""
     already_sent = _article(
@@ -115,7 +117,7 @@ def test_select_candidate_articles_never_resends_a_pushed_link():
     assert result == []
 
 
-def test_select_candidate_articles_falls_back_to_pushed_links_for_unparsed_dates():
+def test_select_candidate_articles_falls_back_to_pushed_links_for_unparsed_dates(isolated_subscribers_db):
     seen = _article("https://example.com/seen", published_dt=None)
     unseen = _article("https://example.com/unseen", published_dt=None)
 
@@ -126,7 +128,7 @@ def test_select_candidate_articles_falls_back_to_pushed_links_for_unparsed_dates
     assert [a["link"] for a in result] == ["https://example.com/unseen"]
 
 
-def test_select_candidate_articles_dedupes_across_topics():
+def test_select_candidate_articles_dedupes_across_topics(isolated_subscribers_db):
     article = _article("https://example.com/shared", published_dt=NOW - timedelta(hours=1))
 
     result = news_push.select_candidate_articles([article], ["AI", "robotics"], {}, None, set(), now=NOW)
@@ -134,7 +136,7 @@ def test_select_candidate_articles_dedupes_across_topics():
     assert len(result) == 1
 
 
-def test_select_candidate_articles_unrestricted_topic_matches_any_category():
+def test_select_candidate_articles_unrestricted_topic_matches_any_category(isolated_subscribers_db):
     # A topic with no cached category mapping (classifier miss) shouldn't
     # be starved -- it matches an article regardless of that article's
     # own categories.
@@ -145,7 +147,7 @@ def test_select_candidate_articles_unrestricted_topic_matches_any_category():
     assert len(result) == 1
 
 
-def test_select_candidate_articles_explicit_empty_mapping_is_also_unrestricted():
+def test_select_candidate_articles_explicit_empty_mapping_is_also_unrestricted(isolated_subscribers_db):
     """The "unrestricted" branch (test above) is normally exercised by a
     topic simply ABSENT from topic_categories (a classifier miss). This
     pins the other way an interest can land there: a topic present in the
@@ -168,7 +170,7 @@ def test_select_candidate_articles_explicit_empty_mapping_is_also_unrestricted()
     assert len(result) == 1
 
 
-def test_select_candidate_articles_excludes_off_category_article():
+def test_select_candidate_articles_excludes_off_category_article(isolated_subscribers_db):
     # The Nikkei Asia incident this was built to fix: an uncategorized
     # (or off-category) article shouldn't reach a subscriber whose topic
     # DID classify into real categories.
@@ -180,7 +182,7 @@ def test_select_candidate_articles_excludes_off_category_article():
     assert result == []
 
 
-def test_select_candidate_articles_includes_overlapping_category_article():
+def test_select_candidate_articles_includes_overlapping_category_article(isolated_subscribers_db):
     article = _article("https://example.com/a", categories=["AI", "Startups"])
     topic_categories = {"AI": ["AI", "Research"]}
 
@@ -189,7 +191,7 @@ def test_select_candidate_articles_includes_overlapping_category_article():
     assert len(result) == 1
 
 
-def test_select_candidate_articles_excludes_restricted_sources_by_default():
+def test_select_candidate_articles_excludes_restricted_sources_by_default(isolated_subscribers_db):
     article = _article("https://example.com/a", source_key="perigon")
 
     result = news_push.select_candidate_articles([article], ["AI"], {}, None, set())
@@ -197,7 +199,7 @@ def test_select_candidate_articles_excludes_restricted_sources_by_default():
     assert result == []
 
 
-def test_select_candidate_articles_includes_restricted_sources_when_enabled():
+def test_select_candidate_articles_includes_restricted_sources_when_enabled(isolated_subscribers_db):
     article = _article("https://example.com/a", source_key="perigon")
 
     result = news_push.select_candidate_articles([article], ["AI"], {}, None, set(), include_restricted=True)
@@ -205,7 +207,7 @@ def test_select_candidate_articles_includes_restricted_sources_when_enabled():
     assert len(result) == 1
 
 
-def test_select_candidate_articles_caps_per_topic():
+def test_select_candidate_articles_caps_per_topic(isolated_subscribers_db):
     articles = [
         _article(f"https://example.com/{i}", published_dt=NOW - timedelta(hours=8 - i))
         for i in range(1, 8)
@@ -216,6 +218,495 @@ def test_select_candidate_articles_caps_per_topic():
     assert len(result) == 3
     # newest-first
     assert result[0]["link"] == "https://example.com/7"
+
+
+# --- near-duplicate collapse (2026-08-25) ----------------------------------
+
+def _embed(text):
+    return news_embed.embed_one(FakeEmbedder(), text)
+
+
+def test_near_duplicate_articles_collapse_to_the_newer_one(isolated_subscribers_db):
+    wire_story = _embed("Nvidia launches new GPU architecture")
+    articles = [
+        _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
+                 title="Nvidia launches new GPU architecture", embedding=wire_story),
+        # Same story, a different outlet's syndicated copy -- near-
+        # identical embedding, different link, slightly older.
+        _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
+                 title="Nvidia launches new GPU architecture (wire)", embedding=wire_story),
+    ]
+
+    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), now=NOW)
+
+    assert [a["link"] for a in result] == ["https://a.com/1"]
+
+
+def test_articles_below_the_near_duplicate_threshold_both_survive(isolated_subscribers_db):
+    articles = [
+        _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
+                 title="Nvidia launches new GPU", embedding=_embed("Nvidia launches new GPU")),
+        _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
+                 title="Bitcoin price surges", embedding=_embed("Bitcoin price surges")),
+    ]
+
+    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), now=NOW)
+
+    assert {a["link"] for a in result} == {"https://a.com/1", "https://a.com/2"}
+
+
+def test_an_article_with_no_embedding_is_never_collapsed(isolated_subscribers_db):
+    """cosine_similarity(None, x) is -1.0 by construction -- an
+    unembeddable article (embedder unavailable, or cached before
+    news_embed existed) must never be treated as a duplicate of
+    anything, fail-open like every other check in this function."""
+    wire_story_embedding = _embed("Nvidia launches new GPU architecture")
+    articles = [
+        _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
+                 title="Nvidia launches new GPU architecture", embedding=wire_story_embedding),
+        _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
+                 title="Nvidia launches new GPU architecture (wire)", embedding=None),
+    ]
+
+    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), now=NOW)
+
+    assert {a["link"] for a in result} == {"https://a.com/1", "https://a.com/2"}
+
+
+def test_a_near_duplicate_within_one_topic_stays_eligible_for_another(isolated_subscribers_db):
+    """Article 1 is Hardware-only, so topic "chips" (Hardware) pools it and
+    then dedup-skips Article X (same story, both Hardware AND Markets) as
+    a near-duplicate WITHIN that pool. Topic "stocks" (Markets) never
+    pools Article 1 at all -- it doesn't match Markets -- so Article X
+    reaches topic "stocks" with nothing to be a duplicate of. If the
+    dedup skip for topic "chips" had wrongly marked Article X's link as
+    globally seen, topic "stocks" would incorrectly lose it too."""
+    wire_story = _embed("Nvidia launches new GPU architecture")
+    article_1 = _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
+                         title="Nvidia launches new GPU architecture", embedding=wire_story,
+                         categories=["Hardware"])
+    article_x = _article("https://a.com/x", published_dt=NOW - timedelta(hours=2),
+                         title="Nvidia launches new GPU architecture (wire)", embedding=wire_story,
+                         categories=["Hardware", "Markets"])
+    topic_categories = {"chips": ["Hardware"], "stocks": ["Markets"]}
+
+    result = news_push.select_candidate_articles(
+        [article_1, article_x], ["chips", "stocks"], topic_categories, None, set(), now=NOW)
+
+    by_topic = {(a["link"], a["topic"]) for a in result}
+    assert ("https://a.com/1", "chips") in by_topic
+    assert ("https://a.com/x", "stocks") in by_topic
+    # And confirm the dedup actually fired for "chips" -- otherwise this
+    # test would pass even with dedup entirely disabled.
+    assert ("https://a.com/x", "chips") not in by_topic
+
+
+# --- query text resolution (2026-08-25) -------------------------------------
+# The retrieval query used against news_embed is not always the bare topic
+# string -- a cached, generated definition (users_db.interest_query_expansions,
+# populated once by agent.py's _add_one_interest) measurably outranks the
+# bare phrase. See news_classify.expand_interest_for_retrieval.
+
+def test_resolve_query_text_uses_the_cached_expansion_when_present(isolated_subscribers_db):
+    users_db.set_interest_query_expansion("AI coding", "a rich generated definition")
+    assert news_push._resolve_query_text("AI coding") == "a rich generated definition"
+
+
+def test_resolve_query_text_falls_back_to_the_bare_topic_when_nothing_cached(
+    isolated_subscribers_db
+):
+    assert news_push._resolve_query_text("AI coding") == "AI coding"
+
+
+def test_select_candidate_articles_uses_the_cached_expansion_for_the_offbeat_gate(
+    isolated_subscribers_db
+):
+    """End-to-end: a topic with a cached expansion drives the embedding
+    query through select_candidate_articles, not just _resolve_query_text
+    in isolation. "coding tools like codex devise" is engineered to share
+    far more vocabulary with the coding-flavored articles below than the
+    bare word "coding" would alone, so the offbeat pick should reflect
+    the richer query, not the bare topic."""
+    users_db.set_interest_query_expansion(
+        "coding", "coding tools like codex devise assist developers write programs")
+    embedder = FakeEmbedder()
+    recency = ["coding news today", "coding update today"]
+    remainder = [
+        "coding roundup this week",
+        "coding digest for readers",
+        "codex devise assist developers write programs daily",
+    ]
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=t, embedding=_embed(t), categories=["AI"])
+        for i, t in enumerate(recency + remainder)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["coding"], {"coding": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=embedder, offbeat_slots=1,
+    )
+
+    titles = [a["title"] for a in result]
+    assert "codex devise assist developers write programs daily" in titles
+
+
+# --- relevance filter (2026-08-25) ------------------------------------------
+# The "AI"/"AI Agent"/"AI coding"/"Large Language Model" incident: all four
+# map to category ['AI'], so the coarse category filter alone can't tell
+# them apart. This is the fine filter that runs after it, using the topic
+# STRING as a retrieval query rather than its category.
+
+def test_relevance_filter_keeps_the_top_fraction_and_drops_the_clear_outlier():
+    """RELEVANCE_KEEP_MIN=20 needs a pool bigger than 20 to deterministically
+    exclude anything at all -- below that, the floor swallows the whole
+    pool and nothing is cut, which is deliberate (see that constant's own
+    comment: a narrow topic's small pool shouldn't be starved by a
+    percentage of a small number). Built with 15 on-topic + 15 off-topic
+    (pool=30, so n_kept=20) and, among the off-topic set, one article
+    ("vintage car restoration") sharing zero hashed dimensions with
+    anything else in the pool, scoring below every tie -- unambiguously
+    the single worst-ranked item regardless of how FakeEmbedder's
+    zero-similarity ties among the OTHER off-topic articles sort."""
+    embedder = FakeEmbedder()
+    on_topic = [_article(f"https://a.com/agent{i}", title=t, embedding=_embed(t))
+               for i, t in enumerate([
+                   "How to self-host your own AI agent",
+                   "New framework for building autonomous AI agents",
+                   "AI agent startup raises funding round",
+                   "Open source AI agent toolkit released today",
+                   "AI agent benchmark shows strong results",
+                   "Enterprise AI agent adoption grows fast",
+                   "AI agent memory architecture explained",
+                   "AI agent orchestration platform launches",
+                   "Multi agent AI system coordinates tasks",
+                   "AI agent framework gets major update",
+                   "Building reliable AI agent pipelines",
+                   "AI agent marketplace opens to developers",
+                   "How AI agents handle long running tasks",
+                   "AI agent security best practices guide",
+                   "Scaling AI agent deployments in production",
+               ])]
+    off_topic = [_article(f"https://a.com/off{i}", title=t, embedding=_embed(t))
+                for i, t in enumerate([
+                    "Completely unrelated gardening tips for spring",
+                    "How to bake sourdough bread at home",
+                    "Best hiking trails in the Pacific Northwest",
+                    "Tips for growing tomatoes in containers",
+                    "The history of medieval castle architecture",
+                    "How to knit a scarf for beginners",
+                    "Local weather patterns this autumn",
+                    "A review of the newest coffee shops downtown",
+                    "Tips for training a new puppy",
+                    "The art of watercolor painting techniques",
+                    "How to plan a backyard vegetable garden",
+                    "A beginner's guide to birdwatching",
+                    "The best board games for family game night",
+                    "How to organize a home pantry",
+                    "A guide to vintage car restoration",
+                ])]
+    pool = on_topic + off_topic
+
+    result = news_push._filter_by_relevance(pool, embedder, "AI Agent")
+
+    result_links = {a["link"] for a in result}
+    assert {a["link"] for a in on_topic} <= result_links
+    assert "https://a.com/off14" not in result_links  # "vintage car restoration"
+
+
+def test_relevance_filter_is_relative_not_absolute_relevance():
+    """The measured reason this can't be a fixed similarity threshold:
+    querying the SAME corpus with different topic strings puts
+    genuinely-relevant articles at wildly different absolute cosine
+    scores (real model2vec, measured this session: "AI Agent" topped
+    0.72, "Large Language Model" against the same corpus topped 0.166).
+    A rank-based cut has the mirror-image limitation: it has no way to
+    recognize "NOTHING in this pool is relevant" and reject accordingly
+    -- it always keeps its clamped count regardless of whether anything
+    actually clears a meaningful bar of relevance. Demonstrated here with
+    a query that shares no real vocabulary with any of the 25 articles:
+    the filter still keeps RELEVANCE_KEEP_MIN=20 of them.
+
+    25 articles, not 10 -- needs to clear RELEVANCE_KEEP_MIN=20 for this
+    property to be visible at all; a pool smaller than the floor is a
+    no-op regardless of the query (a separate, deliberate property,
+    tested by test_relevance_filter_falls_back_with_too_few_embedded_articles
+    and the offbeat test's small-pool case, not this one)."""
+    embedder = FakeEmbedder()
+    titles = [
+        "Options traders bet on quiet Nvidia earnings reaction",
+        "Stability AI raises $76 million in fresh funding",
+        "AI hits entry-level jobs for younger workers hardest",
+        "Taiwan charges nine people for smuggling AI servers",
+        "OpenAI Broadcom custom chip is a winner",
+        "Apple debuts its most powerful chip ever",
+        "Granite 4.2 LLMs how they are built",
+        "Claude Cowork remembers what you told the app",
+        "Accel backed startup indexes the web for AI agents",
+        "Portable computer is a new local AI agent",
+    ] + [f"Generic tech industry news item number {i}" for i in range(15)]
+    pool = [_article(f"https://a.com/{i}", title=t, embedding=_embed(t)) for i, t in enumerate(titles)]
+
+    result = news_push._filter_by_relevance(pool, embedder, "completely unrelated gardening tips")
+
+    # >= gate is inclusive, so a tie AT the gate value (common here --
+    # most of these titles share zero hashed dimensions with the query
+    # and score exactly 0.0) can let MORE than RELEVANCE_KEEP_MIN survive.
+    # The property under test is the floor, not an exact count.
+    assert len(result) >= 20
+    assert len(result) < len(pool), "the filter must still exclude something, not degrade to a no-op"
+
+
+def test_relevance_filter_caps_at_relevance_keep_max_for_a_large_pool():
+    """RELEVANCE_KEEP_MAX=50 needs a pool where 10% of it exceeds 50 (pool
+    > 500) to actually engage rather than the percentage alone deciding.
+    The raw pool this filter sees is no longer count-capped before
+    reaching it (RELEVANCE_SAMPLE_SIZE was removed 2026-08-25), so a
+    broad topic's real pool -- 999 "AI"-category articles were measured
+    live at once -- can genuinely reach this range."""
+    embedder = FakeEmbedder()
+    words = ["agent", "framework", "platform", "toolkit", "pipeline", "deployment",
+            "architecture", "orchestration", "benchmark", "adoption", "marketplace",
+            "security", "scaling", "memory", "workflow", "automation", "integration",
+            "monitoring", "reliability", "governance"]
+    # 3000, not a few hundred -- at 10% that's 300 uncapped vs. 50 capped,
+    # a gap wide enough to survive FakeEmbedder's real tie clusters at
+    # scale (verified against the real formula: capped ~208 survivors,
+    # uncapped ~370, on this exact fixture). A smaller pool's tie
+    # clusters can absorb the capped-vs-uncapped difference entirely and
+    # silently defeat this test -- caught live while writing it.
+    titles = [f"AI {words[i % len(words)]} update variant {i} released today" for i in range(3000)]
+    pool = [_article(f"https://a.com/{i}", title=t, embedding=_embed(t)) for i, t in enumerate(titles)]
+
+    result = news_push._filter_by_relevance(pool, embedder, "AI Agent")
+
+    assert len(result) >= news_push.RELEVANCE_KEEP_MAX
+    assert len(result) < 250, "the ceiling must actually be doing something on a pool this large"
+
+
+def test_offbeat_pool_size_matches_relevance_keep_max():
+    """Deliberately the SAME value, not independently chosen -- if
+    OFFBEAT_POOL_SIZE were smaller, it would silently re-truncate
+    whatever _filter_by_relevance already decided to keep, making
+    RELEVANCE_KEEP_MAX a dead ceiling. See OFFBEAT_POOL_SIZE's own
+    comment."""
+    assert news_push.OFFBEAT_POOL_SIZE == news_push.RELEVANCE_KEEP_MAX
+
+
+def test_relevance_filter_falls_back_to_unfiltered_with_no_embedder():
+    pool = [_article("https://a.com/1", title="x", embedding=_embed("x"))]
+    assert news_push._filter_by_relevance(pool, None, "AI Agent") == pool
+
+
+def test_relevance_filter_falls_back_with_too_few_embedded_articles():
+    """Only 1 embedded article -- below the floor of 2 needed for a
+    meaningful median split."""
+    pool = [_article("https://a.com/1", title="x", embedding=_embed("x")),
+           _article("https://a.com/2", title="y", embedding=None)]
+    assert news_push._filter_by_relevance(pool, FakeEmbedder(), "AI Agent") == pool
+
+
+def test_relevance_filter_never_excludes_an_article_with_no_embedding():
+    """An article that couldn't be embedded (ingested before news_embed
+    existed, or the embed call failed for it specifically) has nothing
+    for this filter to judge it by -- same fail-open shape as near-
+    duplicate collapse and every other embedding-based feature here.
+    22 embedded articles, not a handful -- needs to clear
+    RELEVANCE_KEEP_MIN=20 so real filtering actually happens (some of the
+    22 get excluded); below that floor, EVERYTHING survives regardless of
+    embedding status, which wouldn't prove this article's absence of an
+    embedding is what's protecting it."""
+    embedded_pool = [_article(f"https://a.com/e{i}", title=f"AI agent update number {i}",
+                              embedding=_embed(f"AI agent update number {i}"))
+                     for i in range(22)]
+    unembedded = _article("https://a.com/no-embedding", title="Nvidia earnings today", embedding=None)
+    pool = embedded_pool + [unembedded]
+
+    result = news_push._filter_by_relevance(pool, FakeEmbedder(), "AI Agent")
+
+    assert len(result) < len(pool), "real filtering must have happened for this test to prove anything"
+    assert unembedded["link"] in {a["link"] for a in result}
+
+
+def test_relevance_filter_preserves_input_order():
+    """25 articles (>= RELEVANCE_KEEP_MIN) so real filtering happens --
+    below that floor everything survives trivially and this wouldn't
+    prove the surviving subset keeps its original relative order."""
+    embedder = FakeEmbedder()
+    titles = [
+        "How to self-host your own AI agent",
+        "New AI agent framework release",
+        "Nvidia earnings beat forecast",
+        "Stability AI raises funding",
+    ] + [f"AI agent update number {i}" for i in range(21)]
+    pool = [_article(f"https://a.com/{i}", title=t, embedding=_embed(t)) for i, t in enumerate(titles)]
+
+    result = news_push._filter_by_relevance(pool, embedder, "AI Agent")
+
+    assert len(result) < len(pool), "real filtering must have happened for this test to prove anything"
+    result_links = [a["link"] for a in result]
+    original_order = [a["link"] for a in pool]
+    assert result_links == [link for link in original_order if link in result_links]
+
+
+# --- offbeat selection (2026-08-25) -----------------------------------------
+
+def test_offbeat_slot_picks_the_article_least_like_the_topics_typical_one(isolated_subscribers_db):
+    """Verified against news_embed's real formula with FakeEmbedder before
+    writing this assertion (see the session that added this feature) --
+    the four remainder articles all share the SAME word count and the
+    same single word in common with the "AI" query ("ai" itself), so
+    their query similarity ties; what breaks the tie is the offbeat
+    ranking by lowest similarity to the pool's centroid, which the
+    finance-heavy pool skews toward "chip/stock/funding" vocabulary and
+    away from "ai robot learns dance moves".
+
+    The pool-wide relevance filter (_filter_by_relevance) also runs here
+    but does not disturb this result: RELEVANCE_KEEP_MIN=20 is bigger
+    than this 6-item pool, so n_kept clamps down to the whole pool --
+    nothing is cut before recency/offbeat selection runs. That floor
+    exists specifically so a small, narrow-topic pool like this one
+    isn't starved by a percentage of a small number -- see
+    RELEVANCE_KEEP_MIN's own comment."""
+    recency = ["ai chip earnings today", "ai stock price today"]
+    remainder = [
+        "ai chip earnings beat forecast",
+        "ai stock price surges higher",
+        "ai funding round closes fast",
+        "ai robot learns dance moves",
+    ]
+    titles_newest_first = recency + remainder
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=t, embedding=_embed(t), categories=["AI"])
+        for i, t in enumerate(titles_newest_first)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=1,
+    )
+
+    titles = [a["title"] for a in result]
+    assert titles == [
+        "ai chip earnings today",       # recency pick 1
+        "ai stock price today",         # recency pick 2
+        "ai robot learns dance moves",  # offbeat pick, not the next-newest
+    ]
+
+
+def test_offbeat_zero_falls_back_to_pure_recency(isolated_subscribers_db):
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=f"ai article {i}", embedding=_embed(f"ai article {i}"), categories=["AI"])
+        for i in range(5)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=0,
+    )
+
+    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
+
+
+def test_offbeat_with_no_embedder_falls_back_to_pure_recency(isolated_subscribers_db):
+    """embedder=None is the default every existing caller/test gets --
+    confirms it degrades cleanly rather than raising when there's simply
+    no embedder to work with."""
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=f"ai article {i}", embedding=_embed(f"ai article {i}"), categories=["AI"])
+        for i in range(5)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=None, offbeat_slots=2,
+    )
+
+    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
+
+
+def test_offbeat_with_too_few_embedded_remainder_items_falls_back_to_recency(isolated_subscribers_db):
+    """Only 1 embedded candidate is left over after the recency cut --
+    below _pick_for_topic's floor of 2 for a meaningful median split."""
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=f"ai article {i}", embedding=_embed(f"ai article {i}"), categories=["AI"])
+        for i in range(3)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=2, now=NOW, embedder=FakeEmbedder(), offbeat_slots=1,
+    )
+
+    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1"]
+
+
+def test_offbeat_pick_still_respects_the_relevance_gate(isolated_subscribers_db):
+    """An article that's the most different from the centroid but ALSO
+    the least relevant to the topic query must not win the offbeat slot
+    over one that's both relevant and unusual -- the gate runs before the
+    ranking, not after."""
+    recency = ["ai chip earnings today", "ai stock price today"]
+    remainder = [
+        "ai chip earnings beat forecast",   # on-topic, will be the offbeat pick
+        "ai stock price surges higher",
+        "completely unrelated gardening tips for spring",  # off-topic outlier, must be gated out
+    ]
+    titles_newest_first = recency + remainder
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=t, embedding=_embed(t), categories=["AI"])
+        for i, t in enumerate(titles_newest_first)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=1,
+    )
+
+    titles = [a["title"] for a in result]
+    assert "completely unrelated gardening tips for spring" not in titles
+
+
+def test_offbeat_filler_tops_up_from_remainder_by_recency_not_by_score(isolated_subscribers_db):
+    """offbeat_slots=2 but only 1 remainder article clears the gate --
+    _pick_for_topic's filler branch (news_push.py's `filler_needed > 0`
+    arm inside the offbeat path, distinct from the full fallback()) must
+    top up the missing slot rather than sending a short digest. The
+    filler comes from `remainder` in its own recency order, not by score
+    and not requiring an embedding at all: "gated-out" is more recent
+    than "never embedded", so gated-out wins the filler slot.
+
+    Word counts are deliberately unequal so FakeEmbedder's word-overlap
+    scoring gives an unambiguous, non-tied split: "ai" alone is an exact
+    match to the bare "AI" query (cosine 1.0), while an 8-word title
+    diluted with unrelated vocabulary scores far lower (~0.35) -- with
+    only 2 embedded remainder items, the median-based gate is the max of
+    the two, so only the exact match survives it."""
+    recency_article = _article("https://a.com/0", published_dt=NOW,
+                                title="ai daily digest", embedding=_embed("ai daily digest"),
+                                categories=["AI"])
+    gated_out = _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
+                          title="ai plus five extra distinct words here now",
+                          embedding=_embed("ai plus five extra distinct words here now"),
+                          categories=["AI"])
+    survivor = _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
+                         title="ai", embedding=_embed("ai"), categories=["AI"])
+    never_embedded = _article("https://a.com/3", published_dt=NOW - timedelta(hours=3),
+                               title="unrelated finance stock news today", embedding=None,
+                               categories=["AI"])
+    articles = [recency_article, gated_out, survivor, never_embedded]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=2,
+    )
+
+    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/2", "https://a.com/1"]
 
 
 # --- resolve_interest_categories -------------------------------------------
@@ -308,6 +799,69 @@ def test_write_push_digest_includes_language_directive_when_set():
 
 
 def test_write_push_digest_no_language_directive_when_unset():
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["system_prompt"] = messages[0]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [{**_article("https://example.com/a"), "topic": "AI"}]
+
+    news_push.write_push_digest(model, articles)
+
+    assert captured["system_prompt"] == news_push._PUSH_DIGEST_PROMPT
+
+
+def test_write_push_digest_listing_carries_no_topic_prefix(monkeypatch):
+    """Regression for the 2026-08-25 fix: the listing used to prefix every
+    line with `[{topic}]`, which was both informationless (every line in
+    one call always carried the same value, once push became one message
+    per interest) and actively misleading (it visually presented a
+    coarse-filter artifact as if it were a confirmed per-article
+    classification, contradicting the system prompt's own instruction to
+    be skeptical of exactly that)."""
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["listing"] = messages[1]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [{**_article("https://example.com/a", title="Some headline"), "topic": "AI Agent"}]
+
+    news_push.write_push_digest(model, articles, topic="AI Agent")
+
+    assert "[AI Agent]" not in captured["listing"]
+    assert "Some headline" in captured["listing"]
+
+
+def test_write_push_digest_states_the_topic_once_when_given(monkeypatch):
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["system_prompt"] = messages[0]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [{**_article("https://example.com/a"), "topic": "AI Agent"}]
+
+    news_push.write_push_digest(model, articles, topic="AI Agent")
+
+    prompt = captured["system_prompt"]
+    assert "AI Agent" in prompt
+    assert "coarse category filter" in prompt
+    # The topic-framing addition is one coherent instruction block (which
+    # may reasonably repeat the topic word within it for emphasis) -- the
+    # thing that must NOT happen is a per-candidate repetition, which is
+    # what test_write_push_digest_listing_carries_no_topic_prefix checks
+    # on the listing (the user message) rather than here.
+
+
+def test_write_push_digest_no_topic_framing_when_topic_is_none(monkeypatch):
     captured = {}
 
     class RecordingModel(FakeToolCallingModel):
@@ -457,7 +1011,7 @@ def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch, isolat
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
 
-    write_digest.assert_called_once_with("fake-model", new_articles, "French")
+    write_digest.assert_called_once_with("fake-model", new_articles, "AI", "French")
 
 
 def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypatch, isolated_subscribers_db):
@@ -571,21 +1125,22 @@ def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch, isolated_s
     call_count = {"n": 0}
 
     def select_side_effect(cached_articles, topics, topic_categories, since, pushed_links,
-                           include_restricted=False, now=None):
+                           include_restricted=False, now=None, embedder=None):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("boom")
         return [{**_article("https://example.com/ok"), "topic": "AI"}]
 
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(side_effect=select_side_effect))
-    monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="<b>Digest</b>"))
+    monkeypatch.setattr(news_push, "write_push_digest",
+                        MagicMock(return_value='<b>Digest</b> <a href="https://example.com/ok">s</a>'))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
     send = AsyncMock()
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
 
     # subscriber 6 failed silently; subscriber 7 still got its digest
-    send.assert_called_once_with(7, "<b>Digest</b>")
+    send.assert_called_once_with(7, '<b>Digest</b> <a href="https://example.com/ok">s</a>')
 
 
 # --- links_actually_sent --------------------------------------------------
@@ -665,6 +1220,30 @@ def _cycle_with(monkeypatch, chat_id=1, subscriber=None, digest=None,
 def test_run_push_cycle_records_delivered(monkeypatch, isolated_subscribers_db):
     _cycle_with(monkeypatch, chat_id=11)
     assert users_db.recent_outcomes_for(11) == [users_db.PUSH_DELIVERED]
+
+
+def test_a_truly_empty_digest_records_not_relevant(monkeypatch, isolated_subscribers_db):
+    _cycle_with(monkeypatch, chat_id=51, digest="")
+    assert users_db.recent_outcomes_for(51) == [users_db.PUSH_NOT_RELEVANT]
+
+
+def test_a_non_empty_digest_with_no_real_link_is_treated_as_not_relevant(
+    monkeypatch, isolated_subscribers_db
+):
+    """The gap this guards: _PUSH_DIGEST_PROMPT's "write nothing" instruction
+    asks for a literal empty reply when nothing is relevant, but the model
+    doesn't always comply literally -- it can write an explanatory sentence
+    instead ("No genuinely relevant stories emerged..."). That string is
+    not empty, so a check on `not digest.strip()` alone would treat it as
+    real content and send it to the subscriber. TREND_REPORT_STRUCTURE
+    requires every genuine item to carry a real <a href> link, so a
+    digest with none is the actual signal, not literal emptiness."""
+    send = AsyncMock()
+    _cycle_with(monkeypatch, chat_id=52, send=send,
+               digest="No genuinely relevant stories emerged from the candidates this cycle.")
+
+    assert users_db.recent_outcomes_for(52) == [users_db.PUSH_NOT_RELEVANT]
+    send.assert_not_called()
 
 
 def test_run_push_cycle_records_blocked_digest_as_its_own_outcome(monkeypatch, isolated_subscribers_db):
@@ -879,7 +1458,8 @@ def test_model_error_after_generation_does_advance_last_push_at(monkeypatch, iso
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(return_value=[{**_article("https://example.com/new"), "topic": "AI"}]))
-    monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="<b>Digest</b>"))
+    monkeypatch.setattr(news_push, "write_push_digest",
+                        MagicMock(return_value='<b>Digest</b> <a href="https://example.com/new">s</a>'))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
                         MagicMock(side_effect=RuntimeError("rate limited")))
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
@@ -1106,7 +1686,7 @@ def _per_topic_cycle(monkeypatch, chat_id, articles_by_topic, subscriber=None,
     # Echoes every candidate's link back, so links_actually_sent sees them.
     monkeypatch.setattr(
         news_push, "write_push_digest",
-        lambda model, arts, language=None: "<b>D</b> " + " ".join(
+        lambda model, arts, topic=None, language=None: "<b>D</b> " + " ".join(
             f'<a href="{a["link"]}">s</a>' for a in arts))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
                         MagicMock(return_value=on_topic))
@@ -1262,7 +1842,7 @@ def test_a_partial_block_is_visible_in_the_delivered_detail(
     monkeypatch.setattr(news_push, "select_candidate_articles", fake_select)
     monkeypatch.setattr(
         news_push, "write_push_digest",
-        lambda model, arts, language=None: "<b>D</b> " + " ".join(
+        lambda model, arts, topic=None, language=None: "<b>D</b> " + " ".join(
             f'<a href="{a["link"]}">s</a>' for a in arts))
     # AI's digest passes the guardrail, Robotics' is blocked.
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",

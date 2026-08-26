@@ -14,7 +14,7 @@ they're constructed, rather than hardcoded.
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
 | 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker. **2026-08-21: a second backend (Logfire) added alongside it** — `agent.setup_telemetry()` now wires Phoenix, Logfire, both or neither onto one shared `TracerProvider`; see `docs/plans/observability-platform-plan.md` for the platform decision and migration status (nothing deployed yet, Phoenix remains live in production). |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
-| 5 | Test cases (actual scenarios) | Done — 545 tests as of 2026-08-25 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
+| 5 | Test cases (actual scenarios) | Done — 610 tests as of 2026-08-25 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
@@ -373,7 +373,7 @@ without-a-key contract, one shared `TracerProvider` when both backends are
 on, and the token-prefix → region derivation (`logfire_traces_endpoint`).
 
 **This "Test cases" section and its counts are stale project-wide** (the
-suite is now 545 tests, not 16 — `qa-engineer` tracks the current total,
+suite is now 610 tests, not 16 — `qa-engineer` tracks the current total,
 this doc doesn't attempt to stay in sync test-by-test). Notable additions
 since, called out specifically because each is a new *category* of
 behaviour rather than more of an existing one:
@@ -400,6 +400,31 @@ behaviour rather than more of an existing one:
   unreachable chat), and the push-tick heartbeat span. See
   `docs/plans/incident-monitoring-plan.md`'s "Status: step 1 built" for
   the design this covers.
+- **`tests/test_news_embed.py`, and `tests/test_news_push.py`'s near-
+  duplicate collapse / relevance filter / offbeat selection tests
+  (2026-08-25)** — the embedding-based "fine filter" fix for a live bug
+  where "AI", "AI Agent", "AI coding" and "Large Language Model" all
+  mapped to category `AI` and drew four near-identical digests from the
+  same undifferentiated pool. Covers `news_embed.py`'s fail-open
+  contract (no embedder, encode() failure, missing input) independently
+  of `news_push.py`'s consumption of it; the `RELEVANCE_KEEP_MIN`/
+  `_MAX` clamp (including the two historical bugs it was built to stop
+  repeating — float-imprecision `cut_index`, and an unclamped `n_kept`
+  driving a negative list index); `OFFBEAT_POOL_SIZE` matching
+  `RELEVANCE_KEEP_MAX` exactly so neither is a silently-tighter dead
+  ceiling; and `write_push_digest`'s dropped `[topic]`-prefix listing
+  plus the "model writes an explanatory sentence instead of a literal
+  empty reply" gap in the "nothing relevant" check (now gated on a real
+  `<a href>`, not `digest.strip()`). See
+  `docs/analysis/cluster-measurements.md` for the real-model/real-cache
+  measurements behind every constant here. **One gap found at review,
+  2026-08-25**: `_pick_for_topic`'s "not enough offbeat survivors past
+  the relevance gate, top up with the next most recent article" branch
+  (`news_push.py`, the `filler_needed > 0` block inside the offbeat arm,
+  not the full-fallback one) has no test exercising it directly —
+  every current offbeat test either has enough survivors to fill every
+  slot or falls back to pure recency entirely. Handed back to the coding
+  engineer to add, not written here.
 - **`tests/test_news_push.py::test_emit_heartbeat_is_a_noop_without_a_tracer_provider`**
   and the Logfire gating tests above are this project's hermeticity check
   for telemetry specifically: nothing in `tests/` or `tests/conftest.py`

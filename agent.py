@@ -331,6 +331,20 @@ def _add_one_interest(chat_id: int, topic: str, model, known: list[str]) -> str:
             # phrasings for an already-specific interest.
             if detail.is_umbrella:
                 narrower = detail.narrower_examples[:3]
+        # Generated once per NEWLY-SEEN interest string and cached
+        # globally (users_db.interest_query_expansions), not per
+        # subscriber -- checked here regardless of whether THIS
+        # subscriber's own add below succeeds, since the cache exists to
+        # serve every future subscriber who adds the same topic, not just
+        # this call. news_push.py's relevance filter and offbeat gate
+        # read it at push time and fall back to the bare topic string
+        # when nothing is cached; see expand_interest_for_retrieval's own
+        # docstring for why the bare string is a measurably worse
+        # retrieval query.
+        if users_db.get_interest_query_expansion(topic) is None:
+            expansion = news_classify.expand_interest_for_retrieval(model, topic)
+            if expansion is not None:
+                users_db.set_interest_query_expansion(topic, expansion)
     before = list(known)
     try:
         after = users_db.add_interest(chat_id, topic)

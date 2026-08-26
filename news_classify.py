@@ -471,3 +471,80 @@ def normalize_interest(model, text: str, alongside: list[str] | None = None) -> 
     breadth hint."""
     result = normalize_interest_detailed(model, text, alongside)
     return result.english.strip() if result else None
+
+
+class _RetrievalExpansion(BaseModel):
+    # Reasoning first -- same field-order lesson as everywhere else in
+    # this module (guardrails.OutputCheck, NormalizedInterest).
+    reasoning: str
+    definition: str
+
+
+def expand_interest_for_retrieval(model, interest: str) -> str | None:
+    """A short ENGLISH definition of `interest`, used as the embedding
+    query in news_push.select_candidate_articles's relevance filter and
+    offbeat gate INSTEAD OF the bare interest string.
+
+    Measured, 2026-08-25: embedding the bare phrase "AI coding" needed
+    the relevance filter to keep 83% of a topic's candidate pool to avoid
+    losing any of 5 genuinely relevant real articles -- three "Claude
+    Cowork" pieces scored 0.18-0.19 cosine similarity against that
+    phrase, BELOW an unrelated stock-picking article at 0.32, because
+    model2vec's static embeddings have no way to connect a product name
+    to a category word without shared vocabulary. Embedding a generated
+    definition instead -- one that names concrete tools, techniques and
+    related terms an article on the subject would actually use --
+    dropped the same worst-case to 44%. See
+    docs/analysis/cluster-measurements.md's "Shipped" section for the
+    full measurement, including why a longer generated article OUTLINE
+    (HyDE-style) barely improved on a plain definition (41% vs 44%) --
+    most of the gain is in having ANY topic-specific vocabulary at all,
+    not in how much of it.
+
+    Called once per NEWLY-SEEN interest string (agent.py's
+    _add_one_interest, cached in users_db's global
+    interest_query_expansions table, the same shape and same reasoning
+    as resolve_interest_categories's cache: the interest text is stable
+    vocabulary, so this should be a cache hit for any interest that's
+    been added by any subscriber before). Never called on the hot push
+    path -- see news_push.py's _resolve_query_text, which reads the
+    cache and falls back to the bare topic string when nothing is
+    cached, e.g. an interest added before this feature existed.
+
+    English regardless of the interest's own language or the
+    subscriber's reply-language preference -- same reasoning as
+    normalize_interest_detailed: retrieval is English-facing throughout
+    this pipeline, and a Chinese query was measured (same session) to
+    perform WORSE than even the bare English phrase against this
+    English-dominant corpus (66% needed vs 44%), because model2vec's
+    training skews English and a non-English query shares almost no
+    subword vocabulary with the corpus it's compared against.
+
+    Returns None on failure or a blank result -- the caller falls back
+    to the bare topic string, which is a worse retrieval signal but a
+    real one, not a missing interest."""
+    if not interest.strip():
+        return None
+    try:
+        structured = model.with_structured_output(_RetrievalExpansion)
+        result = structured.invoke([
+            {"role": "system", "content":
+                "Write a short ENGLISH definition of the given tech-industry "
+                "news interest, 2-4 sentences, for use as a semantic search "
+                "query -- not for a human to read. Name concrete tools, "
+                "products, techniques, or related terms a real news article "
+                "on this subject would actually use, the way a glossary "
+                "entry or a Wikipedia lead paragraph would, not a vague "
+                "restatement of the interest itself. Translate first if the "
+                "interest isn't already in English. If the interest is a "
+                "company, product, or ticker name rather than a general "
+                "topic, describe what it does and its category instead of "
+                "just repeating the name."},
+            {"role": "user", "content": f"Interest: {interest}"},
+        ])
+    except Exception as exc:
+        print(f"[news_classify] could not expand interest {interest!r} for retrieval: {exc!r}")
+        return None
+    if result is None or not result.definition.strip():
+        return None
+    return result.definition.strip()

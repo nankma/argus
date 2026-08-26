@@ -75,6 +75,28 @@ economy:
 
 ## How to do it
 
+**In practice today, `tools/deploy.sh` does steps 1-3 and all the
+verification below for you** (see its own header comment for why it's a
+script and not an agent driving these steps by hand). If you run it as a
+background task, background the script invocation itself
+(`tools/deploy.sh > "$LOG" 2>&1` as the literal command passed to a
+run_in_background=true call) — do NOT wrap it in your own `nohup ... &`
+inside a command that the tool *also* backgrounds. Real incident,
+2026-08-25: nesting it that way meant the tool's completion tracking
+followed the *wrapper* (which returns immediately after launching and
+detaching the real process), not `deploy.sh` itself — the tool reported
+"completed, exit 0" seconds in, while the actual deploy had done nothing
+past the Preflight step and was later found dead (killed when the
+wrapper's process tree was torn down). Confirmed via `ps`/`docker ps`/the
+log file's mtime having stopped growing. Passing `tools/deploy.sh` as the
+backgrounded command directly fixed it — the notification then
+corresponds to the script's real exit code.
+
+The manual steps below are for when you're doing something `deploy.sh`
+doesn't cover (a first-time setup, diagnosing a script failure by hand,
+or a step it doesn't automate yet) — its own script comments document
+the same incidents inline.
+
 1. Build and verify the image locally, same as always:
    ```
    LOG="$TMPDIR/build.log"   # anywhere off the repo; it is not a deliverable
