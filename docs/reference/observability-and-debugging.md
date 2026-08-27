@@ -9,6 +9,45 @@ recording precisely, and a live diagnostic workflow (hot-patching a
 running container instead of rebuilding for every experiment) that got
 reused often enough to be worth naming.
 
+**Read this first: Phoenix was retired 2026-08-24; Logfire is the live
+telemetry backend now.** Everything below about Phoenix (GraphQL
+queries, its own VM, its own bearer token) describes an architecture
+that stopped receiving live traffic on 2026-08-23 — kept here because
+it's still exactly right for digging into the ~269 MB of trace data
+frozen on the (now-stopped, boot-volume-intact) Phoenix VM from before
+that date, not because it's how to diagnose anything happening *today*.
+For a CURRENT live issue, use the Logfire technique immediately below
+instead.
+
+## Technique: querying Logfire traces directly (current backend)
+
+Same motivation as the Phoenix technique below it — pulling real trace
+data beats re-running inputs locally and hoping to reproduce them,
+especially for anything involving LLM non-determinism — just against
+the backend actually receiving live traffic since 2026-08-24.
+
+Logfire exposes a SQL-like read API. Resolve `LOGFIRE_API_KEY` the same
+way the bot container does (it's a Vault secret, fetched at container
+startup — see `docker-entrypoint.sh`), then query directly, e.g.:
+
+```bash
+ssh -i <key> ubuntu@<bot-vm-ip> \
+  "sudo docker exec myfirstagent-bot bash -c 'cd /app && ./docker-entrypoint.sh printenv LOGFIRE_API_KEY'"
+# then, with that resolved value:
+curl -s "https://logfire-api.pydantic.dev/v1/query" \
+  -H "Authorization: Bearer <resolved LOGFIRE_API_KEY>" \
+  --data-urlencode "sql=SELECT trace_id, span_name, start_timestamp FROM records ORDER BY start_timestamp DESC LIMIT 5"
+```
+
+Verified working 2026-08-21 while diagnosing the Phoenix/Logfire
+coexistence bug (see `docs/current/infrastructure.md` and this session's
+telemetry-monitoring incident notes) — real, fresh spans came back this
+way, confirming exactly what was and wasn't reaching Logfire at the time.
+This is a thinner, less-explored technique than the Phoenix section below
+(one confirmed working query, not a whole querying playbook) — extend it
+here as it gets used more, rather than assuming Logfire's API surface
+mirrors Phoenix's GraphQL one just because both are OpenTelemetry-based.
+
 ## Incident: `docker logs` was empty this whole session
 
 **What happened:** a user asked why a periodic push notification took
@@ -45,7 +84,7 @@ now has an explicit "check docker logs has output" step before the rest
 of the post-deploy smoke test, specifically so this isn't re-assumed
 next time.
 
-## Technique: querying Phoenix traces directly instead of guessing
+## Technique: querying Phoenix traces directly instead of guessing (historical — pre-2026-08-24 data only)
 
 Several bugs this session (an output-guardrail false positive, a
 duplicate-classification report, the push-delivery timing question) were

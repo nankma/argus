@@ -25,6 +25,14 @@ dependencies:
   - python-telegram-bot
   - apscheduler
   - oci-cli
+  # news_keyness.py -- POS-tags article text (nouns only) to score how
+  # "foreign" a word is to an interest's article pool, for offbeat/novelty
+  # selection (docs/analysis/cluster-measurements.md's "Offbeat selection,
+  # take two"). Conda-forge's nltk is clean -- `conda search -c conda-forge
+  # nltk --info` shows only click/joblib/regex/tqdm/defusedxml, no
+  # torch/scipy-class dependency, unlike model2vec's conda-forge recipe
+  # above -- so this one installs the normal way, no pip detour needed.
+  - nltk
   # news_embed.py -- article/topic embeddings for near-duplicate collapse
   # and offbeat/novelty selection in news_push.select_candidate_articles.
   # docs/analysis/cluster-measurements.md is the measurement behind this

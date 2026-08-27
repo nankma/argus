@@ -196,6 +196,27 @@ def init_db() -> None:
             )
             """
         )
+        # news_keyness.py's per-category "how foreign is this word to this
+        # topic" scores, for news_push._pick_for_topic's offbeat slots --
+        # see docs/analysis/cluster-measurements.md's "Offbeat selection,
+        # take two" section. Unlike interest_categories/
+        # interest_query_expansions above (single-row upserts, one entry
+        # never invalidates another), a category's whole row set is
+        # replaced together every news_ingest.py cycle (set_category_
+        # keyness below) -- keyness is a full recompute over the current
+        # cache each time, not an incrementally-accumulated cache, so a
+        # stale leftover term from three cycles ago would silently outlive
+        # its own relevance if rows were only ever upserted, never pruned.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS category_keyness (
+                category TEXT NOT NULL,
+                term TEXT NOT NULL,
+                score REAL NOT NULL,
+                PRIMARY KEY (category, term)
+            )
+            """
+        )
         # The article taxonomy -- see docs/plans/taxonomy-and-admin-plan.md.
         # `name` is the primary key rather than an integer id because cached
         # article files store category NAMES as strings, and that cache is a
@@ -1038,6 +1059,35 @@ def set_interest_query_expansion(interest: str, expansion: str) -> None:
             """,
             (interest, expansion),
         )
+
+
+def set_category_keyness(category: str, scores: dict[str, float]) -> None:
+    """Replaces `category`'s ENTIRE row set atomically -- delete then
+    insert in one transaction, not an upsert -- because news_keyness.py
+    recomputes this fresh from the current cache every news_ingest.py
+    cycle. A term that no longer scores (dropped below the corpus-wide
+    minimum document-frequency floor, or the category itself shrank) must
+    not linger as a stale row an upsert-only write would leave behind."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM category_keyness WHERE category = ?", (category,))
+        conn.executemany(
+            "INSERT INTO category_keyness (category, term, score) VALUES (?, ?, ?)",
+            [(category, term, score) for term, score in scores.items()],
+        )
+
+
+def get_category_keyness(category: str) -> dict[str, float]:
+    """{} when nothing has been computed for this category yet (a fresh
+    category, or news_ingest.py hasn't completed a cycle since it was
+    added) -- news_push.py's offbeat scoring already treats "no keyness
+    signal" as a normal, expected case (falls back to the keyword rule
+    alone, or to pure recency if that's empty too), same fail-open shape
+    as every other cache in this module."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT term, score FROM category_keyness WHERE category = ?", (category,)
+        ).fetchall()
+    return {term: score for term, score in rows}
 
 
 def get_source_last_pulled_at(source: str) -> datetime | None:

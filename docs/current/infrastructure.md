@@ -8,24 +8,63 @@ deliberately omits, see `local-infra/infrastructure.yaml` — gitignored,
 never published, kept in sync by whoever last touched the deployment
 (see the `deploy-engineer` subagent).
 
-## Topology: two VMs, one VCN
+## Topology: two VMs, one VCN — but only one is in the live path
 
 Both `VM.Standard.E2.1.Micro` (Oracle Always Free), same region,
 compartment, and private subnet (`10.0.0.0/24`), reachable with the same
 SSH key pair.
 
-| | Bot VM | Phoenix VM |
+| | Bot VM | Second VM |
 |---|---|---|
-| Runs | `myfirstagent-bot` Docker image (`combined_bot.py`) | Phoenix, natively — **not Docker** (a venv + systemd service, `phoenix serve`) |
-| Public IP | `<bot-vm-ip>` | `<phoenix-vm-ip>` |
+| Runs | `myfirstagent-bot` Docker image (`combined_bot.py`) — the entire live service | Formerly Phoenix (LLM tracing), natively — **not Docker** (a venv + systemd service, `phoenix serve`). **Retired 2026-08-24** — see below |
+| Public IP | see `local-infra/infrastructure.yaml` | see `local-infra/infrastructure.yaml` (changes on stop/start — this is an ephemeral, not reserved, public IP) |
 | Private IP | `10.0.0.7` | `10.0.0.234` |
-| Why separate | — | Phoenix's memory use can spike hard under load; isolating it means a spike can't take the bot down too |
 
-**Phoenix is not Docker, on purpose to note** — every other service in
-this project runs in Docker; this is the one deliberate exception (see
-`docs/plans/deployment-plan.md`'s "Live Phoenix deployment" section for why:
-`arize-phoenix`'s conda-forge package was badly stale, and this is a
-single-purpose ops VM, not part of the tracked `environment.yml`).
+**Telemetry is Logfire now, not Phoenix.** `agent.setup_telemetry()`
+sends spans straight to Logfire's cloud API (`LOGFIRE_ENABLED`/
+`LOGFIRE_API_KEY`) — no second VM, no self-hosted collector, no OTLP hop
+across the private subnet. The bot VM's `docker run` has carried no
+`PHOENIX_*` vars since 2026-08-23; `PHOENIX_ENABLED` still exists as a
+dead/unused code path in `agent.py` (fails open, costs nothing to leave
+in), not because Phoenix is live anywhere.
+
+**The second VM (`instance-mnk-phoenix-20260808-1012` in
+`local-infra/infrastructure.yaml`'s `vm_phoenix` entry) still exists —
+it was powered off, not deleted.** Its boot volume still holds ~269 MB of
+historical Phoenix trace data (`~/.phoenix/phoenix.db`, newest span
+2026-08-23T00:18:48Z) and the `phoenix` systemd service is still
+`enabled` (though it was manually stopped and disabled 2026-08-26 while
+evaluating it for the work below, so it won't auto-start again on the
+next boot the way it did on 2026-08-26's) — powering it back on and
+re-enabling the service brings Phoenix's UI back for historical lookups.
+
+**It briefly had a different purpose lined up — noun-based keyness
+scoring for the push digest's offbeat/novelty selection (see
+`docs/analysis/cluster-measurements.md`) — and does not anymore.** The
+plan was reconsidered once the real memory footprint was actually
+measured on this VM (84.6 MB peak RSS for the whole computation over
+2673 real articles): that number fits comfortably inside the *bot* VM's
+own existing headroom, so keyness runs there instead, folded into
+`news_ingest.py` alongside `news_embed.py`'s embedding step — same
+machine, same cadence, no cross-VM sync at all. A separate periodic job
+on a second VM would have created a real staleness window (a freshly-
+ingested article having no keyness score until the next scheduled batch
+run caught up) for exactly the newest, most novelty-relevant content --
+running it in-process on the same 15-minute ingestion cycle removes that
+gap entirely, not just shrinks it. See `news_keyness.py`'s own module
+docstring for the shipped design.
+
+This second VM is not currently used for anything. It's a real, paid-for
+Always Free resource sitting idle with Phoenix's old data still on it,
+not currently earmarked for a next purpose.
+
+**Why Phoenix was ever separate from the bot VM in the first place**:
+its memory use could spike hard under load, and co-locating it with the
+bot risked one taking down the other. That reasoning does NOT
+automatically transfer to every future workload considered for this
+VM — the keyness paragraph above is a direct example of a workload
+where the real numbers said co-location was fine, not a case for a
+second VM at all.
 
 ## Security model
 
@@ -41,18 +80,15 @@ single-purpose ops VM, not part of the tracked `environment.yml`).
   the project once already (a confusing `No route to host` instead of a
   clean timeout, which is what actually revealed there were two
   firewalls, not one).
-- **Phoenix's ports (6006 web UI, 4317 OTLP) are not open to the public
-  internet at all.** 4317 is open only from the bot VM's subnet
-  (`10.0.0.0/24`), for trace ingestion. 6006 has no inbound rule at
-  all — human access is SSH-tunnel-only, by design.
-- **Phoenix has its own auth** (`PHOENIX_ENABLE_AUTH=true`, a random
-  secret, and the default admin password explicitly overridden — the
-  default `admin`/`admin` login is a well-known trap that enabling auth
-  alone does not fix). A System API Key doubles as the bot's trace-push
-  credential and a bearer token for read queries — no separate
-  human-password dependency for diagnostics.
 - **The bot itself has no inbound ports at all** — polling mode against
   Telegram's API, not webhooks. Nothing to firewall on that side.
+- **Logfire needs no inbound ports on either VM at all** — the bot VM
+  makes an outbound HTTPS call to Logfire's cloud API, the same direction
+  as every other external call it already makes (DeepSeek, the news
+  sources). This is a real simplification from the Phoenix era, which
+  needed its own 4317/6006 firewall rules, its own auth, and its own
+  System API Key (all still true of the second VM's Phoenix install, but
+  irrelevant while it's stopped and nothing sends spans to it).
 
 ## Deployment
 
@@ -68,8 +104,10 @@ rather than asking to have them repeated.
 `subscribers.db` lives in a Docker named volume (`myfirstagent-data`) on
 the bot VM, mounted at `/data` — survives container recreation, not
 backed up anywhere else yet (see `docs/plans/security-plan.md` finding 13).
-Phoenix's own trace data lives at `~/.phoenix/phoenix.db` on the Phoenix
-VM, outside any container.
+Logfire's trace data lives entirely on Logfire's own cloud infrastructure,
+not on either VM. The second VM's old Phoenix trace data
+(`~/.phoenix/phoenix.db`, ~269 MB, frozen as of 2026-08-23) is still on
+that VM's disk, outside any container, from before Phoenix was retired.
 
 The local news article cache (`news_cache.py`) and its archive of expired
 articles are also meant to live inside that same mounted volume, via the

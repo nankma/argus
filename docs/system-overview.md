@@ -1,7 +1,7 @@
 # Autonomous Technology-Trend Intelligence Agent
 ### Proactive, customized news search and delivery service
 
-**An LLM agent that monitors 10 technology sources, works out what's
+**An LLM agent that monitors 27 technology sources, works out what's
 genuinely new, and delivers a personalized trend briefing on Telegram —
 on a schedule, without being asked. Live in production on cloud
 infrastructure.**
@@ -83,7 +83,9 @@ genuinely needed — not defaults carried over from another stack.
 | **SQLite** | Persistence | Zero operational overhead and adequate at current scale. A known limitation, deliberately accepted — see Appendix B.2. |
 | **Oracle Cloud** | Hosting | A genuinely perpetual free tier, not time-limited trial credits, including a managed secrets vault. |
 | **Docker** | Packaging | One artifact that runs identically locally and on the VM; makes the deploy step a single image transfer. |
-| **Arize Phoenix** | LLM observability | Self-hostable and OpenTelemetry-native — full trace fidelity with no per-trace SaaS billing, which matters when tracing every call. |
+| **Pydantic Logfire** | LLM observability | Cloud-hosted, OpenTelemetry-native, zero infrastructure of its own. Replaced a self-hosted Arize Phoenix instance (2026-08-24) — Phoenix needed a dedicated second VM specifically because its memory could spike hard under load; Logfire needs no VM at all, which is a straightforward win once its usage tier covers this project's trace volume. |
+| **model2vec** (`potion-base-8M`) | Article embeddings | A distilled, non-contextual embedding model chosen over fastembed/sentence-transformers specifically because the deploy target can't afford either's memory footprint (measured: 91 MB resident vs. 172 MB / 488 MB) — see `docs/analysis/cluster-measurements.md`. Powers near-duplicate collapse and relevance ranking in the push pipeline (§B2) — not offbeat/novelty selection, which is a separate, non-embedding mechanism (see NLTK below). |
+| **NLTK** (POS tagging only) | Offbeat/novelty scoring | Powers `news_keyness.py`'s "how foreign is this word to this topic" statistic (§B2) — a from-scratch measured footprint of 84.6 MB peak RSS, small enough to run in-process on the bot VM alongside model2vec rather than needing its own machine, a design that was seriously considered and measured before being rejected (see `docs/current/infrastructure.md`). |
 
 ### Design principles
 
@@ -122,18 +124,22 @@ throughout (Appendix B.1).
 
 ## A1. Overall architecture
 
-Two VMs on a private virtual cloud network, plus a managed secrets vault.
-Deployment is currently a local build transferred to the VM; the automated
-path is designed and covered below.
+One VM in the live path, on a private virtual cloud network, plus a
+managed secrets vault. (A second, identically-specced VM exists in the
+same VCN — it ran Phoenix, this project's LLM tracing backend, until that
+was retired in favor of a cloud-hosted alternative on 2026-08-24; see the
+note under A2.) Deployment is currently a local build transferred to the
+VM; the automated path is designed and covered below.
 
 ```mermaid
 flowchart TB
     DEV["Developer workstation"]
-    GH["GitHub<br/>source of truth<br/>CI: 280 tests per change"]
+    GH["GitHub<br/>source of truth<br/>CI: 611 tests per change"]
     BUILD["Local build server<br/>self-hosted runner<br/>builds image, deploys on commit"]
     TG["Telegram servers"]
-    EXT["10 news sources"]
+    EXT["27 news sources"]
     LLM["DeepSeek API"]
+    LOGFIRE["Logfire<br/>LLM tracing, cloud-hosted"]
 
     subgraph OCI["Oracle Cloud"]
         V["OCI Vault<br/>secrets"]
@@ -141,10 +147,6 @@ flowchart TB
             subgraph BotVM["Main server"]
                 C["Docker container<br/>public bot + admin bot<br/>+ push scheduler"]
             end
-            subgraph PhxVM["Management server"]
-                P["Phoenix<br/>LLM tracing<br/>30-day retention"]
-            end
-            C -->|OTLP / gRPC| P
         end
     end
 
@@ -155,6 +157,7 @@ flowchart TB
     C -->|Instance Principal auth| V
     C -->|fetch articles| EXT
     C -->|inference| LLM
+    C -->|"HTTPS, outbound only"| LOGFIRE
 ```
 
 **CI/CD.** GitHub is the source of truth, and the full test suite runs on
@@ -170,14 +173,29 @@ live in a third-party secret store — the same principle as the vault
 design in §A3. **The automated trigger is designed but not yet wired up;
 deployment is currently run manually through the same path.**
 
-## A2. Main server and management server
+## A2. Main server — and a second VM no longer in the live path
 
-| | Main server | Management server |
-|---|---|---|
-| **Runs** | The bot container — both Telegram bots and the push scheduler | Phoenix, the LLM tracing backend |
-| **Role** | The public-facing service | Internal tooling, for the operator only |
-| **Exposure** | Public-facing in role, but **no inbound port is open today** — the bot pulls from Telegram rather than receiving callbacks. A channel requiring webhooks would change this | No public exposure at all; private network plus SSH only |
-| **Why separate** | **Scalability** — the public service is the part that would need to scale out (e.g. behind Kubernetes), and it can only do that if it isn't tied to a co-located stateful tool. **Isolation** — one going down must not take the other with it: the service keeps running if tracing is unavailable, and tracing survives to diagnose a service failure | A tracing backend retaining 30 days of spans has a very different memory and disk profile from the bot; co-locating them would put the observability tool in competition with the very thing it observes |
+| | Main server |
+|---|---|
+| **Runs** | The bot container — both Telegram bots and the push scheduler |
+| **Role** | The public-facing service, and the entire live system |
+| **Exposure** | Public-facing in role, but **no inbound port is open today** — the bot pulls from Telegram rather than receiving callbacks. A channel requiring webhooks would change this |
+
+**A second VM used to run this project's LLM tracing backend (Arize
+Phoenix), kept separate from the bot deliberately** — a tracing backend
+retaining 30 days of spans has a very different memory/disk profile from
+the bot, and Phoenix's memory could spike hard enough under load that
+co-locating them risked one taking the other down. That backend was
+**retired 2026-08-24** in favor of Logfire, a cloud-hosted alternative
+that needs no VM of its own at all — the bot calls out to it directly
+over HTTPS (§A1), the same shape as every other external call it already
+makes. The second VM wasn't deleted (its boot volume, including ~269 MB
+of historical Phoenix trace data, is intact) but currently has no
+purpose — a candidate use (a periodic job scoring article-vocabulary
+"keyness" for offbeat push selection, §B2) was considered and rejected
+once the real workload was measured (84.6 MB peak, comfortably inside
+the *bot* VM's own headroom), in favor of running it there directly
+instead. See `docs/current/infrastructure.md` for this VM's live status.
 
 ## A3. Identity and secrets
 
@@ -210,11 +228,16 @@ copy of a deployment credential.
 
 ## A4. Management access
 
-The Phoenix dashboard is bound to the private network and is **not exposed
-to the public internet**. Reaching it means opening an SSH tunnel to the
-management server and browsing to the forwarded local port — so access
-requires possession of the SSH key, and a hypothetical flaw in the
-dashboard's own auth still isn't reachable from outside.
+Both VMs are reachable only by SSH, with no dashboard or web UI exposed
+to the public internet on either. Diagnosing the live system means
+SSH-ing in directly (`docker logs`, `docker exec`, a real Python shell
+against the live code) rather than a separate ops interface — there
+isn't one. (When Phoenix was live, on the now-retired second VM, its own
+dashboard added a second case of this same pattern: bound to the private
+network, reachable only via an SSH-tunneled local port — same shape,
+one more hop. Logfire's dashboard is the one exception, reachable
+directly since it's Logfire's own cloud-hosted UI, outside this
+project's infrastructure entirely.)
 
 Two independent firewall layers apply throughout: cloud-level security
 groups *and* host-level firewall rules must both permit a flow. Either one
@@ -231,7 +254,7 @@ flowchart TB
     U["User message"] --> BOT["Bot layer<br/>channel handling, formatting,<br/>message chunking"]
     BOT --> GUARD["Guardrails<br/>scope + safety checks"]
     GUARD --> AGENT["Agent core<br/>tool-calling loop"]
-    AGENT --> SRC["Source registry<br/>10 news sources"]
+    AGENT --> SRC["Source registry<br/>27 news sources"]
     AGENT --> DB[("User store<br/>interests, language,<br/>push settings, approvals")]
     ADMIN["Admin bot<br/>approve / deny access"] --> DB
     SCHED["Push scheduler<br/>15-min tick"] --> SRC
@@ -247,7 +270,7 @@ flowchart TB
 | **Admin bot** | A *separate bot identity* carrying the approve/deny controls, so a stranger who finds the public bot has no path to them |
 | **Guardrails** | Scope and safety checks on both input and output (§B4) |
 | **Agent core** | The tool-calling loop; model is injected rather than constructed internally, which is what makes it testable (§C1) |
-| **Source registry** | 10 pluggable fetchers. A source that errors or lacks an API key is skipped and the request still succeeds on the rest — one broken upstream never fails a user request |
+| **Source registry** | 27 pluggable fetchers. A source that errors or lacks an API key is skipped and the request still succeeds on the rest — one broken upstream never fails a user request |
 | **User store** | Per-user interests, reply language, push interval, approval status |
 | **Push scheduler** | Ticks every 15 minutes, sends to whoever is due (§B2) |
 | **Telemetry** | Every LLM call and tool invocation captured as a structured span |
@@ -344,8 +367,9 @@ flowchart TB
     D -->|yes| ROT["order this user's interests<br/>longest-un-pushed first"]
     ROT --> F["for each interest, up to<br/>MAX_INTERESTS_PER_PUSH:<br/>deterministic fetch for<br/>THAT interest alone"]
     F --> FILT["deterministic filter to genuinely new<br/>1. published timestamp<br/>2. previously-sent link set<br/>3. what this cycle already sent"]
-    FILT -->|nothing new| NEXT["next interest —<br/>does not consume a slot"]
-    FILT -->|new articles| W["single LLM call<br/>write prose from<br/>this fixed article list"]
+    FILT --> EMB["embedding-based fine filter<br/>near-duplicate collapse,<br/>relevance ranking, offbeat pick<br/>(see below)"]
+    EMB -->|nothing relevant| NEXT["next interest —<br/>does not consume a slot"]
+    EMB -->|new articles| W["single LLM call<br/>write prose from<br/>this fixed article list"]
     W --> V["Stage 3 verify"]
     V --> SEND["send one message<br/>for this interest"]
     SEND --> NEXT
@@ -377,6 +401,66 @@ anything published at or before that subscriber's last push), with a
 remembered set of recently-sent URLs as a fallback for sources whose date
 strings don't parse. Both are needed — real feeds are inconsistent about
 dates.
+
+### Fine-grained relevance filtering (added 2026-08-25)
+
+A subscriber's interest first narrows the shared article cache by a
+coarse **category** tag (13 broad taxonomy categories, assigned once per
+article at ingestion). That alone isn't enough: two subscribers with
+related but distinct interests — "AI Agent" and "AI coding," say — both
+map to the same "AI" category, so without a further step they'd receive
+near-identical digests. This was a real, user-reported bug before the fix
+below shipped.
+
+The fix is a second, embedding-based filter that runs on top of the
+category match, using `model2vec` (`potion-base-8M`, chosen specifically
+for its tiny memory footprint — see the components table above and
+`docs/analysis/cluster-measurements.md` for the full backend comparison
+against fastembed and sentence-transformers):
+
+| Step | What it does |
+|---|---|
+| **Near-duplicate collapse** | Two articles above a cosine-similarity threshold (0.95) collapse to one — catches the same wire story syndicated under different URLs by different outlets, which a link-based check alone can't see |
+| **Relevance ranking** | Each remaining candidate is scored against a retrieval query for the interest — not the bare interest string, but a short LLM-generated definition of it, cached per interest and measured to genuinely outperform the bare phrase at surfacing genuinely-relevant-but-differently-worded articles. Keeps an absolute, pool-size-scaled count (20–50 articles), not a fixed threshold — absolute similarity scores aren't comparable across different interests, only relative rank within one interest's own pool is |
+
+Both steps degrade gracefully if the embedding model fails to load or a
+specific article has no embedding (missing model files, out of memory,
+an ingestion-time failure) — this is an enhancement to push quality, not
+something any part of the pipeline depends on to function. A push cycle
+with no working embedder behaves exactly as it did before this feature
+existed for these two steps: pure recency ordering, no near-duplicate
+collapse.
+
+**Offbeat/novelty selection is a separate mechanism, not embedding-based
+at all** (as of 2026-08-26 — it was for one day, then was replaced after
+live use showed its picks read as unrelated more often than novel). Of
+the final articles sent, a couple of slots go to an article flagged by
+either of two independent signals, computed by `news_keyness.py`:
+
+- a small constant list of novelty-signaling keywords ("leak," "unveils,"
+  "lawsuit," ...), checked directly against the article's text;
+- **keyness** — a statistical measure (a signed log-likelihood ratio,
+  the standard collocation-analysis fix for the small-count instability
+  a simpler point-wise-mutual-information version of this was measured
+  to have) of how much one of the article's own words is over- or
+  under-represented in this interest's category, relative to that word's
+  overall rate across the whole cache. A word present far less than its
+  own overall rate predicts is genuinely foreign to the topic (a real
+  measured example: an arXiv quantum-computing paper that happened to be
+  tagged "AI"); a word present far MORE is topic-defining vocabulary,
+  correctly never flagged (measured: "openai" scores strongly positive
+  for the "AI" category).
+
+Computed once per `news_ingest.py` cycle over the whole cache (the
+expensive step, POS-tagging, is shared across every active category) and
+persisted, so reading it at push time is a cheap local database lookup,
+never a live NLTK call in the push path — the same precompute-once-at-
+ingestion shape as the embedding steps above, just independent of them
+and of the embedder entirely. Getting this design right took five
+real-data iterations, four of which failed for four different, specific,
+measured reasons; see `docs/analysis/cluster-measurements.md`'s "Offbeat
+selection, take two" for the full trail, including a considered (and
+rejected, once actually measured) design running this on a second VM.
 
 ## B3. The four-layer prompt
 
@@ -435,7 +519,7 @@ admin bot, which bounds cost-abuse exposure to a known set of people.
 
 ## C1. Test cases
 
-**280 tests, ~15 seconds, $0 API cost per run.**
+**611 tests, ~40 seconds, $0 API cost per run.**
 
 That's possible because the model is dependency-injected: production
 passes a real client, tests pass a scripted fake. No conditional
@@ -473,9 +557,11 @@ broken.
 
 ## C3. Post-deployment testing
 
-Unit tests can't cover the real model, so a **14-case checklist runs
-against the live service after every deployment**, with defined inputs and
-expected outputs:
+Unit tests can't cover the real model, so a **17-case checklist runs
+against the live service after every deployment** (11 of the 17 scripted
+end to end by `tools/run_smoke_tests.py`; the rest — command handlers
+that don't route through its test endpoint — checked manually against
+real Telegram), with defined inputs and expected outputs:
 
 | # | Covers |
 |---|---|
@@ -485,6 +571,8 @@ expected outputs:
 | 9–11 | Language set including script variants; applies to subsequent replies |
 | 12–13 | Guardrail rejection is informative; new-user onboarding from a genuinely fresh account |
 | 14 | Multi-category routing: one message combining a settings change and a news query gets both addressed in one reply |
+| 15–16 | `/help` and an unrecognised command both get a real reply, not silence |
+| 17 | Multi-topic `set_interest`: naming several distinct topics in one message stores all of them, not a garbled or collapsed single entry |
 
 Each case was derived from a real regression class, so the checklist grows
 as the system teaches me what breaks. A deploy isn't done until it passes.
@@ -504,8 +592,12 @@ records its outcome per subscriber (sent / nothing new / blocked /
 errored), so timing questions are answerable directly rather than by
 inference.
 
-Trace retention is explicitly bounded at 30 days. The default was
-unbounded growth, which on a small disk is a slow-motion outage.
+Under Phoenix, trace retention was explicitly bounded at 30 days —
+self-hosted on the VM's own disk, so unbounded growth was a real,
+if slow-motion, outage risk. Logfire (§A1) is cloud-hosted, so that
+specific risk doesn't apply to this project's own infrastructure
+anymore; retention is whatever Logfire's plan/tier provides, not
+something configured here.
 
 ## C5. Incident reporting and alerting
 
@@ -525,7 +617,7 @@ service, and no paging tool.
 before theorizing → root cause → fix → close the hole that let it
 through.* That last step is the one that compounds — every incident
 resolves into either a new test case or a new post-deploy check, so the
-same class of failure can't recur silently. The 14-case checklist in §C3
+same class of failure can't recur silently. The 17-case checklist in §C3
 is built entirely from past incidents.
 
 **Possible extension, not built:** the same alert path could carry an
@@ -684,9 +776,16 @@ LangChain and the Telegram library into memory **twice**, and the VM has
 
 **Solution.** Run both bots and the scheduler in **one process and one
 asyncio event loop**, while keeping them as two distinct bot identities.
-Measured: **~135 MB combined, versus close to double that split.** The
-security boundary is preserved; the memory cost isn't paid twice.
-Steady-state usage runs 137–172 MB.
+Measured at the time: **~135 MB combined, versus close to double that
+split.** The security boundary is preserved; the memory cost isn't paid
+twice.
+
+Steady-state usage was 137–172 MB then; it's ~185 MB as of 2026-08-25,
+after the embedding-based relevance filter (§B2) added a resident
+model2vec model to the process. Re-measured directly on the live
+container rather than assumed forward from the older figure — the
+directional comparison above (combined vs. split) still holds, the
+absolute baseline just moved with a real added feature.
 
 The tradeoff is honest: separate processes would give better fault
 isolation, and on a larger instance that would be the better call. The
@@ -776,7 +875,7 @@ acceptable.
 | **No rate limiting** | An approved user could burn API quota | Access is approval-gated, bounding exposure | Before opening access more widely |
 | **SQLite can't scale or be shared** | Hard ceiling on horizontal scaling | Fine at current scale; single-process topology means no second host needs access. All access sits behind one module, keeping migration cheap — see `docs/plans/data-layer-plan.md` | When a second host or real concurrency is needed |
 | **Linear cost scaling** | Each push subscriber costs LLM calls per interval | Cheap model; conservative 1-hour interval floor | Before any open signup |
-| **Manual deploy step** | Human error surface each release | Documented workflow plus the 14-case checklist | CD is designed (§A1), not built |
+| **Manual deploy step** | Human error surface each release | Documented workflow plus the 17-case checklist | CD is designed (§A1), not built |
 | **Silent source degradation** | An upstream format change makes that source quietly return nothing | Per-source isolation keeps the request succeeding on the rest | Needs a source-health check; not built |
 
 ## B.3 Work deliberately declined

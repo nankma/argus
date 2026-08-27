@@ -12,9 +12,9 @@ they're constructed, rather than hardcoded.
 |---|------|--------|
 | 1 | Dependency injection (model + callbacks as parameters) | Done |
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
-| 3 | Telemetry service install + hook (real backend for normal runs) | Done — Arize Phoenix, via Docker. **2026-08-21: a second backend (Logfire) added alongside it** — `agent.setup_telemetry()` now wires Phoenix, Logfire, both or neither onto one shared `TracerProvider`; see `docs/plans/observability-platform-plan.md` for the platform decision and migration status (nothing deployed yet, Phoenix remains live in production). |
+| 3 | Telemetry service install + hook (real backend for normal runs) | Done — originally Arize Phoenix via Docker, then a second backend (Logfire) added alongside it 2026-08-21. **Superseded 2026-08-24: Phoenix retired, Logfire is now the sole live backend** (`docs/plans/observability-platform-plan.md`'s migration completed; `PHOENIX_ENABLED` remains in `agent.setup_telemetry()` as a dead/unused fail-open path, not because Phoenix is live anywhere — see `docs/current/infrastructure.md`). The row below this one (its own text, not yet updated at the time of the migration) still describes the two-backend-coexistence period as current; read it as history, not present tense. |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
-| 5 | Test cases (actual scenarios) | Done — 610 tests as of 2026-08-25 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
+| 5 | Test cases (actual scenarios) | Done — 611 tests as of 2026-08-26 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
