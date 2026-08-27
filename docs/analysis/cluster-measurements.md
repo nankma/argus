@@ -1678,3 +1678,42 @@ most novelty-relevant content hardest. Shipped instead as part of
 `news_embed.py`'s embedding step, with no cross-VM sync at all. See
 `docs/current/infrastructure.md` for the second VM's resulting (idle)
 status.
+
+### Product correction, same day: additive, threshold-gated, optional
+
+The first shipped version of this feature (above) carved 1-2 of
+`MAX_ARTICLES_PER_TOPIC`'s regular slots out for the novelty pick, and
+always filled them with whatever scored best in the pool -- even when
+nothing had a real signal (see `_offbeat_sort_key`'s neutral-tiebreak
+fallback in the pre-correction code). User-directed correction, three
+explicit requirements:
+
+1. This is an experimental feature; it doesn't need to be precise --
+   an occasional pick that isn't genuinely novel is an accepted cost.
+2. The novelty pick belongs in the SAME push message, but as an
+   **additional**, clearly separate closing section (e.g. "by the way,
+   we noticed something interesting"), not blended into the main report
+   and not competing with the regular candidates for space.
+3. It needs an actual **threshold** -- only a candidate that clears it
+   counts as novel, and a cycle where nothing clears it sends no novelty
+   section at all. Forcing a pick regardless of signal strength was
+   explicitly rejected.
+
+Implemented as `news_push._pick_novelty_extra` (replacing `_pick_for_
+topic`): the regular digest is always `pool[:max_per_topic]` by pure
+recency, with no novelty carve-out at all; the novelty extra is drawn
+separately from `pool[max_per_topic:]` (articles that passed the
+relevance filter but didn't make the regular cut, so it never re-
+suggests something already in the digest), and only returned when a
+keyword hit is present OR the article's lowest keyness score clears
+`NOVELTY_KEYNESS_THRESHOLD = -5.0` -- otherwise `None`, deliberately, not
+a fallback pick. -5.0 is a first-cut chosen from this document's own
+real numbers (clearly-foreign terms measured at -19 to -40 in the real
+999-article "AI" pool), not fitted against real push outcomes yet --
+revisit once some have accumulated. `write_push_digest`'s prompt marks
+at most one candidate `[EXTRA]` in the listing and instructs the model
+to format it as a separate closing note if included (still exercising
+its own relevance judgment, same as any other candidate) -- deliberately
+NOT the same shape as the retired per-line `[topic]` prefix (a marker on
+every line reads as confirmed metadata; a marker on the one genuinely-
+different item is a real, narrow formatting instruction).

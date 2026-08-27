@@ -433,12 +433,19 @@ collapse.
 
 **Offbeat/novelty selection is a separate mechanism, not embedding-based
 at all** (as of 2026-08-26 — it was for one day, then was replaced after
-live use showed its picks read as unrelated more often than novel). Of
-the final articles sent, a couple of slots go to an article flagged by
-either of two independent signals, computed by `news_keyness.py`:
+live use showed its picks read as unrelated more often than novel). It
+is explicitly experimental and does not compete with the regular digest
+for space: `MAX_ARTICLES_PER_TOPIC` regular candidates are always chosen
+by pure recency, and the **novelty extra** is a single, additional
+article appended to a candidate list that already has all of them — the
+final message renders it as a short, distinctly separate closing note
+("by the way, we noticed something interesting: ..."), never blended
+into the main synthesized report. It's flagged by either of two
+independent signals, computed by `news_keyness.py`:
 
 - a small constant list of novelty-signaling keywords ("leak," "unveils,"
-  "lawsuit," ...), checked directly against the article's text;
+  "lawsuit," ...), checked directly against the article's text —
+  unconditionally qualifies an article, no further threshold;
 - **keyness** — a statistical measure (a signed log-likelihood ratio,
   the standard collocation-analysis fix for the small-count instability
   a simpler point-wise-mutual-information version of this was measured
@@ -449,7 +456,11 @@ either of two independent signals, computed by `news_keyness.py`:
   measured example: an arXiv quantum-computing paper that happened to be
   tagged "AI"); a word present far MORE is topic-defining vocabulary,
   correctly never flagged (measured: "openai" scores strongly positive
-  for the "AI" category).
+  for the "AI" category). Only counts when the score clears
+  `NOVELTY_KEYNESS_THRESHOLD` — a deliberately loose, unfitted first-cut
+  bar, not "whichever candidate happens to score lowest": **if nothing in
+  a topic's pool clears it, that push simply has no novelty section at
+  all**, on purpose, not a gap to fill with a weak pick.
 
 Computed once per `news_ingest.py` cycle over the whole cache (the
 expensive step, POS-tagging, is shared across every active category) and

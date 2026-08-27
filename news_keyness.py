@@ -1,7 +1,7 @@
 """
 Article-vocabulary "foreignness" scoring for offbeat/novelty push
-selection -- news_push._pick_for_topic's offbeat slots, replacing what
-used to be an embedding-based gate + centroid-distance rank. See
+selection -- news_push._pick_novelty_extra's novelty extra, replacing
+what used to be an embedding-based gate + centroid-distance rank. See
 docs/analysis/cluster-measurements.md's "Offbeat selection, take two" for
 the full measurement history: five real-data iterations were needed
 before landing on the design below, four of which failed for four
@@ -46,8 +46,9 @@ push path itself.
 Fails open everywhere, same convention as news_embed.py: a missing NLTK
 data file, a tagging exception, or an empty/unavailable keyness table all
 degrade to "no signal from this module" rather than raising --
-news_push._pick_for_topic already has its own recency fallback for
-exactly this case, so nothing here needs to be startup-fatal.
+news_push._pick_novelty_extra already returns None (no novelty section
+at all, not a forced pick) for exactly this case, so nothing here needs
+to be startup-fatal.
 """
 import math
 from collections import defaultdict
