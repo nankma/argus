@@ -64,7 +64,7 @@ NOTES_FILE = "notes.jsonl"
 PHOENIX_ENDPOINT = os.environ.get("PHOENIX_ENDPOINT", "http://localhost:4317")
 
 
-def build_model(env_var: str, default: str = DEFAULT_MODEL):
+def build_model(env_var: str, default: str = DEFAULT_MODEL, default_timeout: float = 60.0):
     """Constructs a chat model from a "provider:model" string read from
     `env_var` (falling back to `default`) via LangChain's init_chat_model --
     see docs/plans/model-portability-plan.md Level 1. Swapping providers or
@@ -93,9 +93,46 @@ def build_model(env_var: str, default: str = DEFAULT_MODEL):
 
     Overridable via LLM_REASONING_EFFORT for a provider that rejects the
     parameter or a model where thinking is wanted; empty string omits it.
+
+    `request_timeout` is set explicitly because ChatDeepSeek's own default
+    is `None` -- no timeout at all. Found live, 2026-08-27: a DeepSeek call
+    from inside news_ingest.run_ingestion_cycle (itself run via
+    asyncio.to_thread, see bot.py's _ingest_job) got stuck -- confirmed via
+    the container's own /proc/net/tcp showing two CLOSE_WAIT connections to
+    api.deepseek.com's IP, i.e. the remote side had already closed and the
+    client was still waiting to read a response that was never coming --
+    and with nothing to raise, the thread it occupied was gone for good.
+    Every later scheduled ingest tick was silently skipped (APScheduler
+    won't overlap two runs of the same job), for over an hour before a
+    health-check alert caught it. Restarting the container "fixed" it
+    exactly the way it did on 2026-08-25's earlier occurrence of this same
+    symptom -- but this time recurred within minutes of the restart, still
+    with no timeout in place, which is what pinned this down as the actual
+    cause rather than a one-off network blip. `default_timeout` is a
+    per-caller first-cut, not one number for every use: news_ingest's
+    classify_articles processes up to MAX_ARTICLES_PER_CALL=50 articles per
+    call in a background job nobody is watching live, so the default 60s
+    here is generous but bounded. guardrails.py's LLM_MODEL_CLASSIFIER
+    calls (layer 2 classify_message, layer 4 is_output_on_topic) are a
+    single small structured-output call on a live Telegram user's own
+    message -- bot.py/combined_bot.py pass a shorter default_timeout for
+    that build_model call specifically, since 60s of silence on a chat a
+    real person is actively watching is a materially worse experience than
+    the same 60s in a background job. LLM_REQUEST_TIMEOUT_SECONDS still
+    overrides EITHER call site the same way (a deliberate escape hatch for
+    an emergency global change, not a way to give them independently
+    tunable values without a code change -- add a second env var if that's
+    ever needed). Empty string omits the timeout entirely (same escape
+    hatch as reasoning_effort, for a provider whose client rejects the
+    parameter).
     """
     effort = os.environ.get("LLM_REASONING_EFFORT", "none")
-    kwargs = {"reasoning_effort": effort} if effort else {}
+    request_timeout = os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", str(default_timeout))
+    kwargs = {}
+    if effort:
+        kwargs["reasoning_effort"] = effort
+    if request_timeout:
+        kwargs["request_timeout"] = float(request_timeout)
     return init_chat_model(os.environ.get(env_var, default), **kwargs)
 
 # --- Layer 1: tight, always-present identity ----------------------------

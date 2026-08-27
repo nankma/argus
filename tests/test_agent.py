@@ -425,7 +425,7 @@ def test_build_model_disables_thinking_mode_by_default(monkeypatch):
 
     agent.build_model("LLM_MODEL_TEST_EFFORT")
 
-    assert calls[0][1] == {"reasoning_effort": "none"}
+    assert calls[0][1]["reasoning_effort"] == "none"
 
 
 def test_build_model_reasoning_effort_is_overridable(monkeypatch):
@@ -433,7 +433,7 @@ def test_build_model_reasoning_effort_is_overridable(monkeypatch):
     monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
     agent.build_model("LLM_MODEL_TEST_EFFORT")
 
-    assert calls[0][1] == {"reasoning_effort": "high"}
+    assert calls[0][1]["reasoning_effort"] == "high"
 
 
 def test_build_model_omits_reasoning_effort_when_set_empty(monkeypatch):
@@ -443,7 +443,70 @@ def test_build_model_omits_reasoning_effort_when_set_empty(monkeypatch):
     monkeypatch.setenv("LLM_REASONING_EFFORT", "")
     agent.build_model("LLM_MODEL_TEST_EFFORT")
 
-    assert calls[0][1] == {}
+    assert "reasoning_effort" not in calls[0][1]
+
+
+# --- request_timeout: the 2026-08-27 stuck-ingest incident ------------------
+
+
+def test_build_model_sets_a_default_request_timeout(monkeypatch):
+    """The fix for a live incident: ChatDeepSeek's own default timeout is
+    None (no timeout at all), which is what let a single stuck DeepSeek
+    call wedge the ingest job's thread forever -- see build_model's own
+    docstring for the full incident. 60s, matched against
+    MAX_ARTICLES_PER_CALL=50 (news_classify.py)."""
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.delenv("LLM_REQUEST_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("LLM_MODEL_TEST_TIMEOUT", raising=False)
+
+    agent.build_model("LLM_MODEL_TEST_TIMEOUT")
+
+    assert calls[0][1]["request_timeout"] == 60.0
+
+
+def test_build_model_honors_a_custom_default_timeout(monkeypatch):
+    """bot.py/combined_bot.py pass a shorter default_timeout for the
+    guardrail classifier model -- a live Telegram user is waiting on that
+    call, unlike news_ingest's background batch job."""
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.delenv("LLM_REQUEST_TIMEOUT_SECONDS", raising=False)
+
+    agent.build_model("LLM_MODEL_TEST_TIMEOUT", default_timeout=20.0)
+
+    assert calls[0][1]["request_timeout"] == 20.0
+
+
+def test_build_model_request_timeout_env_var_overrides_a_custom_default(monkeypatch):
+    """LLM_REQUEST_TIMEOUT_SECONDS is a shared escape hatch -- it wins over
+    ANY caller's default_timeout, intentionally (see build_model's own
+    docstring: one emergency global override, not independently-tunable
+    per-caller values without a code change)."""
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "5")
+
+    agent.build_model("LLM_MODEL_TEST_TIMEOUT", default_timeout=20.0)
+
+    assert calls[0][1]["request_timeout"] == 5.0
+
+
+def test_build_model_request_timeout_is_overridable(monkeypatch):
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "120")
+
+    agent.build_model("LLM_MODEL_TEST_TIMEOUT")
+
+    assert calls[0][1]["request_timeout"] == 120.0
+
+
+def test_build_model_omits_request_timeout_when_set_empty(monkeypatch):
+    """Same escape hatch as reasoning_effort, for a provider client that
+    rejects the parameter outright."""
+    calls = _record_init_chat_model(monkeypatch)
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "")
+
+    agent.build_model("LLM_MODEL_TEST_TIMEOUT")
+
+    assert "request_timeout" not in calls[0][1]
 
 
 # --- breadth hint and the interest cap ----------------------------------
