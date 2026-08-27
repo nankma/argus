@@ -167,7 +167,10 @@ def main():
     # provider is set up yet), so this is plumbing, not a behavior change,
     # until LLM_MODEL/LLM_MODEL_CLASSIFIER are actually set to different values.
     model = build_model("LLM_MODEL")
-    guard_model = build_model("LLM_MODEL_CLASSIFIER")
+    # A short default_timeout here, not build_model's usual 60s -- this
+    # model backs layer 2/4 guardrail calls on a live Telegram user's own
+    # message, not a background batch job. See build_model's own docstring.
+    guard_model = build_model("LLM_MODEL_CLASSIFIER", default_timeout=20.0)
     agent = build_agent(model)
     embedder = news_embed.build_embedder()
 
