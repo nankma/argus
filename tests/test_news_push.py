@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 from langchain_core.messages import AIMessage
 
 import news_cache
@@ -47,11 +48,11 @@ def test_select_candidate_articles_ignores_dates_when_deciding_already_seen(isol
     behind was excluded outright by the old `published_dt <= since` test,
     stranding 227 cached articles that could never reach a digest."""
     since = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
-    old_but_unsent = _article("https://example.com/a", published_dt=NOW - timedelta(hours=30))
-    older_but_unsent = _article("https://example.com/b", published_dt=NOW - timedelta(hours=40))
+    old_but_unsent = _article("https://example.com/a", published_dt=NOW - timedelta(hours=30), categories=["AI"])
+    older_but_unsent = _article("https://example.com/b", published_dt=NOW - timedelta(hours=40), categories=["AI"])
 
     result = news_push.select_candidate_articles(
-        [old_but_unsent, older_but_unsent], ["AI"], {}, since, set(), now=NOW
+        [old_but_unsent, older_but_unsent], ["AI"], {"AI": ["AI"]}, since, set(), now=NOW
     )
 
     assert [a["link"] for a in result] == ["https://example.com/a", "https://example.com/b"]
@@ -63,16 +64,18 @@ def test_select_candidate_articles_keeps_offering_an_unsent_article(isolated_sub
     previous timestamp-based filter it would have been excluded forever,
     unsent and unrecorded."""
     articles = [
-        _article(f"https://example.com/{i}", published_dt=NOW - timedelta(hours=i))
+        _article(f"https://example.com/{i}", published_dt=NOW - timedelta(hours=i), categories=["AI"])
         for i in range(1, 6)
     ]
 
-    first = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), max_per_topic=2, now=NOW)
+    first = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(), max_per_topic=2, now=NOW
+    )
     assert [a["link"] for a in first] == ["https://example.com/1", "https://example.com/2"]
 
     # next cycle: only what was actually sent is excluded
     second = news_push.select_candidate_articles(
-        articles, ["AI"], {}, None, {a["link"] for a in first}, max_per_topic=2, now=NOW
+        articles, ["AI"], {"AI": ["AI"]}, None, {a["link"] for a in first}, max_per_topic=2, now=NOW
     )
     assert [a["link"] for a in second] == ["https://example.com/3", "https://example.com/4"]
 
@@ -85,10 +88,15 @@ def test_select_candidate_articles_drops_articles_older_than_the_age_guard(isola
         "https://example.com/ancient",
         published_dt=NOW - timedelta(days=400),
         fetched_at=NOW,
+        categories=["AI"],
     )
-    recent = _article("https://example.com/recent", published_dt=NOW - timedelta(hours=2), fetched_at=NOW)
+    recent = _article(
+        "https://example.com/recent", published_dt=NOW - timedelta(hours=2), fetched_at=NOW, categories=["AI"]
+    )
 
-    result = news_push.select_candidate_articles([ancient, recent], ["AI"], {}, None, set(), now=NOW)
+    result = news_push.select_candidate_articles(
+        [ancient, recent], ["AI"], {"AI": ["AI"]}, None, set(), now=NOW
+    )
 
     assert [a["link"] for a in result] == ["https://example.com/recent"]
 
@@ -96,9 +104,11 @@ def test_select_candidate_articles_drops_articles_older_than_the_age_guard(isola
 def test_select_candidate_articles_keeps_articles_with_unparseable_published_dt(isolated_subscribers_db):
     """Fails open, same instinct as the rest of the pipeline -- an article
     whose date didn't parse isn't assumed ancient."""
-    undated = _article("https://example.com/undated", published_dt=None, fetched_at=NOW)
+    undated = _article("https://example.com/undated", published_dt=None, fetched_at=NOW, categories=["AI"])
 
-    result = news_push.select_candidate_articles([undated], ["AI"], {}, None, set(), now=NOW)
+    result = news_push.select_candidate_articles(
+        [undated], ["AI"], {"AI": ["AI"]}, None, set(), now=NOW
+    )
 
     assert [a["link"] for a in result] == ["https://example.com/undated"]
 
@@ -107,67 +117,73 @@ def test_select_candidate_articles_never_resends_a_pushed_link(isolated_subscrib
     """already_pushed_links is now checked unconditionally, not only when the
     date is unparseable -- so it guards every path."""
     already_sent = _article(
-        "https://example.com/sent", published_dt=NOW - timedelta(hours=1), fetched_at=NOW
+        "https://example.com/sent", published_dt=NOW - timedelta(hours=1), fetched_at=NOW, categories=["AI"]
     )
 
     result = news_push.select_candidate_articles(
-        [already_sent], ["AI"], {}, None, {"https://example.com/sent"}, now=NOW
+        [already_sent], ["AI"], {"AI": ["AI"]}, None, {"https://example.com/sent"}, now=NOW
     )
 
     assert result == []
 
 
 def test_select_candidate_articles_falls_back_to_pushed_links_for_unparsed_dates(isolated_subscribers_db):
-    seen = _article("https://example.com/seen", published_dt=None)
-    unseen = _article("https://example.com/unseen", published_dt=None)
+    seen = _article("https://example.com/seen", published_dt=None, categories=["AI"])
+    unseen = _article("https://example.com/unseen", published_dt=None, categories=["AI"])
 
     result = news_push.select_candidate_articles(
-        [seen, unseen], ["AI"], {}, None, {"https://example.com/seen"}
+        [seen, unseen], ["AI"], {"AI": ["AI"]}, None, {"https://example.com/seen"}
     )
 
     assert [a["link"] for a in result] == ["https://example.com/unseen"]
 
 
 def test_select_candidate_articles_dedupes_across_topics(isolated_subscribers_db):
-    article = _article("https://example.com/shared", published_dt=NOW - timedelta(hours=1))
+    article = _article("https://example.com/shared", published_dt=NOW - timedelta(hours=1), categories=["AI"])
 
-    result = news_push.select_candidate_articles([article], ["AI", "robotics"], {}, None, set(), now=NOW)
+    result = news_push.select_candidate_articles(
+        [article], ["AI", "robotics"], {"AI": ["AI"], "robotics": ["AI"]}, None, set(), now=NOW
+    )
 
     assert len(result) == 1
 
 
-def test_select_candidate_articles_unrestricted_topic_matches_any_category(isolated_subscribers_db):
-    # A topic with no cached category mapping (classifier miss) shouldn't
-    # be starved -- it matches an article regardless of that article's
-    # own categories.
+def test_select_candidate_articles_topic_with_no_category_mapping_gets_nothing(isolated_subscribers_db):
+    """A topic with no cached category mapping (classifier miss) used to be
+    treated as "unrestricted" -- matching any article regardless of its
+    categories. That fail-open design let a completely off-topic article
+    reach a subscriber (the 2026-08-27 Witcher 3 incident: interest
+    "robotics" classified into zero of 28 taxonomy categories, and the
+    resulting "unrestricted" match let a gaming article through). A topic
+    that can't be matched against anything real is now skipped entirely --
+    same shape as "nothing new since last time": no candidates, no
+    message, no slot consumed."""
     article = _article("https://example.com/a", categories=["Policy"])
 
     result = news_push.select_candidate_articles([article], ["AAOI"], {}, None, set())
 
-    assert len(result) == 1
+    assert result == []
 
 
-def test_select_candidate_articles_explicit_empty_mapping_is_also_unrestricted(isolated_subscribers_db):
-    """The "unrestricted" branch (test above) is normally exercised by a
-    topic simply ABSENT from topic_categories (a classifier miss). This
-    pins the other way an interest can land there: a topic present in the
-    dict but explicitly mapped to [] -- e.g. an interest that once mapped
-    to a category later retired and never re-mapped (see
-    users_db._migrate_split_policy's docstring and
+def test_select_candidate_articles_explicit_empty_mapping_also_gets_nothing(isolated_subscribers_db):
+    """Pins the other way an interest can land with no categories to match
+    against: a topic present in the dict but explicitly mapped to [] --
+    e.g. an interest that once mapped to a category later retired and
+    never re-mapped (see users_db._migrate_split_policy's docstring and
     test_users_db.test_policy_split_does_not_touch_pre_existing_interest_category_mappings
     -- no code path currently produces this for Policy specifically, but
-    nothing would stop it for a category retired in the future). Both cases
-    hit the same `topic_cats and not (...)` branch and are therefore
-    indistinguishable to this function -- which is exactly the gap: nothing
-    downstream can tell "never classified" apart from "used to be
-    restricted, now silently isn't"."""
+    nothing would stop it for a category retired in the future). Both this
+    and the "topic absent from the dict" case above hit the same
+    `if not topic_cats: continue` branch and are therefore
+    indistinguishable to this function -- and both now get zero
+    candidates rather than being silently unrestricted."""
     article = _article("https://example.com/a", categories=["Government"])
 
     result = news_push.select_candidate_articles(
         [article], ["legacy policy watcher"], {"legacy policy watcher": []}, None, set()
     )
 
-    assert len(result) == 1
+    assert result == []
 
 
 def test_select_candidate_articles_excludes_off_category_article(isolated_subscribers_db):
@@ -192,28 +208,32 @@ def test_select_candidate_articles_includes_overlapping_category_article(isolate
 
 
 def test_select_candidate_articles_excludes_restricted_sources_by_default(isolated_subscribers_db):
-    article = _article("https://example.com/a", source_key="perigon")
+    article = _article("https://example.com/a", source_key="perigon", categories=["AI"])
 
-    result = news_push.select_candidate_articles([article], ["AI"], {}, None, set())
+    result = news_push.select_candidate_articles([article], ["AI"], {"AI": ["AI"]}, None, set())
 
     assert result == []
 
 
 def test_select_candidate_articles_includes_restricted_sources_when_enabled(isolated_subscribers_db):
-    article = _article("https://example.com/a", source_key="perigon")
+    article = _article("https://example.com/a", source_key="perigon", categories=["AI"])
 
-    result = news_push.select_candidate_articles([article], ["AI"], {}, None, set(), include_restricted=True)
+    result = news_push.select_candidate_articles(
+        [article], ["AI"], {"AI": ["AI"]}, None, set(), include_restricted=True
+    )
 
     assert len(result) == 1
 
 
 def test_select_candidate_articles_caps_per_topic(isolated_subscribers_db):
     articles = [
-        _article(f"https://example.com/{i}", published_dt=NOW - timedelta(hours=8 - i))
+        _article(f"https://example.com/{i}", published_dt=NOW - timedelta(hours=8 - i), categories=["AI"])
         for i in range(1, 8)
     ]
 
-    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), max_per_topic=3, now=NOW)
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(), max_per_topic=3, now=NOW
+    )
 
     assert len(result) == 3
     # newest-first
@@ -230,14 +250,14 @@ def test_near_duplicate_articles_collapse_to_the_newer_one(isolated_subscribers_
     wire_story = _embed("Nvidia launches new GPU architecture")
     articles = [
         _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
-                 title="Nvidia launches new GPU architecture", embedding=wire_story),
+                 title="Nvidia launches new GPU architecture", embedding=wire_story, categories=["AI"]),
         # Same story, a different outlet's syndicated copy -- near-
         # identical embedding, different link, slightly older.
         _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
-                 title="Nvidia launches new GPU architecture (wire)", embedding=wire_story),
+                 title="Nvidia launches new GPU architecture (wire)", embedding=wire_story, categories=["AI"]),
     ]
 
-    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), now=NOW)
+    result = news_push.select_candidate_articles(articles, ["AI"], {"AI": ["AI"]}, None, set(), now=NOW)
 
     assert [a["link"] for a in result] == ["https://a.com/1"]
 
@@ -245,12 +265,12 @@ def test_near_duplicate_articles_collapse_to_the_newer_one(isolated_subscribers_
 def test_articles_below_the_near_duplicate_threshold_both_survive(isolated_subscribers_db):
     articles = [
         _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
-                 title="Nvidia launches new GPU", embedding=_embed("Nvidia launches new GPU")),
+                 title="Nvidia launches new GPU", embedding=_embed("Nvidia launches new GPU"), categories=["AI"]),
         _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
-                 title="Bitcoin price surges", embedding=_embed("Bitcoin price surges")),
+                 title="Bitcoin price surges", embedding=_embed("Bitcoin price surges"), categories=["AI"]),
     ]
 
-    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), now=NOW)
+    result = news_push.select_candidate_articles(articles, ["AI"], {"AI": ["AI"]}, None, set(), now=NOW)
 
     assert {a["link"] for a in result} == {"https://a.com/1", "https://a.com/2"}
 
@@ -263,12 +283,12 @@ def test_an_article_with_no_embedding_is_never_collapsed(isolated_subscribers_db
     wire_story_embedding = _embed("Nvidia launches new GPU architecture")
     articles = [
         _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
-                 title="Nvidia launches new GPU architecture", embedding=wire_story_embedding),
+                 title="Nvidia launches new GPU architecture", embedding=wire_story_embedding, categories=["AI"]),
         _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
-                 title="Nvidia launches new GPU architecture (wire)", embedding=None),
+                 title="Nvidia launches new GPU architecture (wire)", embedding=None, categories=["AI"]),
     ]
 
-    result = news_push.select_candidate_articles(articles, ["AI"], {}, None, set(), now=NOW)
+    result = news_push.select_candidate_articles(articles, ["AI"], {"AI": ["AI"]}, None, set(), now=NOW)
 
     assert {a["link"] for a in result} == {"https://a.com/1", "https://a.com/2"}
 
@@ -699,6 +719,175 @@ def test_novelty_extra_none_when_remainder_is_empty(isolated_subscribers_db, fak
 
     assert len(result) == 3
     assert not any(a.get("is_novelty_extra") for a in result)
+
+
+def test_novelty_extra_uses_a_wider_relevance_pass_than_the_regular_digest(
+    isolated_subscribers_db, fake_nltk, monkeypatch
+):
+    """The novelty search doesn't just inherit whatever the regular
+    digest's stricter RELEVANCE_KEEP_* cut happened to leave over
+    (pool[max_per_topic:]) -- it re-filters raw_pool with its own,
+    wider NOVELTY_RELEVANCE_KEEP_* clamp. Pins the wiring: the regular
+    pass gets default params, the novelty pass gets the wider ones."""
+    calls = []
+    original = news_push._filter_by_relevance
+
+    def spy(pool, embedder, query_text, **kwargs):
+        calls.append(kwargs)
+        return original(pool, embedder, query_text, **kwargs)
+
+    monkeypatch.setattr(news_push, "_filter_by_relevance", spy)
+
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title="major ai model leaks ahead of launch" if i == 3 else f"ai article {i}",
+                 categories=["AI"])
+        for i in range(5)
+    ]
+
+    news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(), max_per_topic=3, now=NOW,
+    )
+
+    assert calls[0] == {}
+    assert calls[1] == {
+        "keep_fraction": news_push.NOVELTY_RELEVANCE_KEEP_FRACTION,
+        "keep_min": news_push.NOVELTY_RELEVANCE_KEEP_MIN,
+        "keep_max": news_push.NOVELTY_RELEVANCE_KEEP_MAX,
+    }
+
+
+class _AxisEmbedder:
+    """A hand-controlled stand-in for FakeEmbedder, used only where a test
+    needs EXACT similarity values rather than FakeEmbedder's word-hash
+    approximation. FakeEmbedder's 32-dim hash space collides constantly
+    once a fixture needs 40+ distinct-but-related articles (two different
+    titles' differing word can hash to the same dim+sign, making their
+    embeddings literally identical) -- exactly the pool size this test
+    needs to make NOVELTY_RELEVANCE_KEEP_MIN's percentile cut bind at
+    all. Only used for the query vector here; article embeddings below
+    are built directly with the same axis convention, not run through
+    this at all."""
+
+    def encode(self, texts):
+        return np.array([[1.0] + [0.0] * 46 for _ in texts], dtype=np.float32)
+
+
+def test_novelty_extra_excluded_when_it_fails_even_the_wider_relevance_bar(
+    isolated_subscribers_db, fake_nltk
+):
+    """The real incident this guards against: a keyword hit alone used to
+    be enough to surface an article regardless of topical relevance. A
+    real embedder now sits in front of the novelty search too -- a
+    candidate that shares essentially no vocabulary with the topic must
+    be excluded before _pick_novelty_extra ever sees it, even though it
+    contains a novelty keyword ("leak"). Needs a pool bigger than
+    NOVELTY_RELEVANCE_KEEP_MIN=40 for the percentile cut to exclude
+    anything at all -- a smaller pool would have the clamp keep
+    everything, which would defeat the point of this test.
+
+    Embeddings are hand-built on independent axes (see _AxisEmbedder)
+    rather than derived from real text, specifically so every on-topic
+    article's similarity to the query and to every OTHER on-topic
+    article is exact and identical (0.7 and 0.49 respectively) -- with
+    45 of them, FakeEmbedder's usual word-hash approach can't guarantee
+    that without accidental near-duplicate collisions (see
+    _AxisEmbedder's docstring)."""
+    embedder = _AxisEmbedder()
+    # Dim 0 = shared "on topic" axis; dims 1-45 = one private axis per
+    # on-topic article, so distinct articles are never bit-for-bit
+    # identical (which would trigger near-duplicate collapse) but every
+    # pair still has the exact same, deliberately-moderate similarity to
+    # each other (0.7^2 = 0.49) and to the query (0.7). Dim 46 is the
+    # off-topic article's own axis, orthogonal to everything else --
+    # similarity to the query and to every on-topic article is exactly 0.
+    on_topic = []
+    for i in range(45):
+        vector = [0.0] * 47
+        vector[0] = 0.7
+        vector[1 + i] = (1 - 0.7 ** 2) ** 0.5
+        on_topic.append(_article(
+            f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i + 1),
+            title=f"ai update article {i}", categories=["AI"], embedding=vector,
+        ))
+    off_topic_vector = [0.0] * 47
+    off_topic_vector[46] = 1.0
+    # Oldest of all, so it's never one of the 3 regular (recency) picks.
+    off_topic_keyword_hit = _article(
+        "https://a.com/off-topic", published_dt=NOW - timedelta(hours=100),
+        title="Major Bitcoin exchange data leak exposes users", categories=["AI"],
+        embedding=off_topic_vector,
+    )
+    articles = on_topic + [off_topic_keyword_hit]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=embedder,
+    )
+
+    assert not any(a["link"] == "https://a.com/off-topic" for a in result)
+    assert not any(a.get("is_novelty_extra") for a in result)
+
+
+class _RankedAxisEmbedder:
+    """Like _AxisEmbedder above, but with a distinct, strictly-decreasing
+    similarity per article instead of one uniform value -- needed so the
+    regular RELEVANCE_KEEP_MIN=20 and novelty NOVELTY_RELEVANCE_KEEP_MIN=40
+    floors bind at exact, known ranks (index 19/20 and 39/40) rather than
+    an all-or-nothing pass/fail."""
+
+    def __init__(self, dims):
+        self.dims = dims
+
+    def encode(self, texts):
+        return np.array([[1.0] + [0.0] * (self.dims - 1) for _ in texts], dtype=np.float32)
+
+
+def test_novelty_extra_admits_a_candidate_the_regular_relevance_filter_would_have_excluded(
+    isolated_subscribers_db, fake_nltk
+):
+    """test_novelty_extra_uses_a_wider_relevance_pass_than_the_regular_digest
+    only pins that the two _filter_by_relevance calls receive different
+    kwargs -- it doesn't prove the wider clamp actually admits anything the
+    narrower one wouldn't. This does: 45 articles ranked by a hand-controlled,
+    strictly decreasing similarity to the query (see _RankedAxisEmbedder), so
+    the regular clamp (floor 20 for a 45-item pool) and novelty clamp (floor
+    40) bind at exact, known boundaries. The article at similarity rank 26
+    (index 25) sits outside the regular top 20 -- confirmed directly by
+    calling _filter_by_relevance with the regular defaults -- but inside the
+    novelty top 40, and carries a novelty-keyword hit ("leaked") so it's the
+    only remainder candidate _pick_novelty_extra can qualify, isolating the
+    relevance floor as what's under test rather than keyword/keyness scoring
+    (already covered by the tests above)."""
+    n = 45
+    dims = 1 + n
+    embedder = _RankedAxisEmbedder(dims)
+    articles = []
+    for i in range(n):
+        s = 0.9 - i * 0.01  # strictly decreasing: index i has similarity rank i
+        vector = [0.0] * dims
+        vector[0] = s
+        vector[1 + i] = (1 - s ** 2) ** 0.5
+        title = "major ai model leaked ahead of launch" if i == 25 else f"ai update article {i}"
+        articles.append(_article(
+            f"https://a.com/{i}", published_dt=NOW - timedelta(minutes=i),
+            title=title, categories=["AI"], embedding=vector,
+        ))
+
+    # Sanity check first: with these exact params, the regular per-topic
+    # relevance filter really would exclude rank 26 -- proven directly, not
+    # just inferred from the pipeline result below.
+    regular_pass = news_push._filter_by_relevance(articles, embedder, "AI")
+    assert articles[25]["link"] not in {a["link"] for a in regular_pass}
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, embedder=embedder,
+    )
+
+    novelty_pick = next((a for a in result if a.get("is_novelty_extra")), None)
+    assert novelty_pick is not None
+    assert novelty_pick["link"] == "https://a.com/25"
 
 
 # --- resolve_interest_categories -------------------------------------------

@@ -155,6 +155,27 @@ RELEVANCE_KEEP_FRACTION = 0.10
 RELEVANCE_KEEP_MIN = 20
 RELEVANCE_KEEP_MAX = 50
 
+# A separate, wider clamp used ONLY for the novelty-extra search (see
+# _pick_novelty_extra and its call site below), not the regular digest.
+# Added 2026-08-27 after a real incident (this module's docstring) where
+# an off-topic article reached a subscriber via the novelty pick; the
+# ROOT cause was an uncategorized topic being treated as unrestricted
+# (fixed separately, see select_candidate_articles), but the incident
+# also exposed that novelty eligibility had no relevance floor of its
+# OWN wider than "whatever's left after the regular cut" -- a keyword or
+# keyness hit could surface something the regular relevance filter had
+# already ranked as barely-relevant. This keeps that floor, but
+# deliberately wider than RELEVANCE_KEEP_* (roughly 2x, a first-cut
+# guess like NOVELTY_KEYNESS_THRESHOLD's -5.0 -- adjust with real push
+# data): novelty content is explicitly allowed to be "not so important"
+# per the feature's own design (see _pick_novelty_extra), so requiring
+# it to clear the SAME strict bar as a regular candidate would defeat
+# the point -- this only needs to prove "still related to topic", not
+# "would have made the regular cut".
+NOVELTY_RELEVANCE_KEEP_FRACTION = 0.20
+NOVELTY_RELEVANCE_KEEP_MIN = 40
+NOVELTY_RELEVANCE_KEEP_MAX = 100
+
 # The relevance-filtered pool is capped here again before the regular
 # recency cut and novelty-extra search run -- matches RELEVANCE_KEEP_MAX
 # exactly, not some smaller number, specifically so THIS cap is never the
@@ -229,10 +250,17 @@ def resolve_interest_categories(model, interests: list[str]) -> dict[str, list[s
 
     Caching failures as [] is what poisoned the live cache during the
     2026-08-17 classification outage: "AI", "Bitcoin", "機器人科技" and
-    others were all stored as [], permanently, with no retry. An empty
-    mapping matches every article (see select_candidate_articles), so those
-    subscribers were receiving entirely unfiltered news -- the exact failure
-    the category filter exists to prevent."""
+    others were all stored as [], permanently, with no retry. At the time,
+    an empty mapping matched every article (see select_candidate_articles),
+    so those subscribers were receiving entirely unfiltered news -- the
+    exact failure the category filter exists to prevent. That
+    "unrestricted" behavior was itself reversed 2026-08-27 (an empty
+    mapping now excludes the topic entirely instead), but caching a
+    genuinely-empty classification permanently is still correct and
+    unrelated to that reversal: it's what makes a confidently-wrong
+    empty answer a standing condition rather than a one-cycle blip, on
+    either side of how select_candidate_articles handles it -- see that
+    function's own docstring."""
     resolved = users_db.get_cached_interest_categories(interests)
     missing = [i for i in interests if i not in resolved]
     if missing:
@@ -267,11 +295,36 @@ def select_candidate_articles(
     An article is a candidate for `topic` when its own categories (set at
     ingestion time by news_classify.py) overlap with that topic's mapped
     categories from `topic_categories`. A topic that mapped to NO
-    categories at all (a classifier miss) is treated as unrestricted --
-    matches any article -- rather than matching nothing: a subscriber's
-    own stated interest is presumably tech/industry-relevant by
-    construction (they set it on a tech-industry bot), and a
-    classification miss on the INTEREST shouldn't silently starve them.
+    categories at all (a classifier miss) gets NO candidates at all --
+    that interest is simply skipped this cycle (same downstream shape as
+    "nothing new since last time": run_push_cycle doesn't send a message
+    or consume a slot for it), rather than the "unrestricted, matches any
+    article" behavior this had until 2026-08-27.
+
+    That earlier behavior was a REPEAT of an already-diagnosed failure,
+    not a new one: this exact docstring already recorded, from the
+    2026-08-17 classification outage, that an empty mapping matching
+    every article was "the exact failure the category filter exists to
+    prevent" -- the outage's own retry logic got fixed, but the
+    consequence of a *confidently-empty* classification (not a retryable
+    failure, a real cached "[]" the classifier itself returned) was left
+    unchanged. It surfaced for real 2026-08-27: an interest literally
+    named "robotics" was classified into zero of the taxonomy's 28
+    categories (including "Robotics" itself -- a genuine classifier
+    misjudgment, not a system bug) and, because that made it
+    "unrestricted," the subscriber's push digest surfaced a Witcher 3
+    game-DLC article with a keyword-hit-triggered novelty note attached,
+    entirely unrelated to robotics. Skipping the topic instead is a
+    real behavior tradeoff, not a strict improvement: a subscriber whose
+    interest was ACTUALLY too novel/niche for the current 28-category
+    taxonomy to recognize now gets nothing at all for it, silently,
+    rather than an imperfectly-filtered digest -- see resolve_
+    interest_categories' own docstring for why a cached "[]" is never
+    retried, which makes this a standing condition, not a one-cycle
+    blip. Accepted as the better failure mode: an occasional legitimate
+    interest going quiet is a worse experience to eventually notice and
+    report than an unrelated-content leak is to receive without warning.
+
     An article with no categories (the classifier found nothing that
     plausibly applies, e.g. a general-news piece with no tech angle at
     all) is excluded whenever the topic itself has real categories to
@@ -358,8 +411,15 @@ def select_candidate_articles(
       `max_per_topic`'s regular slots: a novelty-keyword hit or an
       article whose own vocabulary is statistically foreign to this
       topic's category pool, ONLY when one clears NOVELTY_KEYNESS_
-      THRESHOLD -- no forced pick when nothing qualifies. See
-      _pick_novelty_extra."""
+      THRESHOLD -- no forced pick when nothing qualifies. Drawn from a
+      SEPARATE, wider relevance pass over `raw_pool` (NOVELTY_RELEVANCE_
+      KEEP_*, added 2026-08-27 alongside the fix above -- the "skip an
+      uncategorized topic entirely" reversal alone still left novelty
+      picks with no relevance floor of their own beyond "whatever the
+      regular digest's stricter cut left over") -- still required to be
+      topically relevant, just against a more permissive bar than the
+      regular candidates, since novelty content is allowed to be minor
+      but not allowed to be unrelated. See _pick_novelty_extra."""
     now = now or datetime.now(timezone.utc)
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     ordered = sorted(
@@ -372,6 +432,14 @@ def select_candidate_articles(
     candidates = []
     for topic in topics:
         topic_cats = set(topic_categories.get(topic, []))
+        if not topic_cats:
+            # No categories to match against at all -- skip this topic
+            # entirely rather than treating it as "matches everything"
+            # (removed 2026-08-27; see this function's own docstring for
+            # the incident that motivated the reversal). Same downstream
+            # shape as "nothing new since last time": no candidates, no
+            # message, no slot consumed.
+            continue
         # The embedding query text -- NOT necessarily `topic` itself. See
         # _resolve_query_text: a cached, LLM-generated definition of the
         # topic outperforms the bare topic string as a retrieval query,
@@ -406,7 +474,9 @@ def select_candidate_articles(
             if not include_restricted and article.get("source_key") in news_sources.RESTRICTED_SOURCES:
                 continue
             article_cats = set(article.get("categories") or [])
-            if topic_cats and not (article_cats & topic_cats):
+            # topic_cats is always non-empty here -- the loop `continue`d
+            # for this whole topic above otherwise.
+            if not (article_cats & topic_cats):
                 continue
             # The one and only "has this subscriber seen it" test.
             if link in already_pushed_links:
@@ -451,7 +521,21 @@ def select_candidate_articles(
             candidates.append({**article, "topic": topic})
 
         if include_novelty_extra:
-            novelty = _pick_novelty_extra(pool[max_per_topic:], topic_cats)
+            # A SEPARATE, wider relevance pass over raw_pool (not
+            # pool[max_per_topic:]) -- see NOVELTY_RELEVANCE_KEEP_* and
+            # _pick_novelty_extra's own docstring for why novelty
+            # eligibility needs its own, more permissive relevance floor
+            # rather than only ever seeing what the regular digest's
+            # stricter cut left over.
+            novelty_pool = _filter_by_relevance(
+                raw_pool, embedder, query_text,
+                keep_fraction=NOVELTY_RELEVANCE_KEEP_FRACTION,
+                keep_min=NOVELTY_RELEVANCE_KEEP_MIN,
+                keep_max=NOVELTY_RELEVANCE_KEEP_MAX,
+            )
+            regular_links = {a["link"] for a in pool[:max_per_topic]}
+            novelty_remainder = [a for a in novelty_pool if a["link"] not in regular_links]
+            novelty = _pick_novelty_extra(novelty_remainder, topic_cats)
             if novelty is not None:
                 candidates.append({**novelty, "topic": topic, "is_novelty_extra": True})
     return candidates
@@ -477,17 +561,30 @@ def _resolve_query_text(topic: str) -> str:
     return users_db.get_interest_query_expansion(topic) or topic
 
 
-def _filter_by_relevance(pool: list[dict], embedder, query_text: str) -> list[dict]:
+def _filter_by_relevance(
+    pool: list[dict], embedder, query_text: str,
+    keep_fraction: float = RELEVANCE_KEEP_FRACTION,
+    keep_min: int = RELEVANCE_KEEP_MIN,
+    keep_max: int = RELEVANCE_KEEP_MAX,
+) -> list[dict]:
     """The fine filter after the coarse category one: cuts `pool` (already
     category-matched, newest-first) down to the top-scoring articles by
-    similarity to `query_text`, where "top" means RELEVANCE_KEEP_MIN to
-    RELEVANCE_KEEP_MAX articles depending on pool size -- see that
-    constant's own comment for the full reasoning (an absolute,
-    clamped count, not a fraction; a fraction was tried first and measured
-    not to generalize, across both pool size and topic phrasing).
-    `query_text` is resolved by the caller (see _resolve_query_text) -- a
-    cached generated definition of the topic when one exists, the bare
-    topic string otherwise; this function doesn't know or care which.
+    similarity to `query_text`, where "top" means `keep_min` to `keep_max`
+    articles depending on pool size -- see RELEVANCE_KEEP_MAX's own
+    comment for the full reasoning (an absolute, clamped count, not a
+    fraction; a fraction was tried first and measured not to generalize,
+    across both pool size and topic phrasing). `query_text` is resolved
+    by the caller (see _resolve_query_text) -- a cached generated
+    definition of the topic when one exists, the bare topic string
+    otherwise; this function doesn't know or care which.
+
+    `keep_fraction`/`keep_min`/`keep_max` default to the regular-digest
+    clamp (RELEVANCE_KEEP_*) but are overridable -- the novelty-extra
+    search (select_candidate_articles) calls this a second time with the
+    wider NOVELTY_RELEVANCE_KEEP_* clamp instead, over the same
+    `raw_pool`, so novelty eligibility has its own, more permissive
+    relevance floor rather than inheriting the regular digest's stricter
+    one or having none at all.
 
     Found necessary live, 2026-08-25: "AI", "AI Agent", "AI coding" and
     "Large Language Model" all map to category ['AI'], so a subscriber
@@ -546,7 +643,7 @@ def _filter_by_relevance(pool: list[dict], embedder, query_text: str) -> list[di
     # from the END of the sorted list -- the single highest score becomes
     # the gate, and the filter would exclude nearly everything instead of
     # keeping everything.
-    n_kept = min(RELEVANCE_KEEP_MAX, max(round(len(scored) * RELEVANCE_KEEP_FRACTION), RELEVANCE_KEEP_MIN))
+    n_kept = min(keep_max, max(round(len(scored) * keep_fraction), keep_min))
     n_kept = min(n_kept, len(scored))
     cut_index = len(scored) - n_kept
     gate = sorted(sim for _, sim in scored)[cut_index]
@@ -564,10 +661,13 @@ def _novelty_sort_key(scored_item: tuple[dict, bool, tuple[float, str] | None]) 
 
 def _pick_novelty_extra(remainder: list[dict], categories: set[str] | list[str]) -> dict | None:
     """At most one "by the way, we noticed something interesting" pick,
-    drawn from `remainder` -- articles that cleared the relevance filter
-    but didn't make the regular digest's recency cut (select_candidate_
-    articles' `pool[max_per_topic:]`), so this never re-suggests an
-    article already in the regular list. See news_keyness.py's own
+    drawn from `remainder` -- articles that cleared select_candidate_
+    articles' own WIDER novelty relevance pass (NOVELTY_RELEVANCE_KEEP_*,
+    a separate and more permissive filter over raw_pool than the regular
+    digest's RELEVANCE_KEEP_* one -- added 2026-08-27, see that
+    constant's own comment) and aren't already one of the regular
+    candidates, so this never re-suggests an article already in the
+    regular list. See news_keyness.py's own
     module docstring and docs/analysis/cluster-measurements.md's
     "Offbeat selection, take two" for the full measurement history
     (replaced an earlier embedding-based centroid-distance design

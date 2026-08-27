@@ -405,12 +405,28 @@ dates.
 ### Fine-grained relevance filtering (added 2026-08-25)
 
 A subscriber's interest first narrows the shared article cache by a
-coarse **category** tag (13 broad taxonomy categories, assigned once per
-article at ingestion). That alone isn't enough: two subscribers with
+coarse **category** tag (28 broad taxonomy categories as of 2026-08-27,
+assigned once per article at ingestion; the taxonomy is DB-driven and
+grows over time — see `users_db.get_active_categories` — so treat this
+count as a snapshot, not a constant).
+
+That alone isn't enough: two subscribers with
 related but distinct interests — "AI Agent" and "AI coding," say — both
 map to the same "AI" category, so without a further step they'd receive
 near-identical digests. This was a real, user-reported bug before the fix
 below shipped.
+
+An interest the classifier maps to **zero** categories is skipped
+entirely for that push cycle — no candidates, no message, no slot
+consumed — rather than treated as "matches any article." Reversed
+2026-08-27 from the opposite (fail-open) behavior, after an interest
+named "robotics" was genuinely misclassified into zero categories and
+the old "unrestricted" handling let a completely unrelated article
+reach that subscriber via the novelty-extra pick below. See
+`docs/analysis/cluster-measurements.md`'s "2026-08-27 incident" section
+for the full root-cause chain and the accepted tradeoff (an interest
+that's genuinely too novel/niche for the current taxonomy now goes
+quiet rather than receiving an imperfectly-filtered digest).
 
 The fix is a second, embedding-based filter that runs on top of the
 category match, using `model2vec` (`potion-base-8M`, chosen specifically
@@ -431,10 +447,11 @@ with no working embedder behaves exactly as it did before this feature
 existed for these two steps: pure recency ordering, no near-duplicate
 collapse.
 
-**Offbeat/novelty selection is a separate mechanism, not embedding-based
-at all** (as of 2026-08-26 — it was for one day, then was replaced after
-live use showed its picks read as unrelated more often than novel). It
-is explicitly experimental and does not compete with the regular digest
+**Offbeat/novelty selection is keyword/keyness-driven, not a pure
+embedding-similarity ranking** (as of 2026-08-26 — an earlier one-day
+version was purely embedding-based and got replaced after live use
+showed its picks read as unrelated more often than novel). It is
+explicitly experimental and does not compete with the regular digest
 for space: `MAX_ARTICLES_PER_TOPIC` regular candidates are always chosen
 by pure recency, and the **novelty extra** is a single, additional
 article appended to a candidate list that already has all of them — the
@@ -461,6 +478,21 @@ independent signals, computed by `news_keyness.py`:
   bar, not "whichever candidate happens to score lowest": **if nothing in
   a topic's pool clears it, that push simply has no novelty section at
   all**, on purpose, not a gap to fill with a weak pick.
+
+A keyword or keyness hit alone is not sufficient, though — added
+2026-08-27 as the second half of the incident fix above: a candidate for
+the novelty slot must also clear its own embedding-based relevance
+floor, using the SAME relative/percentile mechanism as the regular
+digest's relevance filter above but a deliberately wider clamp
+(`NOVELTY_RELEVANCE_KEEP_FRACTION`/`_MIN`/`_MAX`, roughly double the
+regular one) run as a second pass over the raw category-matched pool.
+This closes the gap Fix 1 alone didn't: even for a topic with real
+mapped categories, the coarse category match doesn't guarantee genuine
+relevance, and a keyword hit like "unveiled" has no topic awareness at
+all on its own. Wider than the regular cut on purpose — novelty content
+is allowed to be "not so important, but eye-opening," so it only needs
+to prove "still related to topic," not "would have made the regular
+digest."
 
 Computed once per `news_ingest.py` cycle over the whole cache (the
 expensive step, POS-tagging, is shared across every active category) and

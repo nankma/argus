@@ -1717,3 +1717,74 @@ its own relevance judgment, same as any other candidate) -- deliberately
 NOT the same shape as the retired per-line `[topic]` prefix (a marker on
 every line reads as confirmed metadata; a marker on the one genuinely-
 different item is a real, narrow formatting instruction).
+
+### 2026-08-27 incident: an off-topic novelty pick reached a real subscriber
+
+A subscriber with interest "robotics" (chat_id 952604638) received a
+push digest whose closing note discussed a Witcher 3 game-DLC article --
+and the digest's own text admitted the mismatch ("雖然與機器人學無關", "though
+unrelated to robotics"), rather than silently omitting it as
+`_PUSH_DIGEST_PROMPT` instructs. Root-caused via direct production
+database and cache queries, a three-link chain:
+
+1. The LLM classifier had genuinely misjudged "robotics" into zero of
+   the taxonomy's 28 categories (confirmed: `interest_categories` row
+   `('robotics', '[]')`) -- a real classification miss, not a system bug.
+2. `select_candidate_articles` treated a topic with no mapped categories
+   as **unrestricted** ("matches every article"), a design choice this
+   same docstring had already flagged as dangerous after the 2026-08-17
+   classification outage, but never revisited for the *confidently-
+   empty* case specifically (only retryable failures got fixed then).
+   Under "unrestricted," a techradar.com Witcher 3 DLC article
+   (`categories=['Media','Consumer']`, summary containing "unveiled")
+   became a candidate for "robotics" despite sharing nothing with it.
+3. `has_novelty_keyword`'s substring match has no topic awareness at
+   all -- "unveiled" hit regardless of what the article was actually
+   about, and with nothing upstream gating novelty eligibility on
+   relevance beyond the regular digest's own leftover pool, the article
+   won the novelty slot. `write_push_digest`'s own relevance judgment
+   (stage 2) was the last line of defense and it also failed, producing
+   the self-contradicting output instead of omitting the article.
+
+**Fix 1 -- reverse the fail-open "unrestricted" behavior.** A topic
+with no mapped categories now gets zero candidates and is skipped
+entirely for that cycle (same downstream shape as "nothing new since
+last time") instead of matching anything. This alone closes the
+specific incident: the Witcher 3 article could never have entered
+`raw_pool` at all, since "robotics" would never reach the category-match
+or novelty-search code paths in the first place. Accepted tradeoff,
+not a strict improvement: a subscriber whose interest is genuinely too
+novel/niche for the current 28-category taxonomy now gets nothing for
+it, silently, rather than an imperfectly-filtered digest -- and because
+`resolve_interest_categories` caches a genuinely-empty classification
+permanently (never retried, unlike a failure), this is a standing
+condition per affected interest, not a one-cycle blip. Judged the
+better failure mode: a quiet gap is worse to eventually notice than an
+unrelated-content leak is to receive without warning, but it's a real
+cost, not a free fix.
+
+**Fix 2 -- give novelty eligibility its own relevance floor.** Even for
+a topic WITH real categories, the coarse category filter alone doesn't
+guarantee topical relevance (the same gap `_filter_by_relevance` exists
+to close for the regular digest) -- and until this fix, the novelty
+search only ever saw `pool[max_per_topic:]`, the regular digest's own
+leftover after its stricter `RELEVANCE_KEEP_*` cut, with no relevance
+floor of its own beyond that. Added `NOVELTY_RELEVANCE_KEEP_FRACTION =
+0.20` / `NOVELTY_RELEVANCE_KEEP_MIN = 40` / `NOVELTY_RELEVANCE_KEEP_MAX
+= 100` -- roughly double the regular `RELEVANCE_KEEP_*` clamp, a
+first-cut guess in the same spirit as `NOVELTY_KEYNESS_THRESHOLD`'s
+-5.0, not yet tuned against real push data. `select_candidate_articles`
+now runs a SECOND, separate `_filter_by_relevance` pass over `raw_pool`
+(not `pool`) with this wider clamp, and feeds novelty search whatever
+survives that minus the regular candidates already picked. Deliberately
+wider than the regular cut, not equal to it: novelty content is allowed
+to be "not so important, but eye-opening" per this feature's own design,
+so requiring it to clear the exact same bar as a regular candidate
+would defeat the point -- it only needs to prove "still related to
+topic," not "would have made the regular digest." Covered by
+`tests/test_news_push.py::test_novelty_extra_excluded_when_it_fails_
+even_the_wider_relevance_bar` (a keyword-hit article with ~zero
+embedding similarity to the topic, in a pool large enough for the
+percentile cut to actually exclude something, is confirmed excluded)
+and `::test_novelty_extra_uses_a_wider_relevance_pass_than_the_regular_
+digest` (pins the two separate `_filter_by_relevance` calls' params).
