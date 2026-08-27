@@ -254,9 +254,30 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
     # three as already-present, not a routing/storage regression). Explicit
     # teardown first, rather than trusting the id to still be empty, so
     # this case is actually idempotent across repeated deploys.
+    #
+    # Uses "cloud infrastructure" as the third topic, not the acronym
+    # "LLM" this case used before 2026-08-27. Found live on that day's
+    # deploy: "LLM" gets expanded by news_classify's normalization on the
+    # Add path (_add_one_interest calls the model to turn ambiguous
+    # abbreviations into an unambiguous English phrase), but that
+    # expansion is itself an LLM call and NOT deterministic call to call
+    # -- two different smoke runs normalized it to "Large Language Model"
+    # and "LLM Large Language Models" respectively. users_db.remove_
+    # interest only does an exact (case-insensitive) match with no fuzzy
+    # word-overlap check (unlike add_interest) and dispatch_settings never
+    # runs a remove target through normalization the way an add target
+    # does -- so a teardown saying "LLM" can never reliably match whatever
+    # the PRIOR run's Add call happened to expand it to, and hardcoding
+    # one specific expansion (tried first) broke on the very next run for
+    # the same reason. "cloud infrastructure" isn't an abbreviation, so it
+    # round-trips through Add unchanged and Remove's exact match works
+    # every time -- sidesteps the non-determinism rather than fixing it.
+    # remove_interest's exact-match-only behavior is a real, separate
+    # limitation (a subscriber who adds "LLM" and later asks to remove
+    # "LLM" would hit the same non-removal today) worth its own fix.
     multi_topic_chat_id = chat_id + 2
-    send(multi_topic_chat_id, "Remove AI agent, AI coding, and LLM from my interests", timeout)
-    r = send(multi_topic_chat_id, "Add AI agent, AI coding, and LLM to my interests", timeout)
+    send(multi_topic_chat_id, "Remove AI agent, AI coding, and cloud infrastructure from my interests", timeout)
+    r = send(multi_topic_chat_id, "Add AI agent, AI coding, and cloud infrastructure to my interests", timeout)
     reply = r["reply"]
     added_count = reply.lower().count("added ")
     results.append(
