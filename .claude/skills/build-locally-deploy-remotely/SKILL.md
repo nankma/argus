@@ -140,10 +140,20 @@ the same incidents inline.
    regression. The `docker images` SIZE column is not authoritative on
    this setup (observed cause: it appears to double-count layers shared
    with the `mambaorg/micromamba` base and/or a prior locally-built tag
-   rather than deduplicating them). **Verify image size with `docker
-   inspect --format '{{.Size}}'` or a real `docker save`, not `docker
-   images`** — the latter is fine for a quick "did this build at all"
-   glance but not for a size comparison against a target number.
+   rather than deduplicating them). **Verify image size with a real
+   `docker save`, not `docker images`** — the latter is fine for a quick
+   "did this build at all" glance but not for a size comparison against
+   a target number.
+
+   **`docker inspect --format '{{.Size}}'` is not a reliable fallback
+   either — on some Docker Desktop versions it errors outright** (no
+   `.Size` key in the inspect map at all, confirmed 2026-08-26 on a
+   later Docker Desktop build than the one the paragraph above was
+   measured on), rather than silently returning a stale or wrong number.
+   `docker save -o image.tar` (or piping to `wc -c`) and reading the
+   real file size is the one method that's actually worked every time
+   this has come up — treat it as the primary check, not a fallback
+   for when `docker inspect` "doesn't feel right."
 
 2. Transfer the image directly over SSH — no container registry needed
    for a single personal VM:
