@@ -99,6 +99,40 @@ def _built(articles):
     return news_keyness.build_noun_index(articles)
 
 
+# --- _signed_g2 (direct unit tests -- category_keyness's callers all use
+# pool sizes large enough that the MIN_EXPECTED_COUNT floor never fires,
+# so it had no coverage until these) --------------------------------------
+
+
+def test_signed_g2_none_when_expected_count_too_small():
+    """A term at exactly the MIN_GLOBAL_DF floor (so it would otherwise
+    be considered "real, not a typo"), in a large corpus with a small
+    topic pool -- global_df=5, n_total=1000, n_topic=100 gives
+    e_a = (5/1000)*100 = 0.5, below MIN_EXPECTED_COUNT=1.0. Not enough
+    expected presence within THIS topic specifically to trust a
+    direction, even though the term clears the global floor -- this is
+    the exact "don't score what the data can't support" case the
+    module docstring describes."""
+    result = news_keyness._signed_g2(topic_df=1, global_df_count=5, n_topic=100, n_rest=900)
+    assert result is None
+
+
+def test_signed_g2_real_score_when_expected_count_is_sufficient():
+    """Same shape as the module's own measured sanity check (openai
+    strongly positive for AI) at unit-test scale: a term present in
+    every topic-pool article and never outside it, with enough topic-
+    pool size that e_a clears MIN_EXPECTED_COUNT easily."""
+    result = news_keyness._signed_g2(topic_df=20, global_df_count=20, n_topic=20, n_rest=20)
+    assert result is not None
+    assert result > 0
+
+
+def test_signed_g2_negative_for_a_term_rarer_in_topic_than_overall():
+    result = news_keyness._signed_g2(topic_df=1, global_df_count=20, n_topic=20, n_rest=20)
+    assert result is not None
+    assert result < 0
+
+
 def test_category_keyness_positive_for_a_topic_defining_term(fake_nltk):
     """A noun that appears in EVERY AI-category article and never
     outside it should score strongly positive -- present far more than
