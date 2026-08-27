@@ -93,3 +93,22 @@ class FakeEmbedder:
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         norms[norms == 0] = 1.0  # an all-punctuation/empty string stays the zero vector
         return vectors / norms
+
+
+def fake_word_tokenize(text: str) -> list[str]:
+    """Stand-in for nltk.tokenize.word_tokenize -- plain alphanumeric
+    splitting, no real tokenization rules (contractions, punctuation
+    edge cases, etc.). Matches the function's shape (str -> list[str]),
+    not its linguistic behavior; news_keyness.py's tests don't need the
+    real thing, just something deterministic."""
+    return re.findall(r"[A-Za-z0-9]+", text)
+
+
+def fake_pos_tag(tokens: list[str]) -> list[tuple[str, str]]:
+    """Stand-in for nltk.tag.pos_tag -- tags every token NN (a plain
+    singular noun). news_keyness.py only checks tag membership in
+    NOUN_TAGS, so real part-of-speech accuracy isn't needed for a test
+    fixture; every word in a fixture's title/summary counting as a
+    "noun" keeps fixtures simple (no need to pick words a real tagger
+    would actually classify as nouns to get predictable test behavior)."""
+    return [(t, "NN") for t in tokens]

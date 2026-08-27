@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import news_cache
 import news_embed
 import news_ingest
+import news_keyness
 import news_push
 import news_sources
 import users_db
@@ -887,3 +888,90 @@ def test_an_embedder_failure_does_not_block_caching(
     cached = news_cache.read_all()
     assert len(cached) == 1
     assert cached[0]["embedding"] is None
+
+
+# --- category keyness refresh (2026-08-26) ----------------------------------
+# news_keyness.py's per-category "how foreign is this word" scores, for
+# news_push._pick_for_topic's offbeat slots -- computed fresh every
+# ingestion cycle over the WHOLE cache (not just this cycle's new
+# articles), so there's no staleness window between an article being
+# ingested and its category's keyness table reflecting it. See
+# news_ingest._refresh_category_keyness's own docstring and
+# docs/analysis/cluster-measurements.md's "Offbeat selection, take two".
+
+def test_ingestion_cycle_refreshes_category_keyness(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, fake_nltk
+):
+    # Two real floors to clear, not just "some articles exist": a term
+    # needs global document frequency >= news_keyness.MIN_GLOBAL_DF (5)
+    # to be scored at all, and category_keyness needs an "outside the
+    # topic" comparison group (returns {} when n_rest == 0) -- the
+    # Finance-tagged article is that group, not incidental filler.
+    now = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
+    ai_titles = [f"openai releases update {i}" for i in range(news_keyness.MIN_GLOBAL_DF)]
+    fetched = [_article(f"https://e.com/{i}", title=t) for i, t in enumerate(ai_titles)]
+    fetched.append(_article(f"https://e.com/{len(ai_titles)}", title="market report for investors"))
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", lambda q, n: fetched)])
+    categories_by_index = {i: ["AI"] for i in range(len(ai_titles))}
+    categories_by_index[len(ai_titles)] = ["Finance"]
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(categories_by_index), now)
+
+    scores = users_db.get_category_keyness("AI")
+    assert "openai" in scores
+
+
+def test_ingestion_cycle_keyness_reflects_the_whole_cache_not_just_this_batch(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, fake_nltk
+):
+    """A term only present in an ALREADY-cached article (from a previous
+    cycle, not this one's fetch) must still show up in the refreshed
+    keyness table -- news_ingest.py reads news_cache.read_all() for this
+    step, not just `fetched`, specifically so keyness reflects the real
+    current corpus."""
+    # Same two floors as the test above: MIN_GLOBAL_DF and a real
+    # outside-the-topic comparison group.
+    now = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
+    for i in range(news_keyness.MIN_GLOBAL_DF):
+        news_cache.write_article(
+            "bbc_business", _article(f"https://e.com/existing{i}", title=f"quantum research breakthrough {i}"),
+            ["AI"], now - timedelta(hours=1),
+        )
+    news_cache.write_article(
+        "bbc_business", _article("https://e.com/finance", title="market report for investors"),
+        ["Finance"], now - timedelta(hours=1),
+    )
+    monkeypatch.setattr(
+        news_sources, "enabled_sources",
+        lambda: [("bbc_business", lambda q, n: [_article("https://e.com/new", title="openai releases update")])])
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["AI"]}), now)
+
+    scores = users_db.get_category_keyness("AI")
+    assert "quantum" in scores
+
+
+def test_keyness_refresh_failure_does_not_block_ingestion(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache, fake_nltk
+):
+    """A broken keyness step is a push-quality regression, never a reason
+    an otherwise-successful ingestion cycle should fail to cache its
+    articles."""
+    now = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(news_sources, "enabled_sources",
+                        lambda: [("bbc_business", lambda q, n: [_article("https://e.com/1")])])
+    monkeypatch.setattr(
+        news_ingest.news_keyness, "build_noun_index",
+        MagicMock(side_effect=RuntimeError("keyness died")),
+    )
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Hardware"]}), now)
+
+    assert len(news_cache.read_all()) == 1
+
+
+def test_keyness_refresh_does_nothing_on_an_empty_cache(isolated_subscribers_db, isolated_news_cache, fake_nltk):
+    """No articles at all yet -- nothing to compute keyness over, and
+    nothing should raise."""
+    news_ingest._refresh_category_keyness(datetime(2026, 8, 26, tzinfo=timezone.utc))
+    assert users_db.get_category_keyness("AI") == {}

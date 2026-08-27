@@ -318,37 +318,14 @@ def test_resolve_query_text_falls_back_to_the_bare_topic_when_nothing_cached(
     assert news_push._resolve_query_text("AI coding") == "AI coding"
 
 
-def test_select_candidate_articles_uses_the_cached_expansion_for_the_offbeat_gate(
-    isolated_subscribers_db
-):
-    """End-to-end: a topic with a cached expansion drives the embedding
-    query through select_candidate_articles, not just _resolve_query_text
-    in isolation. "coding tools like codex devise" is engineered to share
-    far more vocabulary with the coding-flavored articles below than the
-    bare word "coding" would alone, so the offbeat pick should reflect
-    the richer query, not the bare topic."""
-    users_db.set_interest_query_expansion(
-        "coding", "coding tools like codex devise assist developers write programs")
-    embedder = FakeEmbedder()
-    recency = ["coding news today", "coding update today"]
-    remainder = [
-        "coding roundup this week",
-        "coding digest for readers",
-        "codex devise assist developers write programs daily",
-    ]
-    articles = [
-        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
-                 title=t, embedding=_embed(t), categories=["AI"])
-        for i, t in enumerate(recency + remainder)
-    ]
-
-    result = news_push.select_candidate_articles(
-        articles, ["coding"], {"coding": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, embedder=embedder, offbeat_slots=1,
-    )
-
-    titles = [a["title"] for a in result]
-    assert "codex devise assist developers write programs daily" in titles
+# select_candidate_articles's wiring of _resolve_query_text's output into
+# _filter_by_relevance is a one-line pass-through (query_text =
+# _resolve_query_text(topic); _filter_by_relevance(raw_pool, embedder,
+# query_text)), and both halves are independently tested above/below --
+# no separate end-to-end test for that wiring itself. There used to be
+# one here for the offbeat gate specifically, retired 2026-08-26 when
+# offbeat selection stopped using embeddings/query text at all (see
+# "Offbeat selection, take two" in docs/analysis/cluster-measurements.md).
 
 
 # --- relevance filter (2026-08-25) ------------------------------------------
@@ -549,164 +526,156 @@ def test_relevance_filter_preserves_input_order():
     assert result_links == [link for link in original_order if link in result_links]
 
 
-# --- offbeat selection (2026-08-25) -----------------------------------------
+# --- offbeat selection (2026-08-25 embedding version, replaced 2026-08-26
+# by the keyword+keyness version below -- see "Offbeat selection, take
+# two" in docs/analysis/cluster-measurements.md for why: live use showed
+# the embedding-centroid version's picks read as unrelated more often
+# than novel) ------------------------------------------------------------
 
-def test_offbeat_slot_picks_the_article_least_like_the_topics_typical_one(isolated_subscribers_db):
-    """Verified against news_embed's real formula with FakeEmbedder before
-    writing this assertion (see the session that added this feature) --
-    the four remainder articles all share the SAME word count and the
-    same single word in common with the "AI" query ("ai" itself), so
-    their query similarity ties; what breaks the tie is the offbeat
-    ranking by lowest similarity to the pool's centroid, which the
-    finance-heavy pool skews toward "chip/stock/funding" vocabulary and
-    away from "ai robot learns dance moves".
-
-    The pool-wide relevance filter (_filter_by_relevance) also runs here
-    but does not disturb this result: RELEVANCE_KEEP_MIN=20 is bigger
-    than this 6-item pool, so n_kept clamps down to the whole pool --
-    nothing is cut before recency/offbeat selection runs. That floor
-    exists specifically so a small, narrow-topic pool like this one
-    isn't starved by a percentage of a small number -- see
-    RELEVANCE_KEEP_MIN's own comment."""
-    recency = ["ai chip earnings today", "ai stock price today"]
+def test_offbeat_slot_picks_a_novelty_keyword_hit_over_a_plain_article(isolated_subscribers_db, fake_nltk):
+    """The primary offbeat signal: a novelty-keyword hit (news_keyness.
+    NOVELTY_KEYWORDS) always outranks a plain remainder article. No
+    keyness data is cached for "AI" in this test at all, isolating the
+    keyword signal on its own."""
+    recency = ["ai daily roundup", "ai weekly digest"]
     remainder = [
-        "ai chip earnings beat forecast",
-        "ai stock price surges higher",
-        "ai funding round closes fast",
-        "ai robot learns dance moves",
+        "ai startup raises funding round",
+        "major ai model leaks ahead of launch",  # keyword hit: "leaks"
+        "ai chip earnings beat expectations",
     ]
     titles_newest_first = recency + remainder
     articles = [
-        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
-                 title=t, embedding=_embed(t), categories=["AI"])
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i), title=t, categories=["AI"])
         for i, t in enumerate(titles_newest_first)
     ]
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=1,
+        max_per_topic=3, now=NOW, offbeat_slots=1,
     )
 
     titles = [a["title"] for a in result]
     assert titles == [
-        "ai chip earnings today",       # recency pick 1
-        "ai stock price today",         # recency pick 2
-        "ai robot learns dance moves",  # offbeat pick, not the next-newest
+        "ai daily roundup",
+        "ai weekly digest",
+        "major ai model leaks ahead of launch",
     ]
 
 
-def test_offbeat_zero_falls_back_to_pure_recency(isolated_subscribers_db):
-    articles = [
-        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
-                 title=f"ai article {i}", embedding=_embed(f"ai article {i}"), categories=["AI"])
-        for i in range(5)
-    ]
-
-    result = news_push.select_candidate_articles(
-        articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=0,
-    )
-
-    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
-
-
-def test_offbeat_with_no_embedder_falls_back_to_pure_recency(isolated_subscribers_db):
-    """embedder=None is the default every existing caller/test gets --
-    confirms it degrades cleanly rather than raising when there's simply
-    no embedder to work with."""
-    articles = [
-        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
-                 title=f"ai article {i}", embedding=_embed(f"ai article {i}"), categories=["AI"])
-        for i in range(5)
-    ]
-
-    result = news_push.select_candidate_articles(
-        articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, embedder=None, offbeat_slots=2,
-    )
-
-    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
-
-
-def test_offbeat_with_too_few_embedded_remainder_items_falls_back_to_recency(isolated_subscribers_db):
-    """Only 1 embedded candidate is left over after the recency cut --
-    below _pick_for_topic's floor of 2 for a meaningful median split."""
-    articles = [
-        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
-                 title=f"ai article {i}", embedding=_embed(f"ai article {i}"), categories=["AI"])
-        for i in range(3)
-    ]
-
-    result = news_push.select_candidate_articles(
-        articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=2, now=NOW, embedder=FakeEmbedder(), offbeat_slots=1,
-    )
-
-    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1"]
-
-
-def test_offbeat_pick_still_respects_the_relevance_gate(isolated_subscribers_db):
-    """An article that's the most different from the centroid but ALSO
-    the least relevant to the topic query must not win the offbeat slot
-    over one that's both relevant and unusual -- the gate runs before the
-    ranking, not after."""
-    recency = ["ai chip earnings today", "ai stock price today"]
+def test_offbeat_slot_picks_lowest_keyness_when_no_keyword_hits(isolated_subscribers_db, fake_nltk):
+    """With no keyword hit anywhere in the pool, the offbeat slot goes to
+    the article whose own vocabulary is most "foreign" to the AI
+    category per the precomputed keyness table (as news_ingest.py would
+    have written via users_db.set_category_keyness)."""
+    users_db.set_category_keyness("AI", {"openai": 300.0, "robot": 50.0, "quantum": -40.0})
+    recency = ["ai daily roundup", "ai weekly digest"]
     remainder = [
-        "ai chip earnings beat forecast",   # on-topic, will be the offbeat pick
-        "ai stock price surges higher",
-        "completely unrelated gardening tips for spring",  # off-topic outlier, must be gated out
+        "openai announces new update",   # strongly topic-typical, not offbeat
+        "ai robot demo at conference",   # mildly topic-typical
+        "ai research touches on quantum computing",  # most topic-foreign noun present
     ]
     titles_newest_first = recency + remainder
     articles = [
-        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
-                 title=t, embedding=_embed(t), categories=["AI"])
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i), title=t, categories=["AI"])
         for i, t in enumerate(titles_newest_first)
     ]
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=1,
+        max_per_topic=3, now=NOW, offbeat_slots=1,
     )
 
     titles = [a["title"] for a in result]
-    assert "completely unrelated gardening tips for spring" not in titles
+    assert titles == [
+        "ai daily roundup",
+        "ai weekly digest",
+        "ai research touches on quantum computing",
+    ]
 
 
-def test_offbeat_filler_tops_up_from_remainder_by_recency_not_by_score(isolated_subscribers_db):
-    """offbeat_slots=2 but only 1 remainder article clears the gate --
-    _pick_for_topic's filler branch (news_push.py's `filler_needed > 0`
-    arm inside the offbeat path, distinct from the full fallback()) must
-    top up the missing slot rather than sending a short digest. The
-    filler comes from `remainder` in its own recency order, not by score
-    and not requiring an embedding at all: "gated-out" is more recent
-    than "never embedded", so gated-out wins the filler slot.
-
-    Word counts are deliberately unequal so FakeEmbedder's word-overlap
-    scoring gives an unambiguous, non-tied split: "ai" alone is an exact
-    match to the bare "AI" query (cosine 1.0), while an 8-word title
-    diluted with unrelated vocabulary scores far lower (~0.35) -- with
-    only 2 embedded remainder items, the median-based gate is the max of
-    the two, so only the exact match survives it."""
-    recency_article = _article("https://a.com/0", published_dt=NOW,
-                                title="ai daily digest", embedding=_embed("ai daily digest"),
-                                categories=["AI"])
-    gated_out = _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
-                          title="ai plus five extra distinct words here now",
-                          embedding=_embed("ai plus five extra distinct words here now"),
-                          categories=["AI"])
-    survivor = _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
-                         title="ai", embedding=_embed("ai"), categories=["AI"])
-    never_embedded = _article("https://a.com/3", published_dt=NOW - timedelta(hours=3),
-                               title="unrelated finance stock news today", embedding=None,
-                               categories=["AI"])
-    articles = [recency_article, gated_out, survivor, never_embedded]
+def test_offbeat_keyword_hit_outranks_keyness_score(isolated_subscribers_db, fake_nltk):
+    """Both signals present in the same pool -- the keyword hit wins the
+    single offbeat slot even though a different article scores lower
+    (more topic-foreign) on keyness alone."""
+    users_db.set_category_keyness("AI", {"quantum": -40.0})
+    recency = ["ai daily roundup", "ai weekly digest"]
+    remainder = [
+        "ai research touches on quantum computing",  # lowest keyness, no keyword hit
+        "major ai lawsuit filed over data use",       # keyword hit: "lawsuit"
+    ]
+    titles_newest_first = recency + remainder
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i), title=t, categories=["AI"])
+        for i, t in enumerate(titles_newest_first)
+    ]
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, embedder=FakeEmbedder(), offbeat_slots=2,
+        max_per_topic=3, now=NOW, offbeat_slots=1,
     )
 
-    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/2", "https://a.com/1"]
+    titles = [a["title"] for a in result]
+    assert titles[-1] == "major ai lawsuit filed over data use"
+
+
+def test_offbeat_zero_falls_back_to_pure_recency(isolated_subscribers_db, fake_nltk):
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=f"ai article {i}", categories=["AI"])
+        for i in range(5)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, offbeat_slots=0,
+    )
+
+    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
+
+
+def test_offbeat_falls_back_to_pure_recency_with_no_signal_at_all(isolated_subscribers_db, fake_nltk):
+    """No keyness table cached for "AI" (news_ingest.py hasn't run a
+    cycle yet, or this is a fresh category) AND no keyword hits anywhere
+    in the remainder -- _pick_for_topic must degrade to pure recency
+    rather than picking arbitrarily."""
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title=f"ai article {i}", categories=["AI"])
+        for i in range(5)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, offbeat_slots=2,
+    )
+
+    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
+
+
+def test_offbeat_pads_remaining_slots_by_recency_when_not_enough_real_signal(isolated_subscribers_db, fake_nltk):
+    """offbeat_slots=2 but only 1 remainder article has any real signal
+    (a keyword hit) -- the other slot must still be filled, by the next
+    most recent article, rather than sending a short digest. Unlike the
+    embedding-centroid version this replaced, no separate filler step is
+    needed: every remainder article is scored (a no-signal article just
+    gets a neutral tiebreak value -- see _offbeat_sort_key), and Python's
+    stable sort preserves remainder's own recency order among ties, so
+    slicing the top offbeat_slots naturally pads itself."""
+    recency_article = _article("https://a.com/0", published_dt=NOW, title="ai daily digest", categories=["AI"])
+    keyword_hit = _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
+                            title="ai company hit with lawsuit", categories=["AI"])
+    plain_newer = _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
+                            title="ai roundup for the week", categories=["AI"])
+    plain_older = _article("https://a.com/3", published_dt=NOW - timedelta(hours=3),
+                            title="ai digest for readers", categories=["AI"])
+    articles = [recency_article, keyword_hit, plain_newer, plain_older]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, offbeat_slots=2,
+    )
+
+    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
 
 
 # --- resolve_interest_categories -------------------------------------------

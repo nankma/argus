@@ -1523,3 +1523,158 @@ higher than the pre-title+summary measurement earlier in this document
 ("Large Language Model" topped at 0.166 there; 0.627 here) -- consistent
 with, not proof of, the title+summary and generated-definition changes
 compounding rather than fighting each other.
+
+## Offbeat selection, take two: keyword rule + statistical "surprising word" detection, 2026-08-26
+
+Live use of the shipped offbeat gate (the embedding-based "lowest
+similarity to the pool's own centroid, past a relevance floor" design
+above) surfaced a real quality complaint: the bottom of a topic's ranked
+pool -- exactly where the offbeat pick is drawn from -- reads as
+*unrelated* more often than *novel*. This is the same "farthest is not
+the same as interesting" finding this document already made once
+(the "Novelty works, but 'farthest' is not the same as 'interesting'"
+section above) resurfacing after the whole pipeline changed underneath
+it -- worth re-measuring rather than assuming the earlier fix still
+holds at the new relevance-filtered pool sizes.
+
+**Two candidate signals, explicitly scoped together**: a small constant
+list of novelty-signaling keywords (`leak`, `breakthrough`, `unveils`,
+`lawsuit`, `banned`, `warns`, ...) checked directly against title+summary
+text, plus a statistical "this article combines vocabulary that doesn't
+normally go together" detector -- the running example throughout this
+investigation was "an AI-agent article that also happens to mention a
+street cat." BM25 itself cannot supply the second signal: it ranks
+documents against one query, with no notion of "these two things
+co-occurring is unusual." That requires an actual co-occurrence-surprise
+statistic, measured directly against the same 2604-article production-
+cache pull (`full_cache.jsonl`) used throughout this document, all real
+model2vec/NLTK, no synthetic fixtures.
+
+**The keyword signal worked from the first test and stayed reliable
+across every iteration below** -- flagged articles (a Twitch/Amazon
+AI-training lawsuit, a Meta antitrust-trial backlash story, an
+early-access Claude-model leak, public backlash over datacentre buildout)
+consistently read as genuinely notable, not noise. The statistical half
+took five real-data iterations to get right; four failed for four
+different, specific, measured reasons, kept here because the sequence of
+failures is itself the finding -- each one looked reasonable until it was
+actually run against real data.
+
+### Attempt 1 -- unigram PMI, within-article pairs: too noisy
+
+For each candidate article, score every pair of its own words by
+corpus-wide PMI (`log(P(a,b) / (P(a)*P(b)))`), take the pair with the
+lowest score as the article's "surprise" signal. Result: the flagged
+pairs were meaningless noise -- `models+people`, `based+openai`,
+`across+trump`, `power+use`. Root cause: an article with even a modest
+vocabulary produces dozens of candidate pairs (`C(k,2)` for `k` words),
+and taking the *minimum* over that many noisy scores finds a spuriously
+low value by pure multiple-comparison chance almost every time,
+regardless of whether the article contains a genuinely unusual
+combination.
+
+### Attempt 2 -- bigram PMI: systematically inflated, not just noisy
+
+Same shape, but pairing adjacent-word bigrams ("ai_agent") instead of
+single words, hoping to preserve phrase-level meaning. Median score
+across the whole pool: **+0.772** -- strongly *positive*, the opposite
+direction from "surprising." Root cause is a well-documented PMI failure
+mode: bigrams are far sparser than unigrams (most near the minimum
+occurrence floor), and PMI is known to be biased toward rare events --
+two low-frequency phrases that happen to co-occur even once look
+"highly associated" by the formula's math, which is an artifact of
+sparse data, not a real semantic signal.
+
+### Attempt 3 -- noun-only unigrams (NLTK POS tagging): fixed the math, not the signal
+
+Restricting to nouns (via `nltk.pos_tag`) removed the generic
+verbs/prepositions (`using`, `based`, `across`) that were polluting
+attempt 1. Numerically this worked -- scores landed in a sane range
+(-0.19 to +0.07), no more flooring or inflation. But isolating the
+statistical signal from the keyword rule (ranking articles with **no**
+keyword hit purely by lowest noun-pair PMI) still surfaced generic pairs
+-- `models+time`, `openai+state`, `models+tech` -- with `models+time`
+independently topping two completely unrelated articles. A pair's low
+PMI was still a property of the *words themselves* (how they behave
+across the whole corpus), not of the *specific article* containing them.
+
+### Attempt 4 -- + WordNet concrete/abstract filtering: coverage collapsed, and a new artifact appeared
+
+User-directed refinement: also exclude abstract nouns (`time`, `state`,
+`trade`, `control`) via WordNet's hypernym hierarchy (a noun's most
+common sense classified as `physical_entity` vs. `abstraction`), keeping
+words absent from WordNet entirely (proper nouns/brands like "OpenAI")
+since those are exactly the entity terms worth keeping, not noise.
+Directionally correct in spirit, but the real-data run was worse on both
+axes that matter: only 156 of 999 pool articles still had a scorable
+concrete-noun pair (vs. 551/999 for plain nouns) -- most candidates would
+have had no offbeat signal at all -- and the surviving "no keyword hit"
+top picks were now dominated by one single hyper-frequent term
+(`openai`) pairing with almost anything (`openai+world` alone topped
+three unrelated articles). A word that's simply very common in the pool
+will look "unusually paired" with nearly everything, which is a property
+of that word's frequency, not of any specific article.
+
+### The actual fix: keyness against the topic pool, not pairs against each other
+
+**User's correction, verbatim: "You should not [be] using OpenAI against
+other words, but against AI agent."** Every attempt above compared two
+arbitrary words *within* an article against each other. The fix compares
+each of an article's own words *against the topic itself* -- specifically,
+against the topic's whole category pool (e.g. "AI"), not the bare topic
+phrase (which often isn't literally present in a given article's text).
+This is standard corpus-linguistics **keyness** analysis (Rayson & Garside
+2000): a 2x2 contingency table of "does this word appear" x "topic pool
+or rest of corpus," scored with a **signed log-likelihood ratio (G2,
+Dunning 1993)** rather than raw PMI -- G2 is the standard fix for PMI's
+small-count instability (the exact failure in attempts 1-2), and signing
+it by direction (present in-topic more or less than its own overall rate
+predicts) distinguishes a topic-defining word from a genuinely foreign
+one, which unsigned G2 alone cannot.
+
+Only per-word, not per-pair: an article with `k` nouns has `k` chances to
+be flagged, not `C(k,2)` -- this alone removes most of the multiple-
+comparison noise the first three attempts were fighting.
+
+**Sanity check, directly answering the user's correction**: `keyness(
+"openai", AI) = +286.95`, `keyness("agent", AI) = +80.39`,
+`keyness("agents", AI) = +130.57` -- all strongly *positive*, correctly
+identified as topic-typical vocabulary, not flagged as foreign. The
+articles that DO score as topic-foreign read as genuinely offbeat for an
+"AI Agent" reader: arXiv quantum-computing papers that happen to be
+AI-tagged, US political coverage that happens to be AI-tagged, Japan/
+climate/geopolitics crossover pieces -- content that passed the category
+filter honestly but isn't what a subscriber to that specific interest
+would expect.
+
+**Known, accepted limitation**: because the score is per-word, not
+per-article, articles sharing the same flagged foreign word (e.g. eight
+different quantum-physics papers all triggering on "quantum") tie
+exactly. Not treated as a blocker -- `_pick_for_topic`'s existing
+recency-ordered pool already breaks ties sensibly, the same way it
+already does for the embedding-based gate's own ties.
+
+**Status: shipped 2026-08-26, as `news_keyness.py`.** The embedding-based
+near-duplicate collapse and relevance filter are unaffected -- only the
+offbeat/novelty slot selection was replaced. WordNet-based concrete/
+abstract filtering (attempt 4 above) was measured to make things worse
+and is NOT part of the shipped design -- only POS tagging is used, not
+the full NLTK data footprint this section's experiments pulled in.
+
+**The "second VM" plan floated during this investigation was considered
+and then reversed, once actually measured.** The initial assumption was
+that NLTK might be too heavy for the bot VM's own memory budget (by
+analogy to sentence-transformers/fastembed's rejection earlier in this
+document), so a separate, otherwise-idle VM was set up to run keyness as
+a standalone periodic batch job. Measured there: 84.6 MB peak RSS for
+the whole computation over 2673 real articles -- comfortably inside the
+*bot* VM's own existing headroom. Once that number existed, the second-
+VM design no longer had a justification, and carried a real cost the
+in-process design doesn't: a periodic-batch-plus-file-sync architecture
+means a genuine staleness window between an article being ingested and
+its category's keyness table reflecting it, hitting exactly the newest,
+most novelty-relevant content hardest. Shipped instead as part of
+`news_ingest.py`'s own cycle, same cadence and same machine as
+`news_embed.py`'s embedding step, with no cross-VM sync at all. See
+`docs/current/infrastructure.md` for the second VM's resulting (idle)
+status.

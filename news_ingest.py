@@ -81,6 +81,7 @@ import healthcheck
 import news_cache
 import news_classify
 import news_embed
+import news_keyness
 import news_sources
 import users_db
 
@@ -510,3 +511,49 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
         f"[news_ingest] tick at {now.isoformat()}: cached {len(fetched)} new article(s), "
         f"{total_duplicates_skipped} already-cached article(s) skipped"
     )
+
+    _refresh_category_keyness(now)
+
+
+def _refresh_category_keyness(now: datetime) -> None:
+    """Recomputes news_keyness's per-category "how foreign is this word"
+    scores over the WHOLE current cache (not just this cycle's new
+    articles -- keyness needs the full category pool to mean anything)
+    and persists them, once per active category, so news_push.py's read
+    at push time is a cheap local DB lookup rather than ever running
+    NLTK live in the push path. See news_keyness.py's own module
+    docstring for the full design and docs/analysis/cluster-
+    measurements.md's "Offbeat selection, take two" for the measurement
+    behind it.
+
+    Runs every ingestion cycle (every INGEST_TICK_SECONDS, same cadence
+    as embedding computation), deliberately -- not on a separate, slower
+    schedule. A periodic-but-separate job was considered and rejected:
+    the gap between "an article is ingested" and "its category's keyness
+    table reflects it" would otherwise be a real staleness window, and
+    the articles most likely to fall in that window are exactly the
+    newest, most novelty-relevant ones -- the opposite of what this
+    feature is for.
+
+    POS-tagging (build_noun_index) is the one expensive step and is
+    shared across every active category -- computing keyness for 13
+    categories costs one tagging pass, not 13. Measured on the Phoenix
+    VM's own hardware (an OCI VM.Standard.E2.1.Micro, same shape as the
+    bot VM): 12.6s wall time and 84.6 MB peak RSS for 2673 real articles.
+
+    Fails open per category (a tagging exception or an empty pool for one
+    category doesn't block the others) and as a whole (an exception here
+    is a push-quality regression, never something that should take down
+    an otherwise-successful ingestion cycle)."""
+    try:
+        articles = news_cache.read_all()
+        if not articles:
+            return
+        doc_terms, global_df = news_keyness.build_noun_index(articles)
+        categories = [name for name, _description in users_db.get_active_categories()]
+        for category in categories:
+            scores = news_keyness.category_keyness(articles, doc_terms, global_df, category)
+            users_db.set_category_keyness(category, scores)
+        print(f"[news_ingest] tick at {now.isoformat()}: refreshed keyness for {len(categories)} categor{'y' if len(categories) == 1 else 'ies'}")
+    except Exception as exc:
+        print(f"[news_ingest] category keyness refresh failed, offbeat selection degrades to keyword-only/recency this cycle: {exc!r}")

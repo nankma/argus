@@ -18,8 +18,24 @@ RUN micromamba install -y -n base -f /tmp/environment.yml && \
 RUN micromamba run -n base python -c \
     "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M')"
 
+# Same reasoning, same placement, for news_keyness.py's NLTK data: baked
+# in at build time (with real network access) so the running container
+# never reaches nltk.org's download host. Only the POS tagger and
+# tokenizer -- no wordnet/omw-1.4, which docs/analysis/cluster-
+# measurements.md's "Offbeat selection, take two" section found made
+# results WORSE (a concrete/abstract noun filter that dropped coverage
+# from 551/999 to 156/999 scorable articles) and was dropped from the
+# shipped approach entirely. Downloads to NLTK's own default search path
+# (~/nltk_data under $MAMBA_USER, the same user this RUN executes as),
+# so news_keyness.py needs no explicit nltk.data.path wiring at runtime --
+# unlike HF_HUB_OFFLINE for model2vec, NLTK has no "loud error instead of
+# a network attempt" flag, so news_keyness.py's own fail-open try/except
+# around pos_tag()/word_tokenize() is what stands in for that guard.
+RUN micromamba run -n base python -c \
+    "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('punkt_tab')"
+
 WORKDIR /app
-COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_embed.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py healthcheck.py guardrails.py users_db.py test_api.py docker-entrypoint.sh ./
+COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_embed.py news_keyness.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py healthcheck.py guardrails.py users_db.py test_api.py docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
 # Real incident, 2026-08-09: `docker logs` returned zero lines for this

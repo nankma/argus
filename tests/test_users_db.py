@@ -530,6 +530,32 @@ def test_set_interest_query_expansion_upserts(isolated_subscribers_db):
     assert users_db.get_interest_query_expansion("AI coding") == "second version"
 
 
+def test_get_category_keyness_empty_when_never_computed(isolated_subscribers_db):
+    assert users_db.get_category_keyness("AI") == {}
+
+
+def test_set_category_keyness_round_trips(isolated_subscribers_db):
+    users_db.set_category_keyness("AI", {"openai": 286.95, "quantum": -31.45})
+    assert users_db.get_category_keyness("AI") == {"openai": 286.95, "quantum": -31.45}
+
+
+def test_set_category_keyness_replaces_the_whole_category_not_an_upsert(isolated_subscribers_db):
+    """Unlike interest_query_expansions' single-key upsert, a category's
+    entire row set is meant to be replaced together each news_ingest.py
+    cycle -- a term that scored last cycle but not this one (dropped
+    below the df floor, or the category pool changed) must not linger."""
+    users_db.set_category_keyness("AI", {"openai": 286.95, "stale_term": -5.0})
+    users_db.set_category_keyness("AI", {"openai": 320.62, "quantum": -31.45})
+    assert users_db.get_category_keyness("AI") == {"openai": 320.62, "quantum": -31.45}
+
+
+def test_set_category_keyness_is_scoped_per_category(isolated_subscribers_db):
+    users_db.set_category_keyness("AI", {"openai": 286.95})
+    users_db.set_category_keyness("Finance", {"nasdaq": 150.0})
+    assert users_db.get_category_keyness("AI") == {"openai": 286.95}
+    assert users_db.get_category_keyness("Finance") == {"nasdaq": 150.0}
+
+
 def test_get_restricted_sources_enabled_defaults_false(isolated_subscribers_db):
     assert users_db.get_restricted_sources_enabled(1) is False
 

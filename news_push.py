@@ -55,6 +55,7 @@ import healthcheck
 import news_cache
 import news_classify
 import news_embed
+import news_keyness
 import news_sources
 import users_db
 from opentelemetry import trace
@@ -70,12 +71,17 @@ MAX_INTERESTS_PER_PUSH = 5
 
 MAX_ARTICLES_PER_TOPIC = 5
 
-# Of MAX_ARTICLES_PER_TOPIC, how many go to an article that's ON topic but
-# UNLIKE the typical article in it, rather than always the newest. See
-# select_candidate_articles's docstring and
-# docs/analysis/cluster-measurements.md's "offbeat score" section for the
-# measurement this implements. 0 disables the feature entirely and falls
-# back to pure recency -- a safe rollback with no code change.
+# Of MAX_ARTICLES_PER_TOPIC, how many go to a novelty-worthy or
+# topic-foreign-vocabulary article rather than always the newest. See
+# select_candidate_articles's and _pick_for_topic's own docstrings, and
+# docs/analysis/cluster-measurements.md's "offbeat score" and "Offbeat
+# selection, take two" sections for the measurement history -- an
+# embedding-based centroid-distance design shipped 2026-08-25, then was
+# replaced 2026-08-26 by the keyword+keyness design _pick_for_topic
+# implements now, after live use showed the embedding version's picks
+# read as unrelated more often than novel. 0 disables the feature
+# entirely and falls back to pure recency -- a safe rollback with no
+# code change.
 OFFBEAT_SLOTS_PER_TOPIC = 2
 
 # _filter_by_relevance keeps at most this many of a topic's pool, ranked
@@ -326,9 +332,9 @@ def select_candidate_articles(
       RELEVANCE_KEEP_MAX), not a fixed threshold or a fraction of the
       pool -- both were tried and measured not to generalize.
     - **Offbeat selection** -- of the final `max_per_topic`,
-      `offbeat_slots` go to an article that's still on-topic but unlike
-      the typical article in this topic's own pool, rather than always
-      the newest. See _pick_for_topic."""
+      `offbeat_slots` go to a novelty-keyword hit or an article whose own
+      vocabulary is statistically foreign to this topic's category pool,
+      rather than always the newest. See _pick_for_topic."""
     now = now or datetime.now(timezone.utc)
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     ordered = sorted(
@@ -410,7 +416,7 @@ def select_candidate_articles(
         # offbeat selection has survivors to choose from.
         pool = _filter_by_relevance(raw_pool, embedder, query_text)[:OFFBEAT_POOL_SIZE]
 
-        for article in _pick_for_topic(pool, embedder, query_text, max_per_topic, offbeat_slots):
+        for article in _pick_for_topic(pool, max_per_topic, offbeat_slots, topic_cats):
             candidates.append({**article, "topic": topic})
     return candidates
 
@@ -512,38 +518,47 @@ def _filter_by_relevance(pool: list[dict], embedder, query_text: str) -> list[di
     return [a for a in pool if a.get("embedding") is None or a["link"] in relevant_links]
 
 
+def _offbeat_sort_key(scored_item: tuple[dict, bool, tuple[float, str] | None]) -> tuple[int, float]:
+    """Keyword hits always rank first (0 < 1); within a tier, lower
+    keyness score (more topic-foreign) ranks first. An article with
+    neither signal gets keyness=0.0 as a neutral tiebreak value -- it
+    never wins a slot over one with a real negative score, but doesn't
+    crash the sort either."""
+    _article, has_keyword, keyness_result = scored_item
+    keyness_score = keyness_result[0] if keyness_result is not None else 0.0
+    return (0 if has_keyword else 1, keyness_score)
+
+
 def _pick_for_topic(
-    pool: list[dict], embedder, query_text: str, max_per_topic: int, offbeat_slots: int,
+    pool: list[dict], max_per_topic: int, offbeat_slots: int, categories: set[str] | list[str],
 ) -> list[dict]:
     """`pool` is already newest-first and deduplicated (select_candidate_
-    articles' job). `query_text` is resolved by the caller -- see
-    _resolve_query_text -- and may be a cached generated definition of
-    the topic rather than the bare topic string. Splits the pool into a
-    recency cut and an offbeat cut:
+    articles' job). Splits the pool into a recency cut and an offbeat cut,
+    the latter scored by two signals -- see news_keyness.py's own module
+    docstring and docs/analysis/cluster-measurements.md's "Offbeat
+    selection, take two" for the full measurement history behind this
+    design (replaced an earlier embedding-based centroid-distance
+    approach 2026-08-26, after live use showed its bottom-of-pool picks
+    read as unrelated more often than novel):
 
-        score = sim(article, query_text) with a floor at
-                the REMAINDER's own median (still genuinely about the
-                topic, not a stray outlier), ranked by LOWEST similarity
-                to the pool's centroid (unlike a typical article in it).
+        1. a small constant keyword list (news_keyness.NOVELTY_KEYWORDS) --
+           articles matching one of these always rank above ones that don't
+        2. within each tier, lowest news_keyness "keyness" score -- the
+           single most topic-foreign noun in the article, per
+           news_keyness.min_term_keyness -- ranks first
 
-    A single-term "farthest from what's already selected" was measured
-    and rejected in docs/analysis/cluster-measurements.md: it surfaces
-    parsing garbage and language outliers, which are maximally distant
-    from EVERYTHING by construction, before it surfaces genuine novelty.
-    The gate is what fixes that -- both garbage exhibits from that
-    measurement failed it (neither was a good match for its own topic
-    query to begin with).
+    `categories` is the topic's own category set (from topic_categories in
+    select_candidate_articles), used to look up news_keyness's precomputed
+    per-category table (users_db.get_category_keyness) -- merged across
+    every category in the set, keeping the lower (more foreign) score for
+    any term scored under more than one.
 
-    Falls back to pure recency -- the pre-2026-08-25 behavior -- for
-    whichever slots don't have a usable signal: no embedder, no topic
-    vector, or fewer than 2 embedded candidates left over after the
-    recency cut (not enough to make a median split meaningful). This is
-    also how `offbeat_slots=0` cleanly disables the feature.
-
-    The gate threshold (the remainder's own median) is a provisional
-    choice, not a fitted one -- see cluster-measurements.md's "Still
-    open" section. It hasn't been re-validated against a corpus pulled
-    with the fixed (non-title-truncating) snapshot collector."""
+    Falls back to pure recency -- the pre-2026-08-25 behavior -- when
+    neither signal has anything to say: no keyness table yet for any of
+    `categories` (a fresh category, or news_ingest.py hasn't completed a
+    cycle since it was added) AND no keyword hits anywhere in the
+    remainder. This is also how `offbeat_slots=0` cleanly disables the
+    feature."""
     recency_n = max(max_per_topic - offbeat_slots, 0)
     recency_pick = pool[:recency_n]
     remainder = pool[recency_n:]
@@ -555,29 +570,31 @@ def _pick_for_topic(
     if not remainder or offbeat_slots <= 0:
         return fallback()
 
-    query_vector = news_embed.embed_one(embedder, query_text)
-    embedded_remainder = [a for a in remainder if a.get("embedding") is not None]
-    if query_vector is None or len(embedded_remainder) < 2:
+    keyness: dict[str, float] = {}
+    for category in categories:
+        for term, score in users_db.get_category_keyness(category).items():
+            if term not in keyness or score < keyness[term]:
+                keyness[term] = score
+
+    scored = [
+        (a, news_keyness.has_novelty_keyword(a.get("title"), a.get("summary")),
+         news_keyness.min_term_keyness(a.get("title"), a.get("summary"), keyness))
+        for a in remainder
+    ]
+    if not any(has_kw or result is not None for _a, has_kw, result in scored):
         return fallback()
 
-    query_sims = [news_embed.cosine_similarity(a["embedding"], query_vector) for a in embedded_remainder]
-    gate = sorted(query_sims)[len(query_sims) // 2]
-    # The centroid represents a typical article FOR THIS TOPIC, so it's
-    # computed over the fuller `pool`, not just the narrower `remainder`
-    # left over after the recency cut.
-    centroid = news_embed.mean_vector([a["embedding"] for a in pool if a.get("embedding") is not None])
-
-    survivors = [(a, sim) for a, sim in zip(embedded_remainder, query_sims) if sim >= gate]
-    survivors.sort(key=lambda pair: news_embed.cosine_similarity(pair[0]["embedding"], centroid))
-    offbeat_pick = [a for a, _sim in survivors[:offbeat_slots]]
-
-    filler_needed = max_per_topic - len(recency_pick) - len(offbeat_pick)
-    if filler_needed > 0:
-        # Not enough offbeat survivors to fill every slot -- top up with
-        # the next most recent article not already picked, rather than
-        # sending a short digest.
-        chosen_links = {a["link"] for a in recency_pick + offbeat_pick}
-        offbeat_pick += [a for a in remainder if a["link"] not in chosen_links][:filler_needed]
+    # No separate "not enough survivors past a gate, top up by recency"
+    # step needed here, unlike the embedding-centroid version this
+    # replaced: `scored` covers every item in `remainder` exactly once
+    # (nothing was filtered out before the sort, unlike the old version's
+    # median-gate survivors being a genuine subset), and ties sort stably
+    # in `remainder`'s own recency order -- so scored[:offbeat_slots]
+    # already pads itself with the next-most-recent, no-signal articles
+    # whenever there aren't enough real keyword/keyness hits to fill
+    # every slot.
+    scored.sort(key=_offbeat_sort_key)
+    offbeat_pick = [a for a, _has_kw, _result in scored[:offbeat_slots]]
     return recency_pick + offbeat_pick
 
 
@@ -629,8 +646,8 @@ def write_push_digest(model, articles: list[dict], topic: str | None = None,
     no signal stronger than its own semantic judgment of a headline
     against a topic word. A stricter fix (embedding-based relevance
     filtering ahead of this call, using the topic string as a retrieval
-    query the way the offbeat gate in select_candidate_articles already
-    does) is discussed but not yet built -- see
+    query) shipped 2026-08-25 as _filter_by_relevance -- see
+    select_candidate_articles's own docstring and
     docs/analysis/cluster-measurements.md."""
     listing = "\n".join(
         f"- {a['title']} ({a.get('source')}, "
@@ -866,8 +883,11 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
 
     `embedder=None` (the default) threads straight through to every
     select_candidate_articles call, which degrades near-duplicate
-    collapse and offbeat selection to their pre-2026-08-25 behavior
-    rather than failing -- see news_embed's module docstring.
+    collapse and relevance ranking to their pre-2026-08-25 behavior
+    rather than failing -- see news_embed's module docstring. Offbeat
+    selection (2026-08-26 on) no longer depends on the embedder at all --
+    it degrades independently, and only when neither its own keyword nor
+    keyness signal has anything to say (see _pick_for_topic).
 
     The cache is read ONCE per cycle and reused across every subscriber
     -- matches docs/plans/local-news-cache-plan.md's stated efficiency argument
