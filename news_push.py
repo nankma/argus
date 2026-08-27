@@ -554,7 +554,7 @@ def _filter_by_relevance(pool: list[dict], embedder, query_text: str) -> list[di
     return [a for a in pool if a.get("embedding") is None or a["link"] in relevant_links]
 
 
-def _offbeat_sort_key(scored_item: tuple[dict, bool, tuple[float, str] | None]) -> tuple[int, float]:
+def _novelty_sort_key(scored_item: tuple[dict, bool, tuple[float, str] | None]) -> tuple[int, float]:
     """Keyword hits always rank first (0 < 1); within a tier, lower
     keyness score (more topic-foreign) ranks first."""
     _article, has_keyword, keyness_result = scored_item
@@ -610,7 +610,7 @@ def _pick_novelty_extra(remainder: list[dict], categories: set[str] | list[str])
     ]
     if not qualifying:
         return None
-    qualifying.sort(key=_offbeat_sort_key)
+    qualifying.sort(key=_novelty_sort_key)
     return qualifying[0][0]
 
 
