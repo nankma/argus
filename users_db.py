@@ -197,8 +197,8 @@ def init_db() -> None:
             """
         )
         # news_keyness.py's per-category "how foreign is this word to this
-        # topic" scores, for news_push._pick_for_topic's offbeat slots --
-        # see docs/analysis/cluster-measurements.md's "Offbeat selection,
+        # topic" scores, for news_push._pick_novelty_extra's novelty
+        # extra -- see docs/analysis/cluster-measurements.md's "Offbeat selection,
         # take two" section. Unlike interest_categories/
         # interest_query_expansions above (single-row upserts, one entry
         # never invalidates another), a category's whole row set is

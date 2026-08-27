@@ -461,13 +461,13 @@ def test_relevance_filter_caps_at_relevance_keep_max_for_a_large_pool():
     assert len(result) < 250, "the ceiling must actually be doing something on a pool this large"
 
 
-def test_offbeat_pool_size_matches_relevance_keep_max():
+def test_candidate_pool_size_matches_relevance_keep_max():
     """Deliberately the SAME value, not independently chosen -- if
-    OFFBEAT_POOL_SIZE were smaller, it would silently re-truncate
+    CANDIDATE_POOL_SIZE were smaller, it would silently re-truncate
     whatever _filter_by_relevance already decided to keep, making
-    RELEVANCE_KEEP_MAX a dead ceiling. See OFFBEAT_POOL_SIZE's own
+    RELEVANCE_KEEP_MAX a dead ceiling. See CANDIDATE_POOL_SIZE's own
     comment."""
-    assert news_push.OFFBEAT_POOL_SIZE == news_push.RELEVANCE_KEEP_MAX
+    assert news_push.CANDIDATE_POOL_SIZE == news_push.RELEVANCE_KEEP_MAX
 
 
 def test_relevance_filter_falls_back_to_unfiltered_with_no_embedder():
@@ -526,22 +526,24 @@ def test_relevance_filter_preserves_input_order():
     assert result_links == [link for link in original_order if link in result_links]
 
 
-# --- offbeat selection (2026-08-25 embedding version, replaced 2026-08-26
-# by the keyword+keyness version below -- see "Offbeat selection, take
-# two" in docs/analysis/cluster-measurements.md for why: live use showed
-# the embedding-centroid version's picks read as unrelated more often
-# than novel) ------------------------------------------------------------
+# --- novelty extra (2026-08-26, replacing the offbeat-slot design one day
+# earlier -- see "Offbeat selection, take two" in docs/analysis/cluster-
+# measurements.md). ADDITIVE, not carved out of max_per_topic: the regular
+# candidates are always pool[:max_per_topic] by pure recency; the novelty
+# extra, if any, is a SEPARATE pick drawn from pool[max_per_topic:] and
+# appended with is_novelty_extra=True, only when it clears a real bar
+# (news_keyness.NOVELTY_KEYWORDS hit, or keyness below
+# NOVELTY_KEYNESS_THRESHOLD) -- never a forced "best of what's left" pick.
+# -----------------------------------------------------------------------
 
-def test_offbeat_slot_picks_a_novelty_keyword_hit_over_a_plain_article(isolated_subscribers_db, fake_nltk):
-    """The primary offbeat signal: a novelty-keyword hit (news_keyness.
-    NOVELTY_KEYWORDS) always outranks a plain remainder article. No
-    keyness data is cached for "AI" in this test at all, isolating the
-    keyword signal on its own."""
-    recency = ["ai daily roundup", "ai weekly digest"]
+def test_novelty_extra_appended_beyond_the_regular_max_per_topic_count(isolated_subscribers_db, fake_nltk):
+    """A novelty-keyword hit (news_keyness.NOVELTY_KEYWORDS) in the
+    remainder is appended as a 4th item, marked, ON TOP of the 3 regular
+    (pure-recency) candidates -- not swapped in for one of them."""
+    recency = ["ai daily roundup", "ai weekly digest", "ai startup raises funding round"]
     remainder = [
-        "ai startup raises funding round",
         "major ai model leaks ahead of launch",  # keyword hit: "leaks"
-        "ai chip earnings beat expectations",
+        "ai chip earnings beat expectations",     # no signal
     ]
     titles_newest_first = recency + remainder
     articles = [
@@ -551,28 +553,33 @@ def test_offbeat_slot_picks_a_novelty_keyword_hit_over_a_plain_article(isolated_
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, offbeat_slots=1,
+        max_per_topic=3, now=NOW,
     )
 
     titles = [a["title"] for a in result]
     assert titles == [
         "ai daily roundup",
         "ai weekly digest",
+        "ai startup raises funding round",
         "major ai model leaks ahead of launch",
     ]
+    assert result[-1]["is_novelty_extra"] is True
+    assert "is_novelty_extra" not in result[0]
 
 
-def test_offbeat_slot_picks_lowest_keyness_when_no_keyword_hits(isolated_subscribers_db, fake_nltk):
-    """With no keyword hit anywhere in the pool, the offbeat slot goes to
-    the article whose own vocabulary is most "foreign" to the AI
+def test_novelty_extra_picks_lowest_keyness_when_no_keyword_hits(isolated_subscribers_db, fake_nltk):
+    """With no keyword hit anywhere in the remainder, the novelty extra
+    goes to the article whose own vocabulary is most "foreign" to the AI
     category per the precomputed keyness table (as news_ingest.py would
-    have written via users_db.set_category_keyness)."""
+    have written via users_db.set_category_keyness) -- and only because
+    it clears NOVELTY_KEYNESS_THRESHOLD; "robot" (keyness +50, strongly
+    topic-typical) must NOT be picked just for being the next-best thing
+    in a 2-item remainder."""
     users_db.set_category_keyness("AI", {"openai": 300.0, "robot": 50.0, "quantum": -40.0})
-    recency = ["ai daily roundup", "ai weekly digest"]
+    recency = ["ai daily roundup", "ai weekly digest", "openai announces new update"]
     remainder = [
-        "openai announces new update",   # strongly topic-typical, not offbeat
-        "ai robot demo at conference",   # mildly topic-typical
-        "ai research touches on quantum computing",  # most topic-foreign noun present
+        "ai robot demo at conference",                # keyness +50, does not qualify
+        "ai research touches on quantum computing",   # keyness -40, clears the threshold
     ]
     titles_newest_first = recency + remainder
     articles = [
@@ -582,23 +589,20 @@ def test_offbeat_slot_picks_lowest_keyness_when_no_keyword_hits(isolated_subscri
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, offbeat_slots=1,
+        max_per_topic=3, now=NOW,
     )
 
-    titles = [a["title"] for a in result]
-    assert titles == [
-        "ai daily roundup",
-        "ai weekly digest",
-        "ai research touches on quantum computing",
-    ]
+    assert len(result) == 4
+    assert result[-1]["title"] == "ai research touches on quantum computing"
+    assert result[-1]["is_novelty_extra"] is True
 
 
-def test_offbeat_keyword_hit_outranks_keyness_score(isolated_subscribers_db, fake_nltk):
-    """Both signals present in the same pool -- the keyword hit wins the
-    single offbeat slot even though a different article scores lower
-    (more topic-foreign) on keyness alone."""
+def test_novelty_extra_keyword_hit_outranks_keyness_score(isolated_subscribers_db, fake_nltk):
+    """Both signals qualify in the same remainder -- the keyword hit wins
+    the single novelty-extra slot even though a different article scores
+    lower (more topic-foreign) on keyness alone."""
     users_db.set_category_keyness("AI", {"quantum": -40.0})
-    recency = ["ai daily roundup", "ai weekly digest"]
+    recency = ["ai daily roundup", "ai weekly digest", "ai chip earnings today"]
     remainder = [
         "ai research touches on quantum computing",  # lowest keyness, no keyword hit
         "major ai lawsuit filed over data use",       # keyword hit: "lawsuit"
@@ -611,33 +615,60 @@ def test_offbeat_keyword_hit_outranks_keyness_score(isolated_subscribers_db, fak
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, offbeat_slots=1,
+        max_per_topic=3, now=NOW,
     )
 
-    titles = [a["title"] for a in result]
-    assert titles[-1] == "major ai lawsuit filed over data use"
+    assert result[-1]["title"] == "major ai lawsuit filed over data use"
 
 
-def test_offbeat_zero_falls_back_to_pure_recency(isolated_subscribers_db, fake_nltk):
+def test_novelty_extra_below_threshold_does_not_qualify(isolated_subscribers_db, fake_nltk):
+    """A keyness score that's negative but doesn't clear
+    NOVELTY_KEYNESS_THRESHOLD (-5.0) must not be picked -- this is the
+    exact product correction that motivated the threshold: an earlier
+    design picked whatever was least-bad in the pool regardless of how
+    weak the signal actually was."""
+    users_db.set_category_keyness("AI", {"mild": -1.0})  # negative, but not below -5.0
+    recency = ["ai daily roundup", "ai weekly digest", "ai chip earnings today"]
+    remainder = ["ai coverage with a mild angle to it"]
+    titles_newest_first = recency + remainder
     articles = [
-        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
-                 title=f"ai article {i}", categories=["AI"])
-        for i in range(5)
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i), title=t, categories=["AI"])
+        for i, t in enumerate(titles_newest_first)
     ]
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, offbeat_slots=0,
+        max_per_topic=3, now=NOW,
+    )
+
+    assert len(result) == 3
+    assert not any(a.get("is_novelty_extra") for a in result)
+
+
+def test_novelty_extra_disabled_sends_no_extra_even_with_a_qualifying_candidate(
+    isolated_subscribers_db, fake_nltk
+):
+    recency = ["ai daily roundup", "ai weekly digest", "ai chip earnings today"]
+    remainder = ["major ai model leaks ahead of launch"]
+    titles_newest_first = recency + remainder
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i), title=t, categories=["AI"])
+        for i, t in enumerate(titles_newest_first)
+    ]
+
+    result = news_push.select_candidate_articles(
+        articles, ["AI"], {"AI": ["AI"]}, None, set(),
+        max_per_topic=3, now=NOW, include_novelty_extra=False,
     )
 
     assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
 
 
-def test_offbeat_falls_back_to_pure_recency_with_no_signal_at_all(isolated_subscribers_db, fake_nltk):
+def test_novelty_extra_none_when_no_signal_at_all(isolated_subscribers_db, fake_nltk):
     """No keyness table cached for "AI" (news_ingest.py hasn't run a
     cycle yet, or this is a fresh category) AND no keyword hits anywhere
-    in the remainder -- _pick_for_topic must degrade to pure recency
-    rather than picking arbitrarily."""
+    in the remainder -- _pick_novelty_extra returns None, and the digest
+    is exactly the regular candidates, not padded with anything."""
     articles = [
         _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
                  title=f"ai article {i}", categories=["AI"])
@@ -646,36 +677,28 @@ def test_offbeat_falls_back_to_pure_recency_with_no_signal_at_all(isolated_subsc
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, offbeat_slots=2,
+        max_per_topic=3, now=NOW,
     )
 
     assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
 
 
-def test_offbeat_pads_remaining_slots_by_recency_when_not_enough_real_signal(isolated_subscribers_db, fake_nltk):
-    """offbeat_slots=2 but only 1 remainder article has any real signal
-    (a keyword hit) -- the other slot must still be filled, by the next
-    most recent article, rather than sending a short digest. Unlike the
-    embedding-centroid version this replaced, no separate filler step is
-    needed: every remainder article is scored (a no-signal article just
-    gets a neutral tiebreak value -- see _offbeat_sort_key), and Python's
-    stable sort preserves remainder's own recency order among ties, so
-    slicing the top offbeat_slots naturally pads itself."""
-    recency_article = _article("https://a.com/0", published_dt=NOW, title="ai daily digest", categories=["AI"])
-    keyword_hit = _article("https://a.com/1", published_dt=NOW - timedelta(hours=1),
-                            title="ai company hit with lawsuit", categories=["AI"])
-    plain_newer = _article("https://a.com/2", published_dt=NOW - timedelta(hours=2),
-                            title="ai roundup for the week", categories=["AI"])
-    plain_older = _article("https://a.com/3", published_dt=NOW - timedelta(hours=3),
-                            title="ai digest for readers", categories=["AI"])
-    articles = [recency_article, keyword_hit, plain_newer, plain_older]
+def test_novelty_extra_none_when_remainder_is_empty(isolated_subscribers_db, fake_nltk):
+    """Pool exactly fits max_per_topic -- nothing left over for a novelty
+    extra to be drawn from at all, not even a weak one."""
+    articles = [
+        _article(f"https://a.com/{i}", published_dt=NOW - timedelta(hours=i),
+                 title="major ai model leaks ahead of launch", categories=["AI"])
+        for i in range(3)
+    ]
 
     result = news_push.select_candidate_articles(
         articles, ["AI"], {"AI": ["AI"]}, None, set(),
-        max_per_topic=3, now=NOW, offbeat_slots=2,
+        max_per_topic=3, now=NOW,
     )
 
-    assert [a["link"] for a in result] == ["https://a.com/0", "https://a.com/1", "https://a.com/2"]
+    assert len(result) == 3
+    assert not any(a.get("is_novelty_extra") for a in result)
 
 
 # --- resolve_interest_categories -------------------------------------------
@@ -844,6 +867,51 @@ def test_write_push_digest_no_topic_framing_when_topic_is_none(monkeypatch):
     news_push.write_push_digest(model, articles)
 
     assert captured["system_prompt"] == news_push._PUSH_DIGEST_PROMPT
+
+
+def test_write_push_digest_marks_the_novelty_extra_in_the_listing(monkeypatch):
+    """Exactly the one candidate carrying is_novelty_extra gets the
+    [EXTRA] marker in the listing text -- not every line (that was the
+    2026-08-25 [topic]-prefix mistake this deliberately doesn't repeat:
+    a marker on every line reads as confirmed metadata; a marker on the
+    one genuinely-different item is a real formatting signal)."""
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["listing"] = messages[1]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [
+        {**_article("https://example.com/a", title="Regular headline"), "topic": "AI"},
+        {**_article("https://example.com/b", title="Unusual headline"), "topic": "AI", "is_novelty_extra": True},
+    ]
+
+    news_push.write_push_digest(model, articles, topic="AI")
+
+    assert "[EXTRA] Unusual headline" in captured["listing"]
+    assert "[EXTRA] Regular headline" not in captured["listing"]
+    assert captured["listing"].count("[EXTRA]") == 1
+
+
+def test_write_push_digest_adds_extra_instruction_only_when_present(monkeypatch):
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["system_prompt"] = messages[0]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    with_extra = [{**_article("https://example.com/a"), "topic": "AI", "is_novelty_extra": True}]
+    without_extra = [{**_article("https://example.com/b"), "topic": "AI"}]
+
+    news_push.write_push_digest(model, with_extra)
+    assert "[EXTRA]" in captured["system_prompt"]
+
+    news_push.write_push_digest(model, without_extra)
+    assert "[EXTRA]" not in captured["system_prompt"]
 
 
 def test_is_subscriber_due_true_when_never_pushed():
@@ -1600,7 +1668,14 @@ def test_record_emits_a_span_an_alert_can_query(monkeypatch, isolated_subscriber
     # The opaque id, never the Telegram one -- a span leaves this machine.
     assert "push.chat_id" not in recorded
     assert recorded["push.subscriber"] == users_db.external_id(55)
-    assert "55" not in recorded["push.subscriber"]
+    # The raw chat_id itself must never be the recorded value -- NOT the
+    # same check as "the substring '55' never appears anywhere in the
+    # opaque id": that one is flaky by construction, since external_id's
+    # no-subscriber-row fallback is a sha256 hex digest, and a random
+    # hex string contains any given 2-character substring reasonably
+    # often by pure chance, unrelated to whether anything actually leaked.
+    assert recorded["push.subscriber"] != "55"
+    assert recorded["push.subscriber"] != 55
 
 
 def test_record_marks_a_cycle_that_cost_nothing_as_not_generated(monkeypatch, isolated_subscribers_db):

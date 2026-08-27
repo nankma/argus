@@ -892,7 +892,7 @@ def test_an_embedder_failure_does_not_block_caching(
 
 # --- category keyness refresh (2026-08-26) ----------------------------------
 # news_keyness.py's per-category "how foreign is this word" scores, for
-# news_push._pick_for_topic's offbeat slots -- computed fresh every
+# news_push._pick_novelty_extra's novelty extra -- computed fresh every
 # ingestion cycle over the WHOLE cache (not just this cycle's new
 # articles), so there's no staleness window between an article being
 # ingested and its category's keyness table reflecting it. See

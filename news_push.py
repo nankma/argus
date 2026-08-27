@@ -71,18 +71,37 @@ MAX_INTERESTS_PER_PUSH = 5
 
 MAX_ARTICLES_PER_TOPIC = 5
 
-# Of MAX_ARTICLES_PER_TOPIC, how many go to a novelty-worthy or
-# topic-foreign-vocabulary article rather than always the newest. See
-# select_candidate_articles's and _pick_for_topic's own docstrings, and
-# docs/analysis/cluster-measurements.md's "offbeat score" and "Offbeat
-# selection, take two" sections for the measurement history -- an
-# embedding-based centroid-distance design shipped 2026-08-25, then was
-# replaced 2026-08-26 by the keyword+keyness design _pick_for_topic
-# implements now, after live use showed the embedding version's picks
-# read as unrelated more often than novel. 0 disables the feature
-# entirely and falls back to pure recency -- a safe rollback with no
-# code change.
-OFFBEAT_SLOTS_PER_TOPIC = 2
+# Whether a push includes the experimental "novelty extra" -- a single,
+# clearly-separate closing note ("by the way, we noticed something
+# interesting"), NOT one of MAX_ARTICLES_PER_TOPIC's regular slots. See
+# select_candidate_articles's and _pick_novelty_extra's own docstrings,
+# and docs/analysis/cluster-measurements.md's "offbeat score" and
+# "Offbeat selection, take two" sections for the measurement history.
+# Design settled 2026-08-26, after a user-directed correction to an
+# earlier version that (a) carved this out of the regular 5-article
+# budget instead of adding it on top, and (b) always picked SOMETHING
+# even when nothing genuinely qualified -- this version does neither:
+# it's additive, and NOVELTY_KEYNESS_THRESHOLD below means a cycle with
+# nothing that clears the bar sends no novelty section at all, on
+# purpose, not a gap to fix. False -- not 0 -- disables the feature
+# entirely and falls back to a digest with no extra section, a safe
+# rollback with no code change.
+INCLUDE_NOVELTY_EXTRA = True
+
+# How far below its own overall corpus-wide rate a word's presence in one
+# interest's category pool must fall before an article containing it
+# counts as "novel enough" for the extra section on keyness grounds alone
+# (a keyword hit -- news_keyness.NOVELTY_KEYWORDS -- always counts,
+# unconditionally; this threshold only gates the keyness-only case).
+# First-cut, deliberately conservative rather than tuned: this is an
+# explicitly experimental feature (not required to be precise -- an
+# occasional pick that isn't genuinely novel is an accepted cost), and
+# real measured foreign-word scores on real production data clustered
+# well past this (-19 to -40 for clearly topic-foreign terms like
+# "quantum" in an AI pool -- see docs/analysis/cluster-measurements.md),
+# so -5.0 is comfortably permissive without also passing near-zero noise.
+# Adjust against real push data once some has accumulated.
+NOVELTY_KEYNESS_THRESHOLD = -5.0
 
 # _filter_by_relevance keeps at most this many of a topic's pool, ranked
 # by similarity to the topic's retrieval query -- not a fixed fraction
@@ -136,13 +155,17 @@ RELEVANCE_KEEP_FRACTION = 0.10
 RELEVANCE_KEEP_MIN = 20
 RELEVANCE_KEEP_MAX = 50
 
-# The relevance-filtered pool is capped here again before recency/offbeat
-# selection runs -- matches RELEVANCE_KEEP_MAX exactly, not some smaller
-# number, specifically so THIS cap is never the tighter, silently-binding
-# one. It was 30 until 2026-08-25 (a guess made before RELEVANCE_KEEP_MAX
-# existed), which would have made RELEVANCE_KEEP_MAX=50 a dead ceiling --
-# the exact bug this whole revision exists to stop repeating.
-OFFBEAT_POOL_SIZE = RELEVANCE_KEEP_MAX
+# The relevance-filtered pool is capped here again before the regular
+# recency cut and novelty-extra search run -- matches RELEVANCE_KEEP_MAX
+# exactly, not some smaller number, specifically so THIS cap is never the
+# tighter, silently-binding one. It was 30 until 2026-08-25 (a guess made
+# before RELEVANCE_KEEP_MAX existed), which would have made
+# RELEVANCE_KEEP_MAX=50 a dead ceiling -- the exact bug this whole
+# revision exists to stop repeating. Named for what it bounds now
+# (renamed from OFFBEAT_POOL_SIZE 2026-08-26 when novelty selection
+# stopped being carved out of this same pool and started drawing from
+# the remainder beyond it instead).
+CANDIDATE_POOL_SIZE = RELEVANCE_KEEP_MAX
 
 # Above this cosine similarity, two articles collapse to one -- the same
 # wire story cached under two links, or two outlets syndicating one
@@ -235,7 +258,7 @@ def select_candidate_articles(
     max_per_topic: int = MAX_ARTICLES_PER_TOPIC,
     now: datetime | None = None,
     embedder=None,
-    offbeat_slots: int = OFFBEAT_SLOTS_PER_TOPIC,
+    include_novelty_extra: bool = INCLUDE_NOVELTY_EXTRA,
 ) -> list[dict]:
     """Stage 1 (category filter): narrows the shared cache to one
     subscriber's candidate articles, before the digest-writing model
@@ -331,10 +354,12 @@ def select_candidate_articles(
       clamped count of the pool's top scorers (RELEVANCE_KEEP_MIN to
       RELEVANCE_KEEP_MAX), not a fixed threshold or a fraction of the
       pool -- both were tried and measured not to generalize.
-    - **Offbeat selection** -- of the final `max_per_topic`,
-      `offbeat_slots` go to a novelty-keyword hit or an article whose own
-      vocabulary is statistically foreign to this topic's category pool,
-      rather than always the newest. See _pick_for_topic."""
+    - **Novelty extra** -- a SEPARATE, additive pick, not one of
+      `max_per_topic`'s regular slots: a novelty-keyword hit or an
+      article whose own vocabulary is statistically foreign to this
+      topic's category pool, ONLY when one clears NOVELTY_KEYNESS_
+      THRESHOLD -- no forced pick when nothing qualifies. See
+      _pick_novelty_extra."""
     now = now or datetime.now(timezone.utc)
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     ordered = sorted(
@@ -411,13 +436,24 @@ def select_candidate_articles(
             raw_pool.append(article)
 
         # The fine filter after the coarse one -- see _filter_by_relevance.
-        # Capped at OFFBEAT_POOL_SIZE afterward, same reasoning as before
-        # this existed: bigger than the final max_per_topic cut, so
-        # offbeat selection has survivors to choose from.
-        pool = _filter_by_relevance(raw_pool, embedder, query_text)[:OFFBEAT_POOL_SIZE]
+        # Capped at CANDIDATE_POOL_SIZE afterward, same reasoning as
+        # before this existed: bigger than the final max_per_topic cut,
+        # so the novelty-extra search below has a remainder to draw from.
+        pool = _filter_by_relevance(raw_pool, embedder, query_text)[:CANDIDATE_POOL_SIZE]
 
-        for article in _pick_for_topic(pool, max_per_topic, offbeat_slots, topic_cats):
+        # Pure recency, no offbeat carve-out -- the regular digest is
+        # ALWAYS up to max_per_topic articles, newest first. See the
+        # module's 2026-08-26 offbeat redesign: novelty selection used
+        # to reserve slots out of this cut; now it's additive instead
+        # (below), so this line no longer needs to know novelty exists
+        # at all.
+        for article in pool[:max_per_topic]:
             candidates.append({**article, "topic": topic})
+
+        if include_novelty_extra:
+            novelty = _pick_novelty_extra(pool[max_per_topic:], topic_cats)
+            if novelty is not None:
+                candidates.append({**novelty, "topic": topic, "is_novelty_extra": True})
     return candidates
 
 
@@ -520,55 +556,42 @@ def _filter_by_relevance(pool: list[dict], embedder, query_text: str) -> list[di
 
 def _offbeat_sort_key(scored_item: tuple[dict, bool, tuple[float, str] | None]) -> tuple[int, float]:
     """Keyword hits always rank first (0 < 1); within a tier, lower
-    keyness score (more topic-foreign) ranks first. An article with
-    neither signal gets keyness=0.0 as a neutral tiebreak value -- it
-    never wins a slot over one with a real negative score, but doesn't
-    crash the sort either."""
+    keyness score (more topic-foreign) ranks first."""
     _article, has_keyword, keyness_result = scored_item
     keyness_score = keyness_result[0] if keyness_result is not None else 0.0
     return (0 if has_keyword else 1, keyness_score)
 
 
-def _pick_for_topic(
-    pool: list[dict], max_per_topic: int, offbeat_slots: int, categories: set[str] | list[str],
-) -> list[dict]:
-    """`pool` is already newest-first and deduplicated (select_candidate_
-    articles' job). Splits the pool into a recency cut and an offbeat cut,
-    the latter scored by two signals -- see news_keyness.py's own module
-    docstring and docs/analysis/cluster-measurements.md's "Offbeat
-    selection, take two" for the full measurement history behind this
-    design (replaced an earlier embedding-based centroid-distance
-    approach 2026-08-26, after live use showed its bottom-of-pool picks
-    read as unrelated more often than novel):
+def _pick_novelty_extra(remainder: list[dict], categories: set[str] | list[str]) -> dict | None:
+    """At most one "by the way, we noticed something interesting" pick,
+    drawn from `remainder` -- articles that cleared the relevance filter
+    but didn't make the regular digest's recency cut (select_candidate_
+    articles' `pool[max_per_topic:]`), so this never re-suggests an
+    article already in the regular list. See news_keyness.py's own
+    module docstring and docs/analysis/cluster-measurements.md's
+    "Offbeat selection, take two" for the full measurement history
+    (replaced an earlier embedding-based centroid-distance design
+    2026-08-26, after live use showed its picks read as unrelated more
+    often than novel).
 
-        1. a small constant keyword list (news_keyness.NOVELTY_KEYWORDS) --
-           articles matching one of these always rank above ones that don't
-        2. within each tier, lowest news_keyness "keyness" score -- the
-           single most topic-foreign noun in the article, per
-           news_keyness.min_term_keyness -- ranks first
+    Two independent signals, either of which qualifies an article:
+    a novelty-keyword hit (news_keyness.NOVELTY_KEYWORDS), unconditionally;
+    or its single most topic-foreign noun's keyness score
+    (news_keyness.min_term_keyness) below NOVELTY_KEYNESS_THRESHOLD.
+    Deliberately a real bar, not "whatever's least bad in the pool" --
+    an earlier version of this always picked something, even when
+    nothing in the pool had a real signal; a 2026-08-26 product
+    correction made this explicitly optional instead: **returns None,
+    not a weak fallback pick, when nothing in `remainder` clears either
+    bar** -- callers must not force a novelty section into every push.
 
-    `categories` is the topic's own category set (from topic_categories in
-    select_candidate_articles), used to look up news_keyness's precomputed
-    per-category table (users_db.get_category_keyness) -- merged across
-    every category in the set, keeping the lower (more foreign) score for
-    any term scored under more than one.
-
-    Falls back to pure recency -- the pre-2026-08-25 behavior -- when
-    neither signal has anything to say: no keyness table yet for any of
-    `categories` (a fresh category, or news_ingest.py hasn't completed a
-    cycle since it was added) AND no keyword hits anywhere in the
-    remainder. This is also how `offbeat_slots=0` cleanly disables the
-    feature."""
-    recency_n = max(max_per_topic - offbeat_slots, 0)
-    recency_pick = pool[:recency_n]
-    remainder = pool[recency_n:]
-
-    def fallback():
-        filler_needed = max_per_topic - len(recency_pick)
-        return recency_pick + remainder[:filler_needed]
-
-    if not remainder or offbeat_slots <= 0:
-        return fallback()
+    `categories` is the topic's own category set (from topic_categories
+    in select_candidate_articles), used to look up news_keyness's
+    precomputed per-category table (users_db.get_category_keyness) --
+    merged across every category in the set, keeping the lower (more
+    foreign) score for any term scored under more than one."""
+    if not remainder:
+        return None
 
     keyness: dict[str, float] = {}
     for category in categories:
@@ -581,21 +604,14 @@ def _pick_for_topic(
          news_keyness.min_term_keyness(a.get("title"), a.get("summary"), keyness))
         for a in remainder
     ]
-    if not any(has_kw or result is not None for _a, has_kw, result in scored):
-        return fallback()
-
-    # No separate "not enough survivors past a gate, top up by recency"
-    # step needed here, unlike the embedding-centroid version this
-    # replaced: `scored` covers every item in `remainder` exactly once
-    # (nothing was filtered out before the sort, unlike the old version's
-    # median-gate survivors being a genuine subset), and ties sort stably
-    # in `remainder`'s own recency order -- so scored[:offbeat_slots]
-    # already pads itself with the next-most-recent, no-signal articles
-    # whenever there aren't enough real keyword/keyness hits to fill
-    # every slot.
-    scored.sort(key=_offbeat_sort_key)
-    offbeat_pick = [a for a, _has_kw, _result in scored[:offbeat_slots]]
-    return recency_pick + offbeat_pick
+    qualifying = [
+        (a, has_kw, result) for a, has_kw, result in scored
+        if has_kw or (result is not None and result[0] < NOVELTY_KEYNESS_THRESHOLD)
+    ]
+    if not qualifying:
+        return None
+    qualifying.sort(key=_offbeat_sort_key)
+    return qualifying[0][0]
 
 
 def write_push_digest(model, articles: list[dict], topic: str | None = None,
@@ -650,11 +666,39 @@ def write_push_digest(model, articles: list[dict], topic: str | None = None,
     select_candidate_articles's own docstring and
     docs/analysis/cluster-measurements.md."""
     listing = "\n".join(
-        f"- {a['title']} ({a.get('source')}, "
-        f"published {a.get('published') or 'date unknown'}) — {a.get('link')}"
+        f"- {'[EXTRA] ' if a.get('is_novelty_extra') else ''}{a['title']} "
+        f"({a.get('source')}, published {a.get('published') or 'date unknown'}) — {a.get('link')}"
         for a in articles
     )
     system_prompt = _PUSH_DIGEST_PROMPT
+    if any(a.get("is_novelty_extra") for a in articles):
+        # At most one candidate is ever marked this way (see
+        # select_candidate_articles/_pick_novelty_extra) -- unlike the
+        # retired per-line [topic] prefix this replaced in spirit, this
+        # marks exactly one line, for a genuinely different purpose
+        # (formatting instruction, not a relevance claim the model is
+        # meant to trust). The model still applies its own relevance
+        # judgment to it like any other candidate -- being marked
+        # [EXTRA] means "format it this way IF you include it," not
+        # "this one is guaranteed good."
+        system_prompt += (
+            "\n\nOne candidate above is marked [EXTRA] -- a separate, "
+            "experimental pick (an article that's genuinely on-topic but "
+            "unusual or notable in some way), not one of the regular "
+            "candidates. Apply the same relevance judgment to it as any "
+            "other candidate; it is not guaranteed to belong in the "
+            "report. If you do include it, do NOT blend it into the main "
+            "synthesized report -- write it as a short, clearly separate "
+            "closing note afterward, introduced by something like 'By "
+            "the way, we noticed something interesting:' translated into "
+            "the reply language, naming its title and a one-sentence "
+            "summary with its own source link. The main report above it "
+            "should read exactly as it would if [EXTRA] didn't exist -- "
+            "including possibly being empty: if every OTHER candidate is "
+            "irrelevant but [EXTRA] itself genuinely belongs, send just "
+            "the closing note on its own, don't withhold it because "
+            "there's nothing else to report alongside it."
+        )
     if topic:
         system_prompt += (
             f"\n\nThe subscriber's interest is: {topic}. The candidates "
@@ -884,10 +928,11 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
     `embedder=None` (the default) threads straight through to every
     select_candidate_articles call, which degrades near-duplicate
     collapse and relevance ranking to their pre-2026-08-25 behavior
-    rather than failing -- see news_embed's module docstring. Offbeat
-    selection (2026-08-26 on) no longer depends on the embedder at all --
-    it degrades independently, and only when neither its own keyword nor
-    keyness signal has anything to say (see _pick_for_topic).
+    rather than failing -- see news_embed's module docstring. The
+    novelty extra (2026-08-26 on) no longer depends on the embedder at
+    all -- it degrades independently, sending no novelty section (not a
+    forced weak pick) when neither its own keyword nor keyness signal
+    clears NOVELTY_KEYNESS_THRESHOLD (see _pick_novelty_extra).
 
     The cache is read ONCE per cycle and reused across every subscriber
     -- matches docs/plans/local-news-cache-plan.md's stated efficiency argument
