@@ -600,10 +600,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await asyncio.sleep(1)
         try:
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
-        except BadRequest:
+        except BadRequest as exc:
             # The model didn't produce valid HTML (unescaped &/</>, a tag
             # it wasn't asked to use, etc.) -- fall back to plain text so
-            # the user still gets an answer instead of silence.
+            # the user still gets an answer instead of silence. Logged
+            # (2026-08-27) because it was previously silent: a real user
+            # report of a digest whose links had visibly vanished was the
+            # only reason this fallback's existence was ever noticed, and
+            # there was no way to find out afterward what actually broke
+            # the HTML. _strip_html_tags removes EVERY tag on failure, not
+            # just the offending one, so this is also the only record of
+            # what the user was supposed to see (links, bold, etc.) before
+            # the fallback flattened it.
+            print(f"[bot] HTML send failed, falling back to plain text: {exc!r} -- chunk: {chunk[:500]!r}")
             await update.message.reply_text(_strip_html_tags(chunk))
 
 
@@ -623,7 +632,11 @@ async def send_push_digest(bot: Bot, chat_id: int, text: str) -> None:
             await asyncio.sleep(1)
         try:
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
-        except BadRequest:
+        except BadRequest as exc:
+            # See handle_message's identical except block for why this is
+            # logged -- same failure mode, same previously-silent gap.
+            print(f"[news_push] HTML send failed for chat_id={chat_id}, falling back to plain "
+                  f"text: {exc!r} -- chunk: {chunk[:500]!r}")
             await bot.send_message(chat_id=chat_id, text=_strip_html_tags(chunk))
 
 
