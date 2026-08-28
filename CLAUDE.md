@@ -51,6 +51,7 @@ scope, since different subscribers care about different topics.
 | A specific feature's design/history/status | the matching `docs/plans/*.md` — see `docs/README.md` for the full index |
 | News source registry (what's live, how to add one) | `docs/current/ai-news-sources.md` |
 | Diagnosing a live issue (Phoenix traces, hot-patching) | `docs/reference/observability-and-debugging.md` |
+| How/where alerts reach a human (Logfire alerts, Telegram delivery, any relay) | `docs/plans/observability-platform-plan.md` — read this FIRST before touching alert delivery; two hours were lost 2026-08-28 re-deriving an answer it already had |
 
 ## Command output is billed, and billed again
 

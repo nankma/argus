@@ -770,3 +770,128 @@ command, so a flags-only change — retiring Phoenix was exactly that —
 reports "nothing in the image changed" and needs `--force`. True, and
 beside the point. Worth fixing; recorded rather than left implicit.
 
+---
+
+# 2026-08-28: a Jira relay, to fix the Slack-markup cosmetic cost -- and a
+# documentation-discoverability lesson that cost real time first
+
+## The lesson, first, because it is the more expensive part
+
+A separate task this session (adding a fourth alert, `html_validation_
+exhausted`, for an unrelated HTML-formatting incident fix) needed to answer
+"how do alerts reach a human here?" This document already answered that,
+completely, with the exact mechanism (`slack-legacy` straight at Telegram,
+no receiver needed) and three live examples. It was not read before
+spending real effort re-deriving a WORSE answer from scratch: ruling out
+Logfire's native Telegram support (there isn't one), ruling out this Claude
+Code session as an ad-hoc relay (`RemoteTrigger`/`Monitor`/`CronCreate` all
+checked and rejected for good reasons), and building an entire Jira
+Automation relay to solve a problem ("Logfire can't reach Telegram without
+a public receiver") that this document had already closed on 2026-08-21
+with a *simpler* answer requiring no such relay at all.
+
+`local-infra/infrastructure.yaml`'s own `logfire:` block was *also* stale
+(described 2026-08-21's mid-migration state -- one alert, no channel --
+while this document already recorded all three alerts live with delivery
+verified) and only got corrected as part of writing this section. Two
+independent copies of the same fact drifted apart because only one of them
+was updated when the real work finished.
+
+**The actual reason the Jira relay still turned out to be worth building**:
+not "Logfire can't reach Telegram" (it can, directly) but "the direct path's
+output is permanently ugly" -- Slack markup rendered literally, as this
+document's own "Notification" section already documented. That is a real,
+separate, narrower problem than the one two hours were spent solving.
+Worth naming so the next session doesn't repeat this: **read this whole
+document before touching alert delivery, not just its section headers.**
+
+## The decision
+
+Keep sending Logfire alerts through a webhook, but point that webhook at a
+**Jira Automation "Incoming webhook" trigger** (public endpoint is
+Atlassian's, not this project's VM -- see `local-infra/infrastructure.yaml`'s
+`jira_alert_relay` for exactly what's built) instead of straight at
+Telegram, and have Jira's own **Send web request** action build the
+Telegram message body itself -- so it can be plain, clean text instead of
+forwarded Slack markup. See `local-infra/infrastructure.yaml`'s
+`jira_alert_relay` entry for the concrete rule/URL/action, kept there
+rather than duplicated here per this file's own convention (real resource
+facts live in the gitignored infra file; this doc carries the reasoning).
+
+## What's verified so far
+
+A manual test POST (`{"text": "..."}`, with the required
+`X-Automation-Webhook-Token` header) through the Jira webhook produced a
+real Telegram message on the admin bot. Getting there needed two non-obvious
+fixes, both worth remembering for the next Jira automation built here:
+
+1. **"Save without enabling" before "Turn on"** -- attempting to enable the
+   flow directly produced a bare "Invalid Incoming webhook trigger" error
+   with no further detail; saving without enabling first is what actually
+   finalizes the trigger's URL/secret.
+2. **`Work item criteria` must be "No work items from the webhook"** --
+   left at its default ("Issues provided in the webhook HTTP POST body"),
+   the trigger silently no-ops on any payload that doesn't reference real
+   Jira issues, logged in the rule's Audit log as "No issues from the
+   webhook" (confusingly, the exact same phrase names both the failure and
+   the fix -- the option you need to select is titled identically to the
+   error it resolves).
+
+## What's still open -- do not treat this as done
+
+- **The Jira action's message body is a placeholder.** It currently does
+  `{{webhookData.text}}`, written for the manual test payload above, not
+  for a real Logfire alert. Logfire's actual alert-fire payload shape (the
+  `raw-data` webhook format specifically, chosen so the message can be
+  built cleanly instead of forwarding Slack's shape) is **not yet known** --
+  attempted via `WebFetch` against Logfire's `/api/openapi.json` and it
+  does not expand the webhook body schemas. Next step: trigger a real
+  alert transition (per this document's own "Testing an alert requires an
+  edge, not a state" lesson from 2026-08-21) with the channel pointed at
+  the Jira webhook and `raw-data` format selected, then read what actually
+  arrived from the rule's Audit log -- the same method that diagnosed the
+  "No issues" failure above, not more spec-guessing.
+- **None of the three live alerts have been repointed yet.** They still
+  deliver via the `Bot Alert` (slack-legacy) channel. Repointing means
+  either editing each alert's channel or pointing `Bot Alert` itself at
+  the new URL -- not decided yet, and needs the management API's
+  hour-lived OAuth device-flow token (see "The management API" section
+  above) to execute either way.
+- **The `html_validation_exhausted` span now ships** (separate task, code
+  landed same session -- `news_push._report_html_validation_exhausted`).
+  A Logfire alert querying for it (`span_name = 'html_validation_exhausted'`)
+  still doesn't exist -- add it through the same Jira channel once that's
+  repointed, rather than standing up a second relay.
+- **The Jira webhook URL and secret are now recorded** in
+  `local-infra/infrastructure.yaml`'s `jira_alert_relay`. The secret must
+  be appended as the URL's final path segment (`.../<secret>`) when a
+  caller (like a Logfire channel config) can't set a custom header --
+  verified working 2026-08-28, delivery confirmed in Telegram.
+- **Paused here, deliberately, 2026-08-28** -- this whole thread (fixing
+  the Slack-markup cosmetic issue) is a nice-to-have relative to an
+  unrelated, higher-priority task (an HTML-validation-and-retry feature)
+  waiting on the same session. The three live alerts are untouched and
+  still deliver correctly via `Bot Alert` throughout this pause -- nothing
+  is broken, this is purely deferred polish. Resume state:
+  - A temporary channel, **"Jira Relay Test"** (id `0c9f3fda-7b97-4b69-8dfb-b8a6c98391a5`,
+    format `raw-data`, pointed at the Jira relay), exists but is **not
+    attached to any alert** -- created but the discovery step (attach it
+    to a controllable test alert, force a real transition, read what
+    landed in Jira's Audit log) was not started. Delete this channel if
+    picking this back up more than a few weeks later without using it --
+    an unattached test channel with no expiry is exactly the kind of
+    thing this section exists to stop from going stale silently.
+  - Next concrete step, unchanged from above: create a test alert with a
+    trivially controllable query (mirror Gate A's pattern -- a specific
+    test `service_name`, short `time_window`/`frequency`), attach the
+    temp channel, emit one real span via direct OTLP export (needs
+    `LOGFIRE_API_KEY`, resolved via SSH the same way
+    `docs/reference/observability-and-debugging.md`'s Logfire-query
+    technique does) to flip the query from no-match to match, wait one
+    evaluation cycle, then read the Jira rule's Audit log for the actual
+    `raw-data` payload shape.
+  - See `docs/reference/observability-and-debugging.md`'s new "managing
+    Logfire alerts/channels" section for the reusable OAuth device-flow
+    procedure -- the token obtained 2026-08-28 is long expired (1h
+    lifetime) by the time this is picked back up; get a fresh one.
+

@@ -48,6 +48,106 @@ This is a thinner, less-explored technique than the Phoenix section below
 here as it gets used more, rather than assuming Logfire's API surface
 mirrors Phoenix's GraphQL one just because both are OpenTelemetry-based.
 
+## Technique: managing Logfire alerts/channels (needs a fresh OAuth token)
+
+**Read `docs/plans/observability-platform-plan.md` before touching alert
+delivery at all** — it has the full reasoning, what's live today, and a
+2026-08-28 lesson about exactly this gap costing real time once already.
+This section is the mechanical how-to only.
+
+`LOGFIRE_API_KEY` (the project-scoped write/query token above) **cannot**
+create or edit alerts/channels — that needs a *user*-authorised OAuth
+token via the device-code flow, which lasts 1 hour and is never stored.
+Getting one takes one short human step (approving a URL in a browser);
+everything else is scriptable. Current state (project/alert/channel ids,
+what each alert fires on) lives in `local-infra/infrastructure.yaml`
+under `logfire:` — read that first so you're not guessing at ids.
+
+**1. Register a client and request a device code** (PKCE required — the
+call fails with `invalid_client` without it):
+
+```python
+import base64, hashlib, secrets, requests, json
+
+B = "https://logfire-us.pydantic.dev/api"
+SCOPES = "project:read project:read_alert project:write_alert organization:read_channel organization:write_channel"
+
+verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
+challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+
+r = requests.post(B + "/oauth/register", json={
+    "client_name": "argus-alert-setup",
+    "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
+    "token_endpoint_auth_method": "none",
+    "application_type": "native",   # NOT "web" -- matters, confirmed 2026-08-28
+    "scope": SCOPES,
+}, timeout=30)
+cid = r.json()["client_id"]
+
+d = requests.post(B + "/oauth/device/code", data={
+    "client_id": cid, "scope": SCOPES,
+    "code_challenge": challenge, "code_challenge_method": "S256",
+}, timeout=30).json()
+print("APPROVE HERE:", d.get("verification_uri_complete") or d.get("verification_uri"))
+print("USER CODE:", d.get("user_code"))
+# save cid, verifier, and d (device_code etc.) for step 2
+```
+
+Only request the scopes the task actually needs — `project:write` (rename/
+delete projects), `project:write_token`/`read_token` (mint credentials),
+and anything `organization:admin` were deliberately never requested for
+this project's alert work.
+
+**2. Send the printed URL to a human, poll until they approve:**
+
+```python
+import time
+interval = max(int(d.get("interval", 5)), 5)
+deadline = time.time() + min(int(d.get("expires_in", 600)), 540)
+while time.time() < deadline:
+    r = requests.post(B + "/oauth/token", data={
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        "device_code": d["device_code"], "client_id": cid, "code_verifier": verifier,
+    }, timeout=30)
+    if r.status_code == 200:
+        token = r.json()["access_token"]; break
+    err = r.json().get("error")
+    if err in ("authorization_pending", "slow_down"):
+        time.sleep(interval); continue
+    raise SystemExit(f"denied: {r.text}")
+```
+
+**3. Use the token** (1h lifetime — if a call 401s, get a new one, don't
+try to refresh):
+
+```bash
+PROJECT_ID=71097da6-6be4-4621-9be2-e9d9aaaa23de   # see infrastructure.yaml
+
+# List alerts (ids, active state, and each one's channel config):
+curl -s "https://logfire-us.pydantic.dev/api/v1/projects/$PROJECT_ID/alerts/" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Update a channel's webhook config (PATCH by channel_id -- repoints
+# every alert using that channel at once; see infrastructure.yaml for
+# which alerts currently share which channel):
+curl -s -X PATCH "https://logfire-us.pydantic.dev/api/v1/organizations/<org_id>/channels/<channel_id>" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"config": {"type": "webhook", "format": "raw-data", "url": "<new url>"}}'
+```
+
+(The `PATCH .../channels/` shape above is inferred from `WebhookUpdate`'s
+schema in Logfire's own `/api/openapi.json`, not yet exercised end-to-end
+as of 2026-08-28 — verify the exact path/verb against that spec, or by
+trying it, before trusting this blindly.)
+
+**Discovering what a webhook actually delivers isn't in the OpenAPI
+spec** — `WebhookFormat`'s enum (`auto`/`slack-blockkit`/`slack-legacy`/
+`raw-data`) is documented, but the JSON body shape for each format is not
+part of Logfire's public API surface. The only reliable way to learn one
+is to point a real channel at a URL you control and force a genuine alert
+transition (per this doc's own "Testing an alert requires an edge, not a
+state" lesson) — reading a channel's *current* state doesn't fire it.
+
 ## Incident: `docker logs` was empty this whole session
 
 **What happened:** a user asked why a periodic push notification took

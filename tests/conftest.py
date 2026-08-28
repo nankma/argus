@@ -1,5 +1,6 @@
 import pytest
 import agent
+import message_archive
 import news_cache
 import news_keyness
 import users_db
@@ -12,6 +13,23 @@ def isolated_news_cache(monkeypatch, tmp_path):
     test, so cache tests never touch the real news_cache/ directory."""
     path = tmp_path / "news_cache"
     monkeypatch.setattr(news_cache, "CACHE_DIR", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_message_archive(monkeypatch, tmp_path):
+    """Point message_archive.ARCHIVE_DIR at a temp directory for every
+    test, autouse -- unlike news_cache's NEWS_ARCHIVE_DIR (default off,
+    an explicit fixture is enough), MESSAGE_ARCHIVE_DIR defaults to a
+    real relative directory (archiving is meant to always be on, see
+    that module's docstring), so ANY test exercising handle_message/
+    send_push_digest/run_push_cycle end-to-end -- not just tests that
+    know to ask for isolation -- would otherwise write real files into
+    the repo's working directory. Confirmed happening 2026-08-28 before
+    this was autouse: a full test run left dozens of real .json files in
+    ./message_archive/."""
+    path = tmp_path / "message_archive"
+    monkeypatch.setattr(message_archive, "ARCHIVE_DIR", str(path))
     return path
 
 
