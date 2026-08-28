@@ -344,7 +344,11 @@ def test_handle_message_sends_with_html_parse_mode(isolated_subscribers_db, monk
     assert kwargs["parse_mode"] is not None
 
 
-def test_handle_message_falls_back_to_plain_text_on_bad_request(isolated_subscribers_db, monkeypatch):
+def test_handle_message_falls_back_to_plain_text_on_bad_request(isolated_subscribers_db, monkeypatch, capsys):
+    """Also pins that this fallback logs -- previously silent, only ever
+    noticed via a live user report (2026-08-27) of a digest whose links
+    had visibly vanished, with no way afterward to find out what actually
+    broke the HTML."""
     _bypass_guardrails(monkeypatch)
     update = _make_update(chat_id=999)  # admin -- bypasses check_access
     context = _make_context(admin_chat_id=999)
@@ -362,6 +366,9 @@ def test_handle_message_falls_back_to_plain_text_on_bad_request(isolated_subscri
     second_args, second_kwargs = update.message.reply_text.call_args_list[1]
     assert "<" not in second_args[0]  # tags stripped in the fallback
     assert "parse_mode" not in second_kwargs
+    logged = capsys.readouterr().out
+    assert "can't parse entities" in logged
+    assert "Broken" in logged  # the chunk that failed, not just the fact it did
 
 
 def test_handle_message_normalizes_stray_markdown_before_sending(isolated_subscribers_db, monkeypatch):
@@ -824,7 +831,7 @@ def test_send_push_digest_strips_report_preamble():
     assert kwargs["text"] == "📰 <b>Report</b>\n\nContent."
 
 
-def test_send_push_digest_falls_back_to_plain_text_on_bad_request():
+def test_send_push_digest_falls_back_to_plain_text_on_bad_request(capsys):
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock(side_effect=[BadRequest("can't parse entities"), None])
 
@@ -834,6 +841,10 @@ def test_send_push_digest_falls_back_to_plain_text_on_bad_request():
     second_args, second_kwargs = fake_bot.send_message.call_args_list[1]
     assert "<" not in second_kwargs["text"]
     assert "parse_mode" not in second_kwargs
+    logged = capsys.readouterr().out
+    assert "can't parse entities" in logged
+    assert "42" in logged  # chat_id -- which subscriber's digest broke
+    assert "Broken" in logged  # the chunk that failed, not just the fact it did
 
 
 def test_push_job_threads_the_bot_datas_embedder_through(monkeypatch):
