@@ -9,12 +9,11 @@ from telegram.error import BadRequest
 
 import bot
 import guardrails
+import telegram_html
 import users_db
 from bot import (
     TELEGRAM_MESSAGE_LIMIT,
-    _is_html_balanced,
     _normalize_markdown_bold,
-    _strip_html_tags,
     _strip_report_preamble,
     _trim_history,
     split_for_telegram,
@@ -65,21 +64,8 @@ def test_split_for_telegram_does_not_split_mid_tag():
     chunks = split_for_telegram(text)
     assert len(chunks) > 1
     for chunk in chunks:
-        assert _is_html_balanced(chunk)
+        assert telegram_html.is_html_balanced(chunk)
     assert "<b>this tag spans the naive split point</b>" in "".join(chunks)
-
-
-def test_is_html_balanced():
-    assert _is_html_balanced("plain text") is True
-    assert _is_html_balanced("<b>bold</b>") is True
-    assert _is_html_balanced("<b>bold and <i>italic</i></b>") is True
-    assert _is_html_balanced("<b>unclosed") is False
-    assert _is_html_balanced("closed</b> with no opener") is False
-
-
-def test_strip_html_tags():
-    assert _strip_html_tags("<b>bold</b> and <a href=\"x\">link</a>") == "bold and link"
-    assert _strip_html_tags("plain text") == "plain text"
 
 
 def test_normalize_markdown_bold_converts_stray_markdown():
@@ -369,6 +355,26 @@ def test_handle_message_falls_back_to_plain_text_on_bad_request(isolated_subscri
     logged = capsys.readouterr().out
     assert "can't parse entities" in logged
     assert "Broken" in logged  # the chunk that failed, not just the fact it did
+
+
+def test_handle_message_archives_the_delivered_reply_with_category_as_topic(isolated_subscribers_db, monkeypatch):
+    """handle_message's archive_message call is otherwise only ever
+    exercised incidentally (isolated_message_archive is autouse, so every
+    handle_message test above already runs it) -- nothing actually asserts
+    it fires, or fires with the right (kind, topic) pair. Uses the
+    delivered (post-fallback) chunk, not the raw model output, per
+    archive_message's own docstring."""
+    _bypass_guardrails(monkeypatch, category="news_query")
+    update = _make_update(chat_id=999, text="What's new with Bitcoin?")
+    context = _make_context(admin_chat_id=999)
+    context.bot_data["agent"] = "fake-agent"
+    monkeypatch.setattr(bot, "run_agent", MagicMock(return_value=[SimpleNamespace(content="<b>Bitcoin news</b>")]))
+    archive = MagicMock()
+    monkeypatch.setattr(bot.message_archive, "archive_message", archive)
+
+    asyncio.run(bot.handle_message(update, context))
+
+    archive.assert_called_once_with(999, "chat_reply", "<b>Bitcoin news</b>", topic="news_query")
 
 
 def test_handle_message_normalizes_stray_markdown_before_sending(isolated_subscribers_db, monkeypatch):
@@ -806,7 +812,7 @@ def test_handle_message_excludes_history_older_than_max_age(isolated_subscribers
     assert sent_messages == [{"role": "user", "content": "new question"}]  # stale entry dropped
 
 
-def test_send_push_digest_normalizes_markdown_and_sends_html():
+def test_send_push_digest_normalizes_markdown_and_sends_html(isolated_subscribers_db):
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock()
 
@@ -819,7 +825,7 @@ def test_send_push_digest_normalizes_markdown_and_sends_html():
     assert kwargs["parse_mode"] is not None
 
 
-def test_send_push_digest_strips_report_preamble():
+def test_send_push_digest_strips_report_preamble(isolated_subscribers_db):
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock()
 
@@ -831,7 +837,7 @@ def test_send_push_digest_strips_report_preamble():
     assert kwargs["text"] == "📰 <b>Report</b>\n\nContent."
 
 
-def test_send_push_digest_falls_back_to_plain_text_on_bad_request(capsys):
+def test_send_push_digest_falls_back_to_plain_text_on_bad_request(isolated_subscribers_db, capsys):
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock(side_effect=[BadRequest("can't parse entities"), None])
 
@@ -845,6 +851,20 @@ def test_send_push_digest_falls_back_to_plain_text_on_bad_request(capsys):
     assert "can't parse entities" in logged
     assert "42" in logged  # chat_id -- which subscriber's digest broke
     assert "Broken" in logged  # the chunk that failed, not just the fact it did
+
+
+def test_send_push_digest_archives_the_delivered_text_with_topic(monkeypatch):
+    """Same gap as handle_message's archive assertion above, for the push
+    side: send_push_digest's archive_message call was only ever exercised
+    incidentally by the other send_push_digest tests, never asserted on."""
+    fake_bot = MagicMock()
+    fake_bot.send_message = AsyncMock()
+    archive = MagicMock()
+    monkeypatch.setattr(bot.message_archive, "archive_message", archive)
+
+    asyncio.run(bot.send_push_digest(fake_bot, 42, "<b>Digest</b>", topic="AI"))
+
+    archive.assert_called_once_with(42, "push_digest", "<b>Digest</b>", topic="AI")
 
 
 def test_push_job_threads_the_bot_datas_embedder_through(monkeypatch):

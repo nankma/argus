@@ -36,10 +36,12 @@ from agent import ROUTE_B_CATEGORIES, build_agent, build_model, dispatch_setting
 import admin_bot
 import guardrails
 import healthcheck
+import message_archive
 import news_classify
 import news_embed
 import news_ingest
 import news_push
+import telegram_html
 import test_api
 import users_db
 
@@ -126,7 +128,6 @@ def _get_trimmed_history(chat_id: int) -> tuple[list, list[datetime]]:
     return messages, timestamps
 
 
-_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>")
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 
 
@@ -162,23 +163,6 @@ def _strip_report_preamble(text: str) -> str:
     return text
 
 
-def _is_html_balanced(text: str) -> bool:
-    """True if `text` has no unclosed HTML tag — open/close tag counts
-    match. Doesn't validate proper nesting, just depth — good enough given
-    the small, LLM-produced tag vocabulary this bot actually asks for
-    (b, i, a), not arbitrary/adversarial HTML."""
-    depth = 0
-    for m in _HTML_TAG_RE.finditer(text):
-        depth += -1 if m.group(0).startswith("</") else 1
-        if depth < 0:
-            return False
-    return depth == 0
-
-
-def _strip_html_tags(text: str) -> str:
-    return _HTML_TAG_RE.sub("", text)
-
-
 def split_for_telegram(text: str) -> list[str]:
     """Telegram rejects messages over 4096 characters. Split on that
     boundary, preferring to break at a newline, and never at a point that
@@ -194,7 +178,7 @@ def split_for_telegram(text: str) -> list[str]:
         split_at = text.rfind("\n", 0, TELEGRAM_MESSAGE_LIMIT)
         if split_at <= 0:
             split_at = TELEGRAM_MESSAGE_LIMIT
-        while split_at > 0 and not _is_html_balanced(text[:split_at]):
+        while split_at > 0 and not telegram_html.is_html_balanced(text[:split_at]):
             prev_newline = text.rfind("\n", 0, split_at)
             split_at = prev_newline if prev_newline > 0 else split_at - 1
         chunks.append(text[:split_at])
@@ -592,6 +576,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     final_content = result["reply"]
 
     chunks = split_for_telegram(final_content)
+    delivered_chunks = []
     for i, chunk in enumerate(chunks):
         if i > 0:
             # Small gap between sequential messages -- avoids hitting
@@ -600,6 +585,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await asyncio.sleep(1)
         try:
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+            delivered_chunks.append(chunk)
         except BadRequest as exc:
             # The model didn't produce valid HTML (unescaped &/</>, a tag
             # it wasn't asked to use, etc.) -- fall back to plain text so
@@ -608,15 +594,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # report of a digest whose links had visibly vanished was the
             # only reason this fallback's existence was ever noticed, and
             # there was no way to find out afterward what actually broke
-            # the HTML. _strip_html_tags removes EVERY tag on failure, not
+            # the HTML. strip_html_tags removes EVERY tag on failure, not
             # just the offending one, so this is also the only record of
             # what the user was supposed to see (links, bold, etc.) before
             # the fallback flattened it.
             print(f"[bot] HTML send failed, falling back to plain text: {exc!r} -- chunk: {chunk[:500]!r}")
-            await update.message.reply_text(_strip_html_tags(chunk))
+            stripped = telegram_html.strip_html_tags(chunk)
+            await update.message.reply_text(stripped)
+            delivered_chunks.append(stripped)
+
+    # Archives what was actually delivered (post any strip-to-plain
+    # fallback above), not the raw pre-fallback reply -- a delivery
+    # record, not a debug log (the BadRequest print above already covers
+    # that). topic is the guardrail-classified category, the closest
+    # analog to a push digest's interest since an interactive reply has
+    # no fixed topic of its own.
+    message_archive.archive_message(
+        update.effective_chat.id, "chat_reply", "\n".join(delivered_chunks), topic=result["category"])
 
 
-async def send_push_digest(bot: Bot, chat_id: int, text: str) -> None:
+async def send_push_digest(bot: Bot, chat_id: int, text: str, topic: str | None = None) -> None:
     """The `send` callback news_push.run_push_cycle() calls per due
     subscriber. Push digests go through the same HTML-formatting/trend-
     report prompt (agent.HTML_FORMATTING_RULES/TREND_REPORT_STRUCTURE) as
@@ -624,32 +621,44 @@ async def send_push_digest(bot: Bot, chat_id: int, text: str) -> None:
     handle_message's exact pipeline instead of a simpler one-off send: the
     Markdown-leak and report-preamble safety nets, chunking for messages
     over Telegram's limit, and the BadRequest-on-bad-HTML fallback to
-    plain text."""
+    plain text.
+
+    `topic` (added 2026-08-28, the subscriber's interest -- run_push_cycle
+    already has it in scope per-loop-iteration) is only used to label the
+    archived record below; delivery itself doesn't need it."""
     normalized = _strip_report_preamble(_normalize_markdown_bold(text))
     chunks = split_for_telegram(normalized)
+    delivered_chunks = []
     for i, chunk in enumerate(chunks):
         if i > 0:
             await asyncio.sleep(1)
         try:
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
+            delivered_chunks.append(chunk)
         except BadRequest as exc:
             # See handle_message's identical except block for why this is
             # logged -- same failure mode, same previously-silent gap.
             print(f"[news_push] HTML send failed for chat_id={chat_id}, falling back to plain "
                   f"text: {exc!r} -- chunk: {chunk[:500]!r}")
-            await bot.send_message(chat_id=chat_id, text=_strip_html_tags(chunk))
+            stripped = telegram_html.strip_html_tags(chunk)
+            await bot.send_message(chat_id=chat_id, text=stripped)
+            delivered_chunks.append(stripped)
+
+    message_archive.archive_message(chat_id, "push_digest", "\n".join(delivered_chunks), topic=topic)
 
 
 async def _push_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     model = context.bot_data["guard_model"]
 
-    async def send(chat_id: int, text: str) -> None:
-        await send_push_digest(context.bot, chat_id, text)
+    async def send(chat_id: int, text: str, topic: str | None = None) -> None:
+        await send_push_digest(context.bot, chat_id, text, topic=topic)
 
     # .get(), not [] -- an embedder is an enhancement (near-duplicate
     # collapse, offbeat selection), never something run_push_cycle
     # requires to function. See news_embed's module docstring.
-    await news_push.run_push_cycle(model, send, embedder=context.bot_data.get("embedder"))
+    await news_push.run_push_cycle(
+        model, send, context.bot_data["admin_bot_token"], context.bot_data["admin_chat_id"],
+        embedder=context.bot_data.get("embedder"))
 
 
 def register_push_job(app: Application) -> None:

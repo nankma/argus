@@ -995,6 +995,38 @@ def test_write_push_digest_no_language_directive_when_unset():
     assert captured["system_prompt"] == news_push._PUSH_DIGEST_PROMPT
 
 
+def test_write_push_digest_includes_retry_reason_when_set():
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["system_prompt"] = messages[0]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [{**_article("https://example.com/a"), "topic": "AI"}]
+
+    news_push.write_push_digest(model, articles, retry_reason="unescaped & at '&T'")
+
+    assert "unescaped & at '&T'" in captured["system_prompt"]
+
+
+def test_write_push_digest_no_retry_instruction_when_unset():
+    captured = {}
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            captured["system_prompt"] = messages[0]["content"]
+            return super().invoke(messages, *args, **kwargs)
+
+    model = RecordingModel(responses=[AIMessage(content="<b>Digest</b>")])
+    articles = [{**_article("https://example.com/a"), "topic": "AI"}]
+
+    news_push.write_push_digest(model, articles)
+
+    assert captured["system_prompt"] == news_push._PUSH_DIGEST_PROMPT
+
+
 def test_write_push_digest_listing_carries_no_topic_prefix(monkeypatch):
     """Regression for the 2026-08-25 fix: the listing used to prefix every
     line with `[{topic}]`, which was both informationless (every line in
@@ -1152,7 +1184,7 @@ def test_run_push_cycle_skips_subscriber_with_no_interests(monkeypatch, isolated
     monkeypatch.setattr(users_db, "record_push", record_push)
     send = AsyncMock()
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send))
 
     send.assert_not_called()
     record_push.assert_not_called()
@@ -1168,7 +1200,7 @@ def test_run_push_cycle_skips_subscriber_not_due(monkeypatch, isolated_subscribe
     monkeypatch.setattr(news_push, "select_candidate_articles", select)
     send = AsyncMock()
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
 
     select.assert_not_called()
     send.assert_not_called()
@@ -1189,9 +1221,9 @@ def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch, i
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
     send = AsyncMock()
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
 
-    send.assert_called_once_with(3, digest)
+    send.assert_called_once_with(3, digest, topic="AI")
     record_push.assert_called_once_with(3, ["https://example.com/new"], now)
 
 
@@ -1217,7 +1249,7 @@ def test_run_push_cycle_only_records_articles_the_digest_actually_cited(
     )
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     record_push.assert_called_once_with(9, ["https://example.com/used"], now)
 
@@ -1235,9 +1267,92 @@ def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch, isolat
     monkeypatch.setattr(news_push, "write_push_digest", write_digest)
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
-    write_digest.assert_called_once_with("fake-model", new_articles, "AI", "French")
+    write_digest.assert_called_once_with("fake-model", new_articles, "AI", "French", retry_reason=None)
+
+
+# --- the HTML-validation retry loop (2026-08-28) --------------------------
+# Real news_push.write_push_digest (not monkeypatched) driven by a real
+# FakeToolCallingModel with scripted responses, so the retry loop's actual
+# interaction with it (the retry_reason round-trip, the attempt count) is
+# genuinely exercised rather than assumed.
+
+
+def test_run_push_cycle_retries_once_on_invalid_html_then_sends_the_valid_reply(
+    monkeypatch, isolated_subscribers_db
+):
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(20)])
+    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    new_articles = [{**_article("https://example.com/a"), "topic": "AI"}]
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
+    monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
+
+    prompts = []
+
+    class RecordingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            prompts.append(messages[0]["content"])
+            return super().invoke(messages, *args, **kwargs)
+
+    valid = '<b>Digest</b> <a href="https://example.com/a">s</a>'
+    model = RecordingModel(responses=[
+        AIMessage(content="AT&T unveils new chip"),  # invalid: unescaped &
+        AIMessage(content=valid),
+    ])
+    send = AsyncMock()
+
+    asyncio.run(news_push.run_push_cycle(
+        model=model, admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
+
+    assert len(prompts) == 2
+    assert "unescaped &" in prompts[1]  # the second attempt was told what broke
+    send.assert_called_once_with(20, valid, topic="AI")
+
+
+def test_run_push_cycle_alerts_the_admin_after_max_html_attempts_but_still_sends(
+    monkeypatch, isolated_subscribers_db
+):
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(21)])
+    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    new_articles = [{**_article("https://example.com/a"), "topic": "AI"}]
+    _stub_cache_and_categories(monkeypatch)
+    monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
+    monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
+
+    call_count = {"n": 0}
+
+    class CountingModel(FakeToolCallingModel):
+        def invoke(self, messages, *args, **kwargs):
+            call_count["n"] += 1
+            return super().invoke(messages, *args, **kwargs)
+
+    always_invalid = AIMessage(
+        content='AT&T <a href="https://example.com/a">unveils new chip</a>, still broken')
+    # A single scripted response, not news_push.MAX_HTML_ATTEMPTS of them --
+    # FakeToolCallingModel repeats the last one once exhausted, so this
+    # doesn't accidentally cap the retry loop itself; the literal 3 below
+    # is what actually pins the count (referencing the constant here would
+    # make this test pass under any mutation of it, since both sides would
+    # move together).
+    model = CountingModel(responses=[always_invalid])
+    send = AsyncMock()
+    admin_send = AsyncMock()
+    monkeypatch.setattr(news_push, "Bot", lambda token: MagicMock(send_message=admin_send))
+
+    asyncio.run(news_push.run_push_cycle(
+        model=model, admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
+
+    assert call_count["n"] == 3  # no wasted extra call
+    admin_send.assert_called_once()
+    assert admin_send.call_args.kwargs["chat_id"] == 999
+    assert "unescaped &" in admin_send.call_args.kwargs["text"]
+    # Sent anyway, still invalid -- send_push_digest's own BadRequest
+    # fallback (bot.py) is what strips it if Telegram also rejects it.
+    send.assert_called_once_with(21, always_invalid.content, topic="AI")
 
 
 def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypatch, isolated_subscribers_db):
@@ -1252,7 +1367,7 @@ def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypat
     select = MagicMock(return_value=[])
     monkeypatch.setattr(news_push, "select_candidate_articles", select)
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     assert select.call_args_list[0].kwargs["include_restricted"] is True
     assert select.call_args_list[1].kwargs["include_restricted"] is False
@@ -1269,7 +1384,7 @@ def test_run_push_cycle_reads_cache_once_and_reuses_across_subscribers(monkeypat
     monkeypatch.setattr(news_push, "resolve_interest_categories", lambda model, interests: {})
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     read_all.assert_called_once()
 
@@ -1283,7 +1398,7 @@ def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch, iso
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
     send = AsyncMock()
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
 
     send.assert_not_called()
     record_push.assert_called_once_with(4, [], now)
@@ -1312,7 +1427,7 @@ def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch, isolat
     monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value="   "))
     send = AsyncMock()
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
 
     send.assert_not_called()
     record_push.assert_called_once_with(13, [], now)
@@ -1330,7 +1445,7 @@ def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch, i
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=False))
     send = AsyncMock()
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
 
     send.assert_not_called()
     # Nothing was delivered, so nothing is recorded as seen -- the articles
@@ -1363,10 +1478,10 @@ def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch, isolated_s
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
     send = AsyncMock()
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
 
     # subscriber 6 failed silently; subscriber 7 still got its digest
-    send.assert_called_once_with(7, '<b>Digest</b> <a href="https://example.com/ok">s</a>')
+    send.assert_called_once_with(7, '<b>Digest</b> <a href="https://example.com/ok">s</a>', topic="AI")
 
 
 # --- links_actually_sent --------------------------------------------------
@@ -1439,7 +1554,7 @@ def _cycle_with(monkeypatch, chat_id=1, subscriber=None, digest=None,
         digest = '<b>Digest</b> 🔗 <a href="https://example.com/new">Source</a>'
     monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value=digest))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=on_topic))
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send or AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send or AsyncMock(), now=now))
     return now
 
 
@@ -1503,7 +1618,7 @@ def test_run_push_cycle_records_model_error_when_an_llm_call_raises(monkeypatch,
                         MagicMock(return_value=[{**_article("https://example.com/new"), "topic": "AI"}]))
     monkeypatch.setattr(news_push, "write_push_digest",
                         MagicMock(side_effect=RuntimeError("Error code: 402 - Insufficient Balance")))
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
     assert users_db.recent_outcomes_for(15) == [users_db.PUSH_MODEL_ERROR]
@@ -1518,7 +1633,7 @@ def test_run_push_cycle_records_a_non_model_failure_as_cycle_failed(monkeypatch,
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(side_effect=KeyError("published_dt")))
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
     assert users_db.recent_outcomes_for(16) == [users_db.PUSH_CYCLE_FAILED]
@@ -1531,7 +1646,7 @@ def test_run_push_cycle_records_nothing_new_without_calling_the_model(monkeypatc
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
     write = MagicMock()
     monkeypatch.setattr(news_push, "write_push_digest", write)
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
     assert users_db.recent_outcomes_for(17) == [users_db.PUSH_NOTHING_NEW]
@@ -1542,7 +1657,7 @@ def test_run_push_cycle_records_no_interests(monkeypatch, isolated_subscribers_d
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers",
                         lambda: [_subscriber(18, interests=[])])
     monkeypatch.setattr(users_db, "record_push", MagicMock())
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock()))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock()))
 
     assert users_db.recent_outcomes_for(18) == [users_db.PUSH_NO_INTERESTS]
 
@@ -1554,7 +1669,7 @@ def test_run_push_cycle_does_not_record_a_not_due_subscriber(monkeypatch, isolat
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers",
                         lambda: [_subscriber(19, last_push_at=now - timedelta(hours=1), interval=24)])
     monkeypatch.setattr(users_db, "record_push", MagicMock())
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     assert users_db.recent_outcomes_for(19) == []
 
@@ -1651,7 +1766,7 @@ def test_a_quiet_cycle_between_failures_does_not_clear_the_strikes(monkeypatch, 
     monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(25)])
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 13, 0, tzinfo=timezone.utc)))
 
     _cycle_with(monkeypatch, chat_id=25, send=_failing_send(), record_push=MagicMock())
@@ -1668,7 +1783,7 @@ def test_model_error_before_generation_does_not_advance_last_push_at(monkeypatch
     monkeypatch.setattr(news_cache, "read_all", lambda: [])
     monkeypatch.setattr(news_push, "resolve_interest_categories",
                         MagicMock(side_effect=RuntimeError("402 Insufficient Balance")))
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
     assert users_db.recent_outcomes_for(26) == [users_db.PUSH_MODEL_ERROR]
@@ -1688,7 +1803,7 @@ def test_model_error_after_generation_does_advance_last_push_at(monkeypatch, iso
                         MagicMock(return_value='<b>Digest</b> <a href="https://example.com/new">s</a>'))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
                         MagicMock(side_effect=RuntimeError("rate limited")))
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
     assert users_db.recent_outcomes_for(27) == [users_db.PUSH_MODEL_ERROR]
@@ -1723,7 +1838,7 @@ def test_push_tick_emits_a_heartbeat_even_when_nobody_is_due(monkeypatch, isolat
     beats = []
     monkeypatch.setattr(news_push, "_emit_heartbeat", lambda n: beats.append(n))
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     assert beats == [1]
 
@@ -1736,7 +1851,7 @@ def test_push_tick_heartbeat_carries_the_subscriber_count(monkeypatch, isolated_
     beats = []
     monkeypatch.setattr(news_push, "_emit_heartbeat", lambda n: beats.append(n))
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock()))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock()))
 
     assert beats == [2]
 
@@ -1778,7 +1893,7 @@ def test_a_failure_after_a_successful_send_still_retires_what_was_delivered(
     monkeypatch.setattr(users_db, "record_push_outcome",
                         MagicMock(side_effect=[RuntimeError("database is locked"), None]))
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     record_push.assert_called_once_with(41, ["https://example.com/new"], now)
 
@@ -1797,7 +1912,7 @@ def test_a_failure_before_the_send_retires_nothing(monkeypatch, isolated_subscri
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
                         MagicMock(side_effect=RuntimeError("rate limited")))
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     record_push.assert_called_once_with(42, [], now)
 
@@ -1919,12 +2034,12 @@ def _per_topic_cycle(monkeypatch, chat_id, articles_by_topic, subscriber=None,
     # Echoes every candidate's link back, so links_actually_sent sees them.
     monkeypatch.setattr(
         news_push, "write_push_digest",
-        lambda model, arts, topic=None, language=None: "<b>D</b> " + " ".join(
+        lambda model, arts, topic=None, language=None, retry_reason=None: "<b>D</b> " + " ".join(
             f'<a href="{a["link"]}">s</a>' for a in arts))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
                         MagicMock(return_value=on_topic))
     send = send or AsyncMock()
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=send, now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=send, now=now))
     return send
 
 
@@ -2075,13 +2190,13 @@ def test_a_partial_block_is_visible_in_the_delivered_detail(
     monkeypatch.setattr(news_push, "select_candidate_articles", fake_select)
     monkeypatch.setattr(
         news_push, "write_push_digest",
-        lambda model, arts, topic=None, language=None: "<b>D</b> " + " ".join(
+        lambda model, arts, topic=None, language=None, retry_reason=None: "<b>D</b> " + " ".join(
             f'<a href="{a["link"]}">s</a>' for a in arts))
     # AI's digest passes the guardrail, Robotics' is blocked.
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic",
                         lambda model, digest: "https://e.com/ai" in digest)
 
-    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+    asyncio.run(news_push.run_push_cycle(model="fake-model", admin_bot_token="fake-admin-token", admin_chat_id=999, send=AsyncMock(), now=now))
 
     assert users_db.recent_outcomes_for(49) == [users_db.PUSH_DELIVERED]
     record_push.assert_called_once()  # not one call per interest

@@ -52,13 +52,16 @@ from datetime import datetime, timedelta, timezone
 import agent
 import guardrails
 import healthcheck
+import message_archive
 import news_cache
 import news_classify
 import news_embed
 import news_keyness
 import news_sources
+import telegram_html
 import users_db
 from opentelemetry import trace
+from telegram import Bot
 
 # How many messages one push cycle may send to one subscriber -- one per
 # interest, so this is also "how many interests get served this cycle".
@@ -102,6 +105,18 @@ INCLUDE_NOVELTY_EXTRA = True
 # so -5.0 is comfortably permissive without also passing near-zero noise.
 # Adjust against real push data once some has accumulated.
 NOVELTY_KEYNESS_THRESHOLD = -5.0
+
+# How many times write_push_digest gets re-invoked (with the previous
+# failure's reason fed back in, see that function's retry_reason param)
+# before giving up on getting valid Telegram HTML out of the model and
+# just sending what it produced -- send_push_digest's own BadRequest
+# fallback (bot.py) still strips it to plain text if Telegram also
+# rejects it. 3 is a first-cut: this is a rare failure mode (an unescaped
+# & in an article title is the one confirmed real-world cause so far, see
+# _report_html_validation_exhausted), so the cost of a couple of wasted
+# retries on the rare cycle that needs them is cheap relative to genuinely
+# broken formatting reaching a subscriber.
+MAX_HTML_ATTEMPTS = 3
 
 # _filter_by_relevance keeps at most this many of a topic's pool, ranked
 # by similarity to the topic's retrieval query -- not a fixed fraction
@@ -715,7 +730,7 @@ def _pick_novelty_extra(remainder: list[dict], categories: set[str] | list[str])
 
 
 def write_push_digest(model, articles: list[dict], topic: str | None = None,
-                      language: str | None = None) -> str:
+                      language: str | None = None, retry_reason: str | None = None) -> str:
     """A single direct model call (no tool loop -- see module docstring)
     that turns a stage-1-filtered candidate list into a Telegram HTML
     digest, applying stage-2 (content) filtering itself per the prompt
@@ -764,7 +779,13 @@ def write_push_digest(model, articles: list[dict], topic: str | None = None,
     filtering ahead of this call, using the topic string as a retrieval
     query) shipped 2026-08-25 as _filter_by_relevance -- see
     select_candidate_articles's own docstring and
-    docs/analysis/cluster-measurements.md."""
+    docs/analysis/cluster-measurements.md.
+
+    `retry_reason` is set by run_push_cycle's own retry loop (added
+    2026-08-28, see telegram_html.validate) when a PREVIOUS call's reply
+    failed Telegram HTML validation -- appended as the last instruction so
+    it's the most salient thing the model sees, telling it specifically
+    what broke rather than just "try again"."""
     listing = "\n".join(
         f"- {'[EXTRA] ' if a.get('is_novelty_extra') else ''}{a['title']} "
         f"({a.get('source')}, published {a.get('published') or 'date unknown'}) — {a.get('link')}"
@@ -818,6 +839,12 @@ def write_push_digest(model, articles: list[dict], topic: str | None = None,
             "is a specific script/variant (e.g. Traditional vs Simplified "
             "Chinese, Brazilian vs European Portuguese), use exactly that "
             "variant's script and spelling conventions throughout."
+        )
+    if retry_reason:
+        system_prompt += (
+            f"\n\nYour previous reply had invalid Telegram HTML: {retry_reason}. "
+            "Fix this specific problem and reply again, following the HTML "
+            "formatting rules above exactly."
         )
     response = model.invoke(
         [
@@ -1003,6 +1030,39 @@ def _record(chat_id: int, outcome: str, message: str, now: datetime,
             span.set_attribute("push.detail", detail)
 
 
+async def _report_html_validation_exhausted(chat_id: int, topic: str, reason: str, now: datetime,
+                                            admin_bot_token: str, admin_chat_id: int) -> None:
+    """Reports MAX_HTML_ATTEMPTS's exhaustion three ways -- the same
+    print+span shape _record establishes above, plus one thing _record
+    doesn't need: a direct admin alert. Unlike a push outcome (which
+    Logfire can query and page on once a rule is set up -- see
+    docs/plans/observability-platform-plan.md), a subscriber-visible
+    formatting failure is worth telling a human about immediately, not
+    only when someone happens to look. Not deduped/state-gated like
+    healthcheck.py's alerts: each occurrence is a distinct event (one
+    subscriber's one cycle), not an ongoing binary condition, so there is
+    no "already told you" state to check against.
+
+    Deliberately separate from _record/push_outcomes -- this isn't a
+    delivery outcome (the digest still gets sent, see run_push_cycle's
+    retry loop), it's a content-quality signal, and folding it into the
+    outcome enum would make every existing criterion 1-3 query
+    (incident-monitoring-plan.md) have to account for a case that isn't
+    about delivery at all."""
+    print(f"[news_push] chat_id={chat_id} topic={topic!r}: HTML validation failed after "
+          f"{MAX_HTML_ATTEMPTS} attempts: {reason}")
+    with _tracer.start_as_current_span("html_validation_exhausted") as span:
+        span.set_attribute("push.subscriber", users_db.external_id(chat_id))
+        span.set_attribute("topic", topic)
+        span.set_attribute("reason", reason)
+    text = (
+        f"⚠️ HTML validation failed {MAX_HTML_ATTEMPTS}x for a push digest "
+        f"(topic: {topic}), sending anyway (may arrive as stripped plain text). "
+        f"Reason: {reason}"
+    )
+    await Bot(token=admin_bot_token).send_message(chat_id=admin_chat_id, text=text)
+
+
 def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: datetime) -> bool:
     if last_push_at is None:
         return True
@@ -1010,11 +1070,12 @@ def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: d
     return elapsed_hours >= interval_hours
 
 
-async def run_push_cycle(model, send: "callable", now: datetime | None = None, embedder=None) -> None:
+async def run_push_cycle(model, send: "callable", admin_bot_token: str, admin_chat_id: int,
+                         now: datetime | None = None, embedder=None) -> None:
     """One scheduler tick: for every push-enabled, due subscriber with at
     least one interest, select candidate articles from the shared cache,
     and if there are any, write and send a digest. `send` is
-    `async def send(chat_id, html_text)` (bound to the real bot's
+    `async def send(chat_id, html_text, topic=None)` (bound to the real bot's
     send_message in production, faked in tests) -- kept generic so this
     module doesn't need a live Bot/Application to be tested. One
     subscriber's failure doesn't stop the others, same isolation pattern
@@ -1024,6 +1085,11 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
     including ticks where nobody was due -- not just when something
     actually sends. See _record for why both, and
     docs/plans/incident-monitoring-plan.md for what reads the rows.
+
+    `admin_bot_token`/`admin_chat_id` are threaded through only for
+    _report_html_validation_exhausted (added 2026-08-28) -- same values
+    bot.py's _ingest_job already passes to review_category_proposals, now
+    needed here too so the retry loop below can alert a human directly.
 
     `embedder=None` (the default) threads straight through to every
     select_candidate_articles call, which degrades near-duplicate
@@ -1063,6 +1129,10 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
     # Bounded here rather than on a timer of its own: this is the only job
     # that writes the table, so it is the only one that can grow it.
     users_db.prune_push_outcomes(now)
+    # Same reasoning, same cadence -- one maintenance pass per cycle
+    # rather than a glob+stat per message sent. See message_archive's
+    # own module docstring for why this exists at all.
+    message_archive.prune_message_archive(now)
     subscribers = users_db.list_push_enabled_subscribers()
     print(f"[news_push] tick at {now.isoformat()}: {len(subscribers)} push-enabled subscriber(s)")
     _emit_heartbeat(len(subscribers))
@@ -1142,8 +1212,31 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                 if not new_articles:
                     continue
 
-                digest = _model_call(write_push_digest, model, new_articles,
-                                     topic, subscriber["language"])
+                # Validated BEFORE send, not just reacted to at send time
+                # (bot.py's send_push_digest still has its own BadRequest
+                # fallback as a last-resort net) -- retries with the
+                # specific validation failure fed back to the model (see
+                # write_push_digest's retry_reason param), up to
+                # MAX_HTML_ATTEMPTS. Runs unconditionally: a legitimately
+                # empty "nothing relevant" reply has no tags to break, so
+                # telegram_html.validate("") is None and this loop exits
+                # on its first pass, same cost as before this existed.
+                reason = None
+                for _ in range(MAX_HTML_ATTEMPTS):
+                    digest = _model_call(write_push_digest, model, new_articles,
+                                         topic, subscriber["language"], retry_reason=reason)
+                    reason = telegram_html.validate(digest)
+                    if reason is None:
+                        break
+                else:
+                    # Exhausted MAX_HTML_ATTEMPTS with no valid reply --
+                    # send anyway (send_push_digest's own fallback strips
+                    # it to plain text if Telegram also rejects it) rather
+                    # than withholding the digest entirely; a human is
+                    # told directly since this is worth knowing about
+                    # promptly, not just discoverable in Logfire later.
+                    await _report_html_validation_exhausted(
+                        chat_id, topic, reason, now, admin_bot_token, admin_chat_id)
                 # Generated: the money is spent from here on, so the next
                 # attempt must be a full interval away even if the rest of
                 # this fails. See the module's `delivered` reasoning.
@@ -1183,7 +1276,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                     continue
 
                 try:
-                    await send(chat_id, digest)
+                    await send(chat_id, digest, topic=topic)
                 except Exception as exc:
                     # Delivery failed, not generation. Recorded as its own
                     # outcome so "we paid to write digests nobody can
