@@ -134,7 +134,7 @@ VM; the automated path is designed and covered below.
 ```mermaid
 flowchart TB
     DEV["Developer workstation"]
-    GH["GitHub<br/>source of truth<br/>CI: 611 tests per change"]
+    GH["GitHub<br/>source of truth<br/>CI: 679 tests per change"]
     BUILD["Local build server<br/>self-hosted runner<br/>builds image, deploys on commit"]
     TG["Telegram servers"]
     EXT["27 news sources"]
@@ -562,7 +562,7 @@ admin bot, which bounds cost-abuse exposure to a known set of people.
 
 ## C1. Test cases
 
-**611 tests, ~40 seconds, $0 API cost per run.**
+**679 tests, ~40 seconds, $0 API cost per run.**
 
 That's possible because the model is dependency-injected: production
 passes a real client, tests pass a scripted fake. No conditional
@@ -635,6 +635,20 @@ records its outcome per subscriber (sent / nothing new / blocked /
 errored), so timing questions are answerable directly rather than by
 inference.
 
+**Each outcome is reported three ways, from one call site, so they
+cannot disagree.** A `print` (the fast path above), a database row
+(`push_outcomes` — the floor: it needs no network, so it still answers
+"what happened" if telemetry export itself is broken), and an
+OpenTelemetry span. The span is the one of the three an alarm can
+actually see — Logfire's alert engine queries spans, not a row sitting
+on the VM's own disk — so an outcome recorded in the database but never
+emitted as a span would be invisible to every alert in §C5, permanently.
+The subscriber identifier on the span is an opaque, stable id
+(`users_db.external_id`), never the real Telegram chat id — hygiene
+rather than a privacy control at this project's current scale, but free
+to do now and expensive to retrofit once a backlog of spans already
+carries the raw one.
+
 Under Phoenix, trace retention was explicitly bounded at 30 days —
 self-hosted on the VM's own disk, so unbounded growth was a real,
 if slow-motion, outage risk. Logfire (§A1) is cloud-hosted, so that
@@ -648,13 +662,88 @@ Per principle P3, a failure nobody notices is indistinguishable from no
 failure — so the system reports its own problems rather than waiting to be
 asked.
 
-**Alerts go to the admin bot.** When something breaks that isn't
-user-visible — for example the telemetry pipeline becoming unreachable —
-the system sends a message to the admin Telegram bot, so a human is
-actually made aware at the time rather than discovering it later through
-a gap in the data. That reuses the same admin channel already built for
-access approvals, so alerting needed no new delivery mechanism, no email
-service, and no paging tool.
+**All alerts converge on the same admin Telegram bot** already built for
+access approvals (§B4), through two independent paths — one live in
+Logfire's own alert engine, one a direct send from the bot process
+itself — described below. Neither needed a new delivery mechanism, an
+email service, or a paging tool: the channel already existed for a
+different reason and alerting simply reuses it.
+
+### Three live alerts, evaluated by Logfire, delivered with no receiver of this project's own
+
+Each is a saved SQL query over Logfire's `records` table (the same store
+the spans in §C4 land in), evaluated on a fixed cadence, with the query's
+own time window written *inside* the SQL rather than left to the
+engine's separate `time_window` field — redundant on purpose, in the
+direction that fails safe. If the engine's own windowing ever turns out
+to mean something other than assumed, the query still works; omitting
+the inner window fails the other way, silently, by matching every row
+ever received and never once observing "zero."
+
+| Alert | Fires on | Window / cadence |
+|---|---|---|
+| `argus bot liveness` | no span reaches Logfire at all — a dead man's switch | 30 min / evaluated every 5 min |
+| `argus model errors` | any push cycle records a `model_error` outcome | 30 min / 5 min |
+| `argus delivery ratio` | delivered fewer than 80% of what was generated | 24 h / 15 min |
+
+All three use Logfire's `has_matches_changed` notification mode, which
+fires on a *transition* in either direction rather than on every
+evaluation that matches — onset and recovery are each exactly one
+message, so a condition that's been true for hours doesn't repeat itself
+into noise, and "it's fixed now" is reported just as reliably as "it
+broke."
+
+**Delivery needs no public endpoint of this project's own** — worth
+stating plainly, because the obvious design (host a receiver on the bot
+VM) is both expensive and circular. An endpoint on the bot VM would die
+with the bot VM, which is exactly the failure `argus bot liveness`
+exists to catch — so the one alarm most likely to fire during a real
+outage would lose its own delivery path at the moment it mattered.
+Instead, each alert's webhook channel POSTs directly at Telegram's own
+`sendMessage` endpoint: the chat id travels in the webhook URL's query
+string, and Telegram's own text field happens to be named the same
+thing (`text`) as the field in Logfire's `slack-legacy` webhook payload
+shape — no translation layer needed at all. The channel authenticates
+with a *dedicated, alert-only* bot token, deliberately not the admin or
+subscriber bot's — so a Logfire compromise can only ever send fake
+alerts, never act with either bot's real capability. The one real cost
+of skipping a receiver: Logfire's `slack-legacy` body is Slack markup,
+and Telegram renders it completely literally (`<url|text>`, `:emoji:`
+codes, code fences all show up as raw characters) — readable but
+permanently unpolished, a small, deliberate trade against standing up
+infrastructure that would undermine the alarm it exists to serve.
+
+### What `argus delivery ratio` is actually protecting against
+
+Generation is where the money goes; delivery is where the value is. A
+push cycle can succeed at every step that's easy to watch — the
+scheduler ticks, the model call returns, no exception is thrown — while
+the one thing that was supposed to happen (a subscriber receiving
+something) silently never does. `argus delivery ratio` is a *ratio*
+rather than a raw count specifically so it doesn't drift as the
+subscriber base grows: it was wrong immediately, not only once volume
+made it obvious. See Appendix B.1 for the real incident that forced
+this design and the two independent defects that had to be fixed
+together to close it, and `news_push.UNREACHABLE_STRIKES` for the
+code-level circuit breaker (three consecutive undeliverable cycles turns
+push off for that one subscriber) that now bounds how much any single
+broken chat can cost even before an alert fires.
+
+### A newer, parallel signal: content-quality alerts straight from the bot
+
+Not every alert goes through Logfire. A subscriber-visible formatting
+failure (added 2026-08-28: malformed Telegram HTML the model produced,
+caught by a non-LLM validator and retried with the specific failure fed
+back into the prompt, up to three times, before being sent anyway so a
+subscriber never gets *nothing*) reports the same three ways as a push
+outcome — print, span, and here also a **direct** Telegram message from
+the bot process itself, not a Logfire alert rule. No rule exists yet for
+this specific span (`html_validation_exhausted`); routing it through
+Logfire first would have meant either no alert at all until one was
+configured, or writing the code twice. The direct-send path costs
+nothing extra to keep even once a Logfire rule for the same span exists
+— an independent second way the same failure can surface is a feature
+worth having, not redundancy to prune.
 
 **The handling loop** is: *user-visible symptom or alert → gather evidence
 before theorizing → root cause → fix → close the hole that let it
@@ -903,6 +992,63 @@ accumulated in a buffer that never filled and so never flushed.
 step. **A logging fix isn't verified until you've confirmed the log lines
 arrive** — a lesson that generalizes to any instrument you rely on but
 haven't checked recently.
+
+### A leak that produced no error worth noticing, and the metric that would have caught it on day one
+
+The incident behind `argus delivery ratio` (§C5) — worth walking through
+because every "obvious" alarm would have stayed silent through the whole
+thing, which is exactly why the criterion that actually caught it looks
+the way it does.
+
+**Symptom.** The DeepSeek balance ran out after 8 days. Nothing had
+crashed; nothing looked wrong from inside the running service.
+
+**Why the obvious alarms would all have missed it:**
+
+| What an alarm might watch | Why it stayed quiet |
+|---|---|
+| Error rate | Every fetch, generation, and guardrail check *succeeded*. This was extra work, not failed work |
+| Liveness | The scheduler ticked correctly, on schedule, for all 8 days |
+| A spend spike | Arrived as a slow ramp — one or two abandoned test accounts per deploy — so a threshold set anywhere reasonable only fired near the very end |
+| The delivery error itself | Every leaked account *did* produce `chat_not_found` on send — but that error had been routine background noise since smoke testing began, so it read as expected, not as a signal |
+
+**Root cause, two independent defects, either alone would have left the
+leak open.** First: a send failure was handled *before* the point where
+`last_push_at` (the timestamp that gates when a subscriber is next due)
+advanced — so a chat that could never receive anything regenerated a
+**full digest on every 15-minute scheduler tick, forever**, not once per
+its nominal push interval. Three LLM calls per cycle × 96 ticks/day × 19
+affected accounts is on the order of 5,000 calls a day — the actual scale
+that empties a balance in 8 days, and roughly 24x worse than the
+original back-of-envelope estimate, which had assumed the nominal
+interval governed the retry rate. Second: nothing ever turned push off
+for a subscriber who was *structurally* unable to receive anything, no
+matter how many cycles in a row failed the same way.
+
+**Fix, two parts, both required.** (A) Any failure *after* generation
+now advances `last_push_at` regardless of what happened next — once a
+digest has been paid for, the next attempt is a full interval away,
+whatever went wrong with delivery. A failure *before* generation
+deliberately does not advance it — a transient provider blip shouldn't
+cost a subscriber their whole cycle, so the fix is asymmetric on
+purpose. (B) Three consecutive undeliverable cycles now turn push off
+for that one subscriber (`news_push.UNREACHABLE_STRIKES`) — chosen as
+three rather than one because disabling a real subscriber who's merely
+having a bad cycle is the more expensive mistake, and only
+`push_enabled` is cleared, so a user who blocks the bot and later
+unblocks it resumes without losing their interests or language
+preference.
+
+**Why `argus delivery ratio` specifically is the metric that generalizes
+from this.** It's a symptom (what a subscriber actually experiences),
+not a cause (which specific error fired) — the same distinction Google
+SRE practice draws, and the reason it's weighted as the most important
+of the three live criteria in §C5. During the incident it read as 3
+delivered out of 22 generated, every single cycle, from the first leaked
+account onward — wrong from day one, not just eventually. A cause-based
+alarm has to be re-derived for every new way delivery can fail; a
+symptom-based one catches all of them, including ones nobody has thought
+of yet.
 
 ## B.2 Known limitations
 
