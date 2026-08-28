@@ -812,7 +812,7 @@ def test_handle_message_excludes_history_older_than_max_age(isolated_subscribers
     assert sent_messages == [{"role": "user", "content": "new question"}]  # stale entry dropped
 
 
-def test_send_push_digest_normalizes_markdown_and_sends_html():
+def test_send_push_digest_normalizes_markdown_and_sends_html(isolated_subscribers_db):
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock()
 
@@ -825,7 +825,7 @@ def test_send_push_digest_normalizes_markdown_and_sends_html():
     assert kwargs["parse_mode"] is not None
 
 
-def test_send_push_digest_strips_report_preamble():
+def test_send_push_digest_strips_report_preamble(isolated_subscribers_db):
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock()
 
@@ -837,7 +837,7 @@ def test_send_push_digest_strips_report_preamble():
     assert kwargs["text"] == "📰 <b>Report</b>\n\nContent."
 
 
-def test_send_push_digest_falls_back_to_plain_text_on_bad_request(capsys):
+def test_send_push_digest_falls_back_to_plain_text_on_bad_request(isolated_subscribers_db, capsys):
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock(side_effect=[BadRequest("can't parse entities"), None])
 
