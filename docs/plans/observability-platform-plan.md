@@ -906,3 +906,63 @@ fixes, both worth remembering for the next Jira automation built here:
     procedure -- the token obtained 2026-08-28 is long expired (1h
     lifetime) by the time this is picked back up; get a fresh one.
 
+---
+
+# 2026-08-29: Jira relay finished and shipped -- the Slack-markup cost is gone
+
+Resumed exactly where 2026-08-28 paused. Both open questions from that
+section are now answered by forcing real transitions (not spec-guessing),
+per this document's own established method, using the temp test channel and
+a new controllable test alert (`argus jira relay probe`, query keyed on
+`service_name = 'argus-relay-probe'` -- see
+`local-infra/infrastructure.yaml`'s `jira_alert_relay.temp_test_alert`).
+
+**`raw-data` is a dead end, don't retry it.** Its payload's top-level `data`
+field is a JSON *array*. Jira's Incoming Webhook trigger reserves the `data`
+key for its own smart-value mechanism and requires it to be an *object* --
+the rule's JSON parser rejects the array before any rule logic runs
+("Cannot deserialize value of type LinkedHashMap<String,Object> from Array
+value"). This is a hard incompatibility between the two products, not
+something fixable from the Jira side.
+
+**`slack-blockkit` works.** No top-level key collision with Jira's reserved
+fields. Full shape recorded in `local-infra/infrastructure.yaml`'s
+`payload_shape_finding`; the one field worth relaying is
+`blocks[0].text.text` -- the alert's warning/recovery line, in Slack mrkdwn
+(`:shortcode:`, `*bold*`, `<url|label>`). Everything else in the payload
+(a `table` block of query result rows, and Logfire's fixed footer of
+timestamp/project-link/query-link/unsubscribe-link) is either alert-specific
+noise or the same boilerplate on every alert -- not worth relaying.
+
+**The final template**, and its one known limitation: swaps the two emoji
+shortcodes for real Unicode emoji and strips `*bold*` asterisks, using
+literal-string `.replace()` calls. Link syntax (`<url|label>`) is left
+unconverted -- Jira's `.replace()` turned out to be **literal-string-only,
+not regex**: a regex attempt (`.replace("\*","")`,
+`.replace("<(.*?)\|(.*?)>","$2: $1")`) silently no-opped rather than erroring
+or converting. Decided not worth chasing further -- the output
+(`⚠️ <url|alert label>`) is already readable, just with Slack's punctuation
+instead of a real hyperlink. Exact template string in
+`local-infra/infrastructure.yaml`'s `jira_alert_relay.action`.
+
+**All three production alerts are repointed and live**, closing the
+"None of the three live alerts have been repointed yet" gap from
+2026-08-28: `argus bot liveness`, `argus model errors`, and
+`argus delivery ratio` all now deliver through the Jira relay channel
+(`0c9f3fda-...`, renamed "Bot Alert (via Jira relay)"). The old
+`Bot Alert` channel (`ced9860e-...`, direct-to-Telegram, `slack-legacy`) is
+orphaned but deliberately not deleted -- it's the rollback path if the Jira
+relay proves unreliable in practice, since only forced test transitions
+have exercised it so far, not a real incident.
+
+**Still open, deferred as low-priority cleanup, not blocking anything:**
+- The probe alert (`fe1526ab-...`, `argus jira relay probe`) was deleted
+  2026-08-29, its discovery job done. Rebuild instructions (query/window/
+  channel) are in `local-infra/infrastructure.yaml`'s `jira_alert_relay.
+  temp_test_alert` if the relay needs debugging again later.
+- The three new alerts this document's earlier section flagged (`argus html
+  validation retry`, `argus html validation exhausted`, `argus ingest
+  liveness`, all part of `idempotent-sprouting-quail`'s Part 4) still don't
+  exist. They should attach directly to the now-production Jira relay
+  channel from the start, rather than the old `Bot Alert` channel.
+
