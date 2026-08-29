@@ -14,7 +14,7 @@ they're constructed, rather than hardcoded.
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
 | 3 | Telemetry service install + hook (real backend for normal runs) | Done — originally Arize Phoenix via Docker, then a second backend (Logfire) added alongside it 2026-08-21. **Superseded 2026-08-24: Phoenix retired, Logfire is now the sole live backend** (`docs/plans/observability-platform-plan.md`'s migration completed; `PHOENIX_ENABLED` remains in `agent.setup_telemetry()` as a dead/unused fail-open path, not because Phoenix is live anywhere — see `docs/current/infrastructure.md`). The row below this one (its own text, not yet updated at the time of the migration) still describes the two-backend-coexistence period as current; read it as history, not present tense. |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
-| 5 | Test cases (actual scenarios) | Done — 611 tests as of 2026-08-26 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
+| 5 | Test cases (actual scenarios) | Done — 681 tests as of 2026-08-29 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
@@ -254,11 +254,18 @@ pieces — deliberately not one**, since each catches a different half of
    same way. Answers a different question than either `telemetry_monitor.py`
    (is Phoenix reachable) or `check_telemetry.py` (are traces actually
    landing): are the periodic jobs themselves still alive, independent of
-   whether Phoenix is even in the picture. See its own module docstring
-   for the full design (why it's deliberately not a full incident-
-   management system — no severity levels, no escalation, just reusing
-   the one paging channel this project already has for a one-admin
-   deployment).
+   whether Phoenix is even in the picture.
+
+   **RETIRED 2026-08-29** — deleted, not just superseded. Diagnosing a
+   real ingest-staleness alert from it exposed its actual limitation
+   beyond the "service decides and pages directly" architectural
+   objection (`docs/system-overview.md` §C5): zero per-source
+   granularity, so a single source silently broken for days was
+   invisible to it. Replaced by `news_ingest._pull_source`'s
+   `ingest_source_pull` span (structured, per-source, queryable from
+   Logfire) plus four planned Logfire alerts -- see
+   `docs/plans/observability-platform-plan.md`'s 2026-08-29 "healthcheck.py
+   retired" section for the full design and what's still open.
 
 ### Raw source fetches — a gap auto-instrumentation can't close, added 2026-08-16
 
@@ -431,6 +438,19 @@ behaviour rather than more of an existing one:
   calls `setup_telemetry()` implicitly or at import time, so a real
   `LOGFIRE_API_KEY` sitting in the dev environment cannot cause a real
   export during any test or CI run.
+- **`tests/test_news_ingest.py`'s `_pull_source` tests (2026-08-29,
+  `healthcheck.py` retirement)** — six new tests covering all four
+  `pull.outcome` values (`not_due`, `budget_exhausted`, `success`,
+  `failed`) plus `pull.expected_interval_hours` varying by source
+  (default 4h vs. `perigon`'s 8h vs. `newsapi`'s 24h). The
+  multi-section case (`test_pull_source_success_when_only_some_sections_of_a_multi_section_source_fail`)
+  forces a real mixed pass/fail across `arxiv`'s 6 sections (one raises,
+  the rest return normally) rather than asserting the trivial
+  all-pass/all-fail cases only, confirming `pull.outcome` is `success`
+  whenever at least one attempted section succeeds, not `failed` on a
+  single transient section error. See `docs/plans/observability-
+  platform-plan.md`'s 2026-08-29 "healthcheck.py retired" section for
+  the design.
 
 **Not covered yet** (candidates for later):
 - ~~`agent._logfire_processor`'s actual body, and the Logfire-only wiring

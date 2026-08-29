@@ -960,9 +960,106 @@ have exercised it so far, not a real incident.
   2026-08-29, its discovery job done. Rebuild instructions (query/window/
   channel) are in `local-infra/infrastructure.yaml`'s `jira_alert_relay.
   temp_test_alert` if the relay needs debugging again later.
-- The three new alerts this document's earlier section flagged (`argus html
-  validation retry`, `argus html validation exhausted`, `argus ingest
-  liveness`, all part of `idempotent-sprouting-quail`'s Part 4) still don't
-  exist. They should attach directly to the now-production Jira relay
-  channel from the start, rather than the old `Bot Alert` channel.
+- Six alerts are still planned but don't exist yet (superseded/expanded
+  from this section's original three, see the 2026-08-29 "healthcheck.py
+  retired" section below for why the ingest count grew from one to
+  four): `argus html validation retry`, `argus html validation
+  exhausted`, `argus ingest liveness`, `argus ingest pull stalled`,
+  `argus ingest pull failures`, `argus ingest source stale`. All six
+  should attach directly to the now-production Jira relay channel from
+  the start, rather than the old `Bot Alert` channel.
+
+---
+
+# 2026-08-29, later same day: healthcheck.py retired, replaced by a
+# per-source ingest span
+
+Separate task, same session, same architecture ("service emits facts,
+Logfire decides incidents") applied to the one remaining holdout:
+`healthcheck.py`. It polled two synthetic DB timestamps
+(`__ingest_tick__`/`__push_tick__`) once an hour from inside the bot
+process and sent an admin Telegram message directly on a change --
+exactly the service-decides-and-pages anti-pattern already fixed for the
+HTML-validation retry loop earlier this session (PR #50). Diagnosing a
+real ingest-staleness alert from it this session (see
+`local-infra/infrastructure.yaml`'s ingest-hang memory, and this
+project's own auto-memory system) exposed why it wasn't good enough
+beyond the architectural objection: zero per-source granularity, so a
+single source silently broken for days (every other source still
+succeeding) was invisible to it, and confirming "is the job actually
+dead or just slow" needed manual `docker exec`/`/proc` process
+inspection instead of a query -- the print-only per-source outcomes it
+depended on were never structured data.
+
+**User's explicit direction, differing from how the HTML-validation
+rework shipped:** delete `healthcheck.py` now, don't keep it running as
+a transition safety net until the replacement alerts exist. A real gap
+in ingest/push liveness alerting is accepted deliberately until the
+alerts below are built -- see `docs/system-overview.md` §C5's "The
+service never decides" section for the user-facing version of this
+reasoning.
+
+**Replacement**: `news_ingest._pull_source` (extracted from
+`run_ingestion_cycle`'s per-source loop body) wraps the whole per-source
+attempt -- including the not-due/budget-capped skip cases -- in one
+`ingest_source_pull` span per source per cycle:
+- `pull.source`, `pull.expected_interval_hours` (that source's own due
+  interval -- see below for why this matters), `pull.outcome` (one of
+  `not_due` / `budget_exhausted` / `success` / `failed`),
+  `pull.sections_attempted`/`pull.sections_failed` for sources with
+  several sections (arxiv, hackernews, newsapi, gnews).
+- `success` requires only ONE attempted section to succeed, not all --
+  a source with several sections shouldn't read as `failed` over one
+  transient error. The existing per-section `fetch_source` span
+  (`news_sources.traced_fetch`, unchanged) nests inside this one
+  automatically via OTel's own context propagation, so section-level
+  detail (including its own `error` attribute) isn't lost.
+- Every source gets a span every cycle, including skips -- this is what
+  makes "the cycle silently stopped partway through, never reaching
+  source N" distinguishable in Logfire from "source N correctly wasn't
+  due yet," which the old print-only output never made queryable.
+
+**A real design catch during planning**, worth recording since it would
+have made the most specific of the four planned alerts useless: the
+obvious spec for a per-source staleness alert ("no successful pull for
+this source in 1h") doesn't match reality -- 24 of the 27 registered
+sources pull every 4 hours by default (`news_ingest.
+DEFAULT_INTERVAL_HOURS = 4`), `perigon` every 8h, `newsapi` every 24h;
+**none pull hourly**, so a flat 1h-per-source threshold would leave
+nearly every source "alerting" nearly all the time. Fixed by carrying
+each source's own configured interval as a span attribute
+(`pull.expected_interval_hours`) so the alert query compares elapsed
+time against a multiple of *that source's own* interval, not a flat
+number -- self-maintaining as sources are added or their intervals
+change, no query edit needed later.
+
+**Four alerts planned** (not yet created -- see the six-alert list
+above, this is four of the six):
+
+| Alert (proposed name) | Fires on |
+|---|---|
+| `argus ingest liveness` | no `ingest_heartbeat` span in 30 min -- dead man's switch, mirrors `argus bot liveness` |
+| `argus ingest pull stalled` | no `ingest_source_pull` span with `pull.outcome='success'` anywhere, in 1h -- the whole pipeline isn't succeeding, not just one source |
+| `argus ingest pull failures` | more than 5 `ingest_source_pull` spans with `pull.outcome='failed'` in 30 min |
+| `argus ingest source stale` | per source: last `ingest_source_pull` with `pull.outcome='success'` older than `N × pull.expected_interval_hours` (start N=3, a "generous multiple" matching `healthcheck.py`'s own original `STALE_THRESHOLD_HOURS` reasoning -- tune after watching real data, a SQL constant not a code change) |
+
+**Code shipped**: `news_ingest.py` (`_pull_source` extraction + span),
+`news_push.py`/`bot.py`/`combined_bot.py`/`users_db.py` (drop
+`healthcheck.py` wiring -- found and fixed a dangling call site in
+`combined_bot.py`'s `build_info_app` that an earlier exploration pass
+missed), `healthcheck.py`/`tests/test_healthcheck.py` deleted,
+`tests/test_news_ingest.py` gained 6 new tests covering all four
+outcomes plus the interval attribute. `pytest -q`: 681 passed. Full
+plan: `idempotent-sprouting-quail` (the same plan-file name as the
+earlier PR #50 work this session -- reused/overwritten rather than a
+new file, since it's a direct continuation).
+
+**Still open**: the four alerts above (plus the two html-validation ones
+from earlier) aren't created yet -- this is the deliberate gap the user
+authorized. Create them against the live Jira relay channel per this
+document's own alert-management procedure, force-verify at least the
+count-based and per-source ones before trusting them (same "force a
+transition, read the real result" discipline used throughout this
+session), then update `local-infra/infrastructure.yaml`'s `logfire.
+alerts` list once live.
 

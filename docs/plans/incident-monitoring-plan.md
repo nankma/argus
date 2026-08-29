@@ -7,6 +7,20 @@ other `docs/*-plan.md` files. Raised 2026-08-16 while defining the
 criteria (what condition should actually raise an alert), separate from
 whoever eventually builds the monitor that watches for them.
 
+**`healthcheck.py`, described below as one of the two existing narrower
+pieces, was RETIRED 2026-08-29** — deleted, not kept. Every reference to
+it below is historical context for why this doc's questions were framed
+the way they were, not a description of current state. See
+`docs/system-overview.md` §C5 and `docs/plans/observability-platform-plan.md`'s
+2026-08-29 "healthcheck.py retired" section for what actually exists
+now: `news_ingest._pull_source`'s `ingest_source_pull` span (structured,
+per-source, queryable from Logfire) plus four planned Logfire alerts,
+replacing the "exactly two conditions" this doc describes below. Left
+unedited otherwise — bringing the rest of this doc's reasoning
+up to date against the new mechanism is `qa-engineer`'s own ongoing
+responsibility (this doc is explicitly theirs to maintain), not done as
+part of the code change that retired `healthcheck.py`.
+
 ## The gap this is meant to close
 
 This project has two existing, narrower pieces that already do part of

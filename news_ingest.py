@@ -77,7 +77,6 @@ import time
 import unicodedata
 from datetime import datetime, timezone
 
-import healthcheck
 import news_cache
 import news_classify
 import news_embed
@@ -223,8 +222,9 @@ def _cutoff_key(source_key: str, section: str | None) -> str:
     cadence difference. Sections are fixed and disjoint, so a persistent
     mismatch is now structural rather than occasional.
 
-    Composite keys are already how this table is used -- healthcheck stores
-    __ingest_tick__ and __push_tick__ in the same column."""
+    The same table (`source_pull_state`) already stores plain source keys
+    in its `source` column -- a composite `source:section` string just
+    extends what that column holds, no separate schema needed."""
     return source_key if section is None else f"{source_key}:{section}"
 
 
@@ -298,15 +298,12 @@ def _report_category_proposals(now: datetime) -> None:
 
 def _emit_heartbeat() -> None:
     """One span per cycle, whether or not anything new was found -- same
-    shape as news_push._emit_heartbeat, and the piece this module was
-    missing entirely until 2026-08-28: healthcheck.py's own liveness
-    check (users_db.set_source_last_pulled_at, right above) answers "is
-    this job ticking" from inside the process, but nothing reached
-    Logfire, so no alert query could ever see an ingest-specific hang --
-    only news_push's own heartbeat kept the generic dead-man's-switch
-    query satisfied even while ingest itself was stuck (confirmed
-    2026-08-25/27: that real incident was caught by healthcheck.py, not
-    by Logfire, because there was nothing ingest-specific to query).
+    shape as news_push._emit_heartbeat. Answers "is this job ticking at
+    all" from Logfire's side, independent of whether any individual
+    source happened to be due this cycle (see _pull_source's own
+    ingest_source_pull span for that finer-grained question) -- a Logfire
+    alert on this span's absence replaced healthcheck.py's in-process
+    polling (2026-08-25/29, see docs/plans/observability-platform-plan.md).
 
     Called unconditionally at the very top of run_ingestion_cycle,
     deliberately BEFORE the `if not fetched: return` further down --
@@ -320,63 +317,48 @@ def _emit_heartbeat() -> None:
         span.set_attribute("heartbeat.job", "ingest_tick")
 
 
-def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> None:
-    """One scheduler tick. Every outcome is printed -- same reasoning as
-    news_push.py's run_push_cycle: a silent per-source/per-cycle failure
-    was a real incident there (docs/reference/observability-and-debugging.md),
-    worth not repeating here.
+def _pull_source(
+    source_key: str, fetch, now: datetime, existing_links: set[str],
+) -> tuple[list[tuple[str, dict]], int, int]:
+    """Pulls one source for one cycle, wrapped in a single `ingest_source_pull`
+    span covering the whole attempt -- including the not-due/budget-capped
+    skip cases, so every source gets exactly one span every cycle whether
+    or not it was actually fetched. That's what makes "the cycle silently
+    stopped partway through, never reaching source N" distinguishable in
+    Logfire from "source N correctly wasn't due yet" -- the print-only
+    output this replaces never made that distinction queryable.
 
-    `embedder=None` (the default, and what every existing test and
-    call site gets without changes) means every article is cached with
-    embedding=None -- see news_embed's module docstring on why a missing
-    embedder must degrade the pipeline, never break it. Pass one built
-    by news_embed.build_embedder() to actually populate it."""
-    now = now or datetime.now(timezone.utc)
-    # Recorded unconditionally, before any per-source due-check -- this is
-    # what healthcheck.py's liveness check reads to answer "is this job
-    # still ticking at all", decoupled from whether any individual source
-    # happened to be due this tick (every source can legitimately be
-    # "not due yet" for hours at a time; that's not the same as the job
-    # itself having stopped running).
-    users_db.set_source_last_pulled_at(healthcheck.INGEST_TICK_KEY, now)
-    _emit_heartbeat()
+    A source can have several sections (arxiv, hackernews, newsapi,
+    gnews); the existing per-section `fetch_source` span
+    (news_sources.traced_fetch) nests inside this one automatically via
+    OTel's own context propagation, so section-level detail (including
+    its own `error` attribute) isn't lost, just not promoted to this
+    span's source-level `pull.outcome` -- `failed` only when EVERY
+    attempted section errored, `success` if at least one didn't (a
+    source that's basically alive shouldn't read as failed over one
+    transient section error).
 
-    deleted = news_cache.cleanup_expired(now)
-    print(f"[news_ingest] tick at {now.isoformat()}: cleaned up {deleted} expired cache entr{'y' if deleted == 1 else 'ies'}")
-    # Sightings age out on the same tick as the cache, so the threshold
-    # question stays "how often recently" rather than "how often ever" --
-    # see users_db.CATEGORY_SIGHTING_RETENTION_DAYS.
-    users_db.prune_category_sightings(now)
-    # Reported here, next to the prune, rather than after classification:
-    # both are about accumulated evidence and neither depends on whether
-    # this cycle fetched anything. Placing it after the `if not fetched`
-    # return meant a quiet cycle pruned the evidence but never showed it.
-    _report_category_proposals(now)
+    Returns (fetched, duplicates_skipped, non_latin_skipped) for the
+    caller to fold into its own cycle-wide totals -- `existing_links` is
+    mutated in place (same set the caller keeps checking against for
+    later sources this same cycle)."""
+    with _tracer.start_as_current_span("ingest_source_pull") as pull_span:
+        pull_span.set_attribute("pull.source", source_key)
+        pull_span.set_attribute("pull.expected_interval_hours", _interval_hours(source_key))
 
-    fetched: list[tuple[str, dict]] = []
-    # Loaded once per cycle (after cleanup_expired, so already-expired
-    # links are gone and eligible to be re-added) -- skips re-classifying
-    # a link this cycle already has a live cache entry for. Matters most
-    # for RSS-class sources now that their cap is 200, not 5 (see module
-    # docstring): most of a 200-item RSS pull is typically unchanged from
-    # last cycle, and without this check every one of them would cost a
-    # real, paid DeepSeek classification call every cycle for no reason.
-    existing_links = {a["link"] for a in news_cache.read_all() if a.get("link")}
-    total_duplicates_skipped = 0
-    non_latin_skipped = 0
-
-    for source_key, fetch in news_sources.enabled_sources():
         last_pulled_at = users_db.get_source_last_pulled_at(source_key)
         if not _is_source_due(source_key, last_pulled_at, now):
+            pull_span.set_attribute("pull.outcome", "not_due")
             print(f"[news_ingest] {source_key}: not due yet")
-            continue
+            return [], 0, 0
 
         daily_cap = _DAILY_CAPS.get(source_key)
         if daily_cap is not None and not users_db.try_consume_api_budget(
             source_key, daily_cap, now.date().isoformat()
         ):
+            pull_span.set_attribute("pull.outcome", "budget_exhausted")
             print(f"[news_ingest] {source_key}: daily budget of {daily_cap} reached, skipping")
-            continue
+            return [], 0, 0
 
         time_filterable = _SOURCE_CLASS.get(source_key) in _TIME_FILTERABLE_CLASSES
         max_results = MAX_RESULTS_PER_SOURCE_SINCE_LAST_PULL if time_filterable else MAX_RESULTS_PER_SOURCE_RSS
@@ -389,6 +371,10 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
         source_articles = 0
         source_new = 0
         source_non_latin = 0
+        sections_failed = 0
+        fetched: list[tuple[str, dict]] = []
+        duplicates_skipped = 0
+        non_latin_skipped = 0
         for i, section in enumerate(sections):
             # Read per section, not once for the source -- see _cutoff_key.
             last_article_dt = users_db.get_source_last_article_dt(
@@ -426,6 +412,7 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
             except Exception as exc:
                 print(f"[news_ingest] {source_key}: fetch(section={section!r}) "
                       f"failed with {exc!r}")
+                sections_failed += 1
                 continue
             if time_filterable and last_article_dt is not None:
                 # The actually-authoritative "new" check -- applies
@@ -444,7 +431,7 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
                 if not link:
                     continue
                 if link in existing_links:
-                    total_duplicates_skipped += 1
+                    duplicates_skipped += 1
                     continue
                 # Checked on the title, not the summary: a summary can
                 # quote a foreign-language statement inside an otherwise
@@ -472,6 +459,11 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
         # last_pulled_at stays per SOURCE: the pull interval and the daily
         # budget are properties of the source, not of one of its sections.
         users_db.set_source_last_pulled_at(source_key, now)
+        pull_span.set_attribute("pull.sections_attempted", len(sections))
+        pull_span.set_attribute("pull.sections_failed", sections_failed)
+        pull_span.set_attribute(
+            "pull.outcome",
+            "failed" if sections and sections_failed == len(sections) else "success")
         print(
             f"[news_ingest] {source_key}: fetched {source_articles} article(s) across "
             f"{len(sections)} section{'' if len(sections) == 1 else 's'} -- "
@@ -479,6 +471,53 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
             f"{source_articles - source_new - source_non_latin} already cached, "
             f"{source_non_latin} dropped as non-Latin"
         )
+        return fetched, duplicates_skipped, non_latin_skipped
+
+
+def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> None:
+    """One scheduler tick. Every outcome is printed -- same reasoning as
+    news_push.py's run_push_cycle: a silent per-source/per-cycle failure
+    was a real incident there (docs/reference/observability-and-debugging.md),
+    worth not repeating here.
+
+    `embedder=None` (the default, and what every existing test and
+    call site gets without changes) means every article is cached with
+    embedding=None -- see news_embed's module docstring on why a missing
+    embedder must degrade the pipeline, never break it. Pass one built
+    by news_embed.build_embedder() to actually populate it."""
+    now = now or datetime.now(timezone.utc)
+    _emit_heartbeat()
+
+    deleted = news_cache.cleanup_expired(now)
+    print(f"[news_ingest] tick at {now.isoformat()}: cleaned up {deleted} expired cache entr{'y' if deleted == 1 else 'ies'}")
+    # Sightings age out on the same tick as the cache, so the threshold
+    # question stays "how often recently" rather than "how often ever" --
+    # see users_db.CATEGORY_SIGHTING_RETENTION_DAYS.
+    users_db.prune_category_sightings(now)
+    # Reported here, next to the prune, rather than after classification:
+    # both are about accumulated evidence and neither depends on whether
+    # this cycle fetched anything. Placing it after the `if not fetched`
+    # return meant a quiet cycle pruned the evidence but never showed it.
+    _report_category_proposals(now)
+
+    fetched: list[tuple[str, dict]] = []
+    # Loaded once per cycle (after cleanup_expired, so already-expired
+    # links are gone and eligible to be re-added) -- skips re-classifying
+    # a link this cycle already has a live cache entry for. Matters most
+    # for RSS-class sources now that their cap is 200, not 5 (see module
+    # docstring): most of a 200-item RSS pull is typically unchanged from
+    # last cycle, and without this check every one of them would cost a
+    # real, paid DeepSeek classification call every cycle for no reason.
+    existing_links = {a["link"] for a in news_cache.read_all() if a.get("link")}
+    total_duplicates_skipped = 0
+    non_latin_skipped = 0
+
+    for source_key, fetch in news_sources.enabled_sources():
+        fetched_here, dup, non_latin = _pull_source(
+            source_key, fetch, now, existing_links)
+        fetched.extend(fetched_here)
+        total_duplicates_skipped += dup
+        non_latin_skipped += non_latin
 
     if non_latin_skipped:
         print(f"[news_ingest] dropped {non_latin_skipped} non-Latin-script "
