@@ -857,11 +857,22 @@ fixes, both worth remembering for the next Jira automation built here:
   the new URL -- not decided yet, and needs the management API's
   hour-lived OAuth device-flow token (see "The management API" section
   above) to execute either way.
-- **The `html_validation_exhausted` span now ships** (separate task, code
-  landed same session -- `news_push._report_html_validation_exhausted`).
-  A Logfire alert querying for it (`span_name = 'html_validation_exhausted'`)
-  still doesn't exist -- add it through the same Jira channel once that's
-  repointed, rather than standing up a second relay.
+- **Reworked, same day, into a broader "service emits facts, Logfire
+  decides incidents" split** (see this file's own note below and
+  `news_push._emit_html_validation_attempt`, `news_ingest._emit_heartbeat`)
+  -- the original `html_validation_exhausted` span/function this bullet
+  described were renamed/replaced within hours of shipping, once it
+  became clear the retry loop deciding "3 failures = incident" and
+  sending Telegram itself was the same anti-pattern this whole document
+  argues against. The service now emits one `html_validation_attempt`
+  span per retry attempt (not one span only on exhaustion) and decides
+  nothing. Three Logfire alerts still need creating for this --
+  `argus html validation retry` (low severity), `argus html validation
+  exhausted` (high severity), `argus ingest liveness` (a new
+  `ingest_heartbeat` span this same rework added, since news_ingest.py
+  previously emitted no spans at all) -- none exist yet; add them
+  through the same Jira channel once repointed, rather than standing up
+  a second relay.
 - **The Jira webhook URL and secret are now recorded** in
   `local-infra/infrastructure.yaml`'s `jira_alert_relay`. The secret must
   be appended as the URL's final path segment (`.../<secret>`) when a

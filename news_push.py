@@ -61,7 +61,6 @@ import news_sources
 import telegram_html
 import users_db
 from opentelemetry import trace
-from telegram import Bot
 
 # How many messages one push cycle may send to one subscriber -- one per
 # interest, so this is also "how many interests get served this cycle".
@@ -113,7 +112,7 @@ NOVELTY_KEYNESS_THRESHOLD = -5.0
 # fallback (bot.py) still strips it to plain text if Telegram also
 # rejects it. 3 is a first-cut: this is a rare failure mode (an unescaped
 # & in an article title is the one confirmed real-world cause so far, see
-# _report_html_validation_exhausted), so the cost of a couple of wasted
+# _emit_html_validation_attempt), so the cost of a couple of wasted
 # retries on the rare cycle that needs them is cheap relative to genuinely
 # broken formatting reaching a subscriber.
 MAX_HTML_ATTEMPTS = 3
@@ -1030,37 +1029,38 @@ def _record(chat_id: int, outcome: str, message: str, now: datetime,
             span.set_attribute("push.detail", detail)
 
 
-async def _report_html_validation_exhausted(chat_id: int, topic: str, reason: str, now: datetime,
-                                            admin_bot_token: str, admin_chat_id: int) -> None:
-    """Reports MAX_HTML_ATTEMPTS's exhaustion three ways -- the same
-    print+span shape _record establishes above, plus one thing _record
-    doesn't need: a direct admin alert. Unlike a push outcome (which
-    Logfire can query and page on once a rule is set up -- see
-    docs/plans/observability-platform-plan.md), a subscriber-visible
-    formatting failure is worth telling a human about immediately, not
-    only when someone happens to look. Not deduped/state-gated like
-    healthcheck.py's alerts: each occurrence is a distinct event (one
-    subscriber's one cycle), not an ongoing binary condition, so there is
-    no "already told you" state to check against.
+def _emit_html_validation_attempt(chat_id: int, topic: str, attempt: int, reason: str | None) -> None:
+    """Reports one retry-loop attempt -- print + span, deliberately NOT a
+    third thing (no direct admin alert, unlike this function's
+    2026-08-28 predecessor `_report_html_validation_exhausted`).
+
+    2026-08-28, later the same day: reworked per an explicit architectural
+    split -- service / log / incident / notification are four separate
+    layers now, and deciding "this specific pattern of facts is an
+    incident, page someone" is Logfire's job, not this module's. This
+    function's only job is to report the fact (attempt N either passed or
+    failed, and why) -- every attempt, not just the last one, so Logfire
+    has the full sequence to query over. Whether 3 straight failures for
+    the same subscriber/topic is alert-worthy, and at what severity, is
+    a Logfire alert query (see docs/plans/observability-platform-plan.md);
+    whether/how a human gets told is the Jira relay documented there.
+    Nothing here decides either.
 
     Deliberately separate from _record/push_outcomes -- this isn't a
-    delivery outcome (the digest still gets sent, see run_push_cycle's
-    retry loop), it's a content-quality signal, and folding it into the
-    outcome enum would make every existing criterion 1-3 query
-    (incident-monitoring-plan.md) have to account for a case that isn't
-    about delivery at all."""
-    print(f"[news_push] chat_id={chat_id} topic={topic!r}: HTML validation failed after "
-          f"{MAX_HTML_ATTEMPTS} attempts: {reason}")
-    with _tracer.start_as_current_span("html_validation_exhausted") as span:
+    delivery outcome (the digest still gets sent regardless, see
+    run_push_cycle's retry loop), it's a content-quality signal, and
+    folding it into the outcome enum would make every existing criterion
+    1-3 query (incident-monitoring-plan.md) have to account for a case
+    that isn't about delivery at all."""
+    print(f"[news_push] chat_id={chat_id} topic={topic!r}: HTML validation attempt {attempt} "
+          f"{'passed' if reason is None else f'failed: {reason}'}")
+    with _tracer.start_as_current_span("html_validation_attempt") as span:
         span.set_attribute("push.subscriber", users_db.external_id(chat_id))
         span.set_attribute("topic", topic)
-        span.set_attribute("reason", reason)
-    text = (
-        f"⚠️ HTML validation failed {MAX_HTML_ATTEMPTS}x for a push digest "
-        f"(topic: {topic}), sending anyway (may arrive as stripped plain text). "
-        f"Reason: {reason}"
-    )
-    await Bot(token=admin_bot_token).send_message(chat_id=admin_chat_id, text=text)
+        span.set_attribute("attempt", attempt)
+        span.set_attribute("valid", reason is None)
+        if reason:
+            span.set_attribute("reason", reason)
 
 
 def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: datetime) -> bool:
@@ -1070,8 +1070,7 @@ def is_subscriber_due(last_push_at: datetime | None, interval_hours: int, now: d
     return elapsed_hours >= interval_hours
 
 
-async def run_push_cycle(model, send: "callable", admin_bot_token: str, admin_chat_id: int,
-                         now: datetime | None = None, embedder=None) -> None:
+async def run_push_cycle(model, send: "callable", now: datetime | None = None, embedder=None) -> None:
     """One scheduler tick: for every push-enabled, due subscriber with at
     least one interest, select candidate articles from the shared cache,
     and if there are any, write and send a digest. `send` is
@@ -1085,11 +1084,6 @@ async def run_push_cycle(model, send: "callable", admin_bot_token: str, admin_ch
     including ticks where nobody was due -- not just when something
     actually sends. See _record for why both, and
     docs/plans/incident-monitoring-plan.md for what reads the rows.
-
-    `admin_bot_token`/`admin_chat_id` are threaded through only for
-    _report_html_validation_exhausted (added 2026-08-28) -- same values
-    bot.py's _ingest_job already passes to review_category_proposals, now
-    needed here too so the retry loop below can alert a human directly.
 
     `embedder=None` (the default) threads straight through to every
     select_candidate_articles call, which degrades near-duplicate
@@ -1221,22 +1215,25 @@ async def run_push_cycle(model, send: "callable", admin_bot_token: str, admin_ch
                 # empty "nothing relevant" reply has no tags to break, so
                 # telegram_html.validate("") is None and this loop exits
                 # on its first pass, same cost as before this existed.
+                #
+                # Every attempt is reported (_emit_html_validation_attempt),
+                # not just a final exhausted one -- deciding whether 3
+                # straight failures is alert-worthy, and telling anyone
+                # about it, is Logfire's/Jira's job now, not this loop's.
+                # See that function's own docstring for the 2026-08-28
+                # architectural split this reflects. If every attempt
+                # fails, the digest is still sent below regardless
+                # (send_push_digest's own fallback strips it to plain
+                # text if Telegram also rejects it) -- this loop never
+                # withholds a digest just because its HTML wasn't clean.
                 reason = None
-                for _ in range(MAX_HTML_ATTEMPTS):
+                for attempt in range(1, MAX_HTML_ATTEMPTS + 1):
                     digest = _model_call(write_push_digest, model, new_articles,
                                          topic, subscriber["language"], retry_reason=reason)
                     reason = telegram_html.validate(digest)
+                    _emit_html_validation_attempt(chat_id, topic, attempt, reason)
                     if reason is None:
                         break
-                else:
-                    # Exhausted MAX_HTML_ATTEMPTS with no valid reply --
-                    # send anyway (send_push_digest's own fallback strips
-                    # it to plain text if Telegram also rejects it) rather
-                    # than withholding the digest entirely; a human is
-                    # told directly since this is worth knowing about
-                    # promptly, not just discoverable in Logfire later.
-                    await _report_html_validation_exhausted(
-                        chat_id, topic, reason, now, admin_bot_token, admin_chat_id)
                 # Generated: the money is spent from here on, so the next
                 # attempt must be a full interval away even if the rest of
                 # this fails. See the module's `delivered` reasoning.

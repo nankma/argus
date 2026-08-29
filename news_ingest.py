@@ -84,6 +84,12 @@ import news_embed
 import news_keyness
 import news_sources
 import users_db
+from opentelemetry import trace
+
+# A no-op when no tracer provider is configured -- which is every test and
+# CI run -- because OpenTelemetry's default is a no-op tracer. Same
+# reasoning as news_push._tracer.
+_tracer = trace.get_tracer("argus.news_ingest")
 
 # Raised from 5 to 200 on 2026-08-16 -- see module docstring. Still a real
 # cap, not "unlimited": RSS feeds are the publisher's own choice of how
@@ -290,6 +296,30 @@ def _report_category_proposals(now: datetime) -> None:
           f"(last {users_db.CATEGORY_SIGHTING_RETENTION_DAYS}d): {summary}")
 
 
+def _emit_heartbeat() -> None:
+    """One span per cycle, whether or not anything new was found -- same
+    shape as news_push._emit_heartbeat, and the piece this module was
+    missing entirely until 2026-08-28: healthcheck.py's own liveness
+    check (users_db.set_source_last_pulled_at, right above) answers "is
+    this job ticking" from inside the process, but nothing reached
+    Logfire, so no alert query could ever see an ingest-specific hang --
+    only news_push's own heartbeat kept the generic dead-man's-switch
+    query satisfied even while ingest itself was stuck (confirmed
+    2026-08-25/27: that real incident was caught by healthcheck.py, not
+    by Logfire, because there was nothing ingest-specific to query).
+
+    Called unconditionally at the very top of run_ingestion_cycle,
+    deliberately BEFORE the `if not fetched: return` further down --
+    news_push._emit_heartbeat's count attribute (subscriber count) is
+    known before that function's own loop runs; the equivalent count
+    here (new articles cached) is only known at the very end, past a
+    return this cycle might never reach. Carrying no count is the
+    correct tradeoff: a heartbeat that sometimes doesn't fire is a much
+    worse bug than one with a less informative payload."""
+    with _tracer.start_as_current_span("ingest_heartbeat") as span:
+        span.set_attribute("heartbeat.job", "ingest_tick")
+
+
 def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> None:
     """One scheduler tick. Every outcome is printed -- same reasoning as
     news_push.py's run_push_cycle: a silent per-source/per-cycle failure
@@ -309,6 +339,7 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
     # "not due yet" for hours at a time; that's not the same as the job
     # itself having stopped running).
     users_db.set_source_last_pulled_at(healthcheck.INGEST_TICK_KEY, now)
+    _emit_heartbeat()
 
     deleted = news_cache.cleanup_expired(now)
     print(f"[news_ingest] tick at {now.isoformat()}: cleaned up {deleted} expired cache entr{'y' if deleted == 1 else 'ies'}")
