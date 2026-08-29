@@ -265,7 +265,20 @@ ok "remote image matches local byte-for-byte"
 step "Restart"
 # The exact flags live in the gitignored infra file so that secrets and IPs
 # stay out of the repo, and so there is exactly one place to keep current.
-DOCKER_RUN=$(awk '/^    command: \|/{f=1;next} f&&/^    [a-z_]+:/{exit} f' "$INFRA" | sed 's/^      //')
+# Real incident, 2026-08-29: the boundary regex used to be `[a-z_]+:`,
+# which silently failed to match a `last_verified_<date>_<commit>:` key
+# (digits aren't in that class) -- an established renaming convention in
+# this same file, used every time a new deploy record is archived. Awk
+# just kept reading past the real end of the command block scalar into
+# the next several history entries, producing a docker-run.txt with
+# unrelated YAML prose appended after `myfirstagent-bot` and a `docker
+# run` that failed with a shell syntax error. `[A-Za-z0-9_]+:` matches
+# any plain YAML key regardless of what's in its name -- the actual
+# YAML rule this is approximating is "indentation drops back to the
+# command key's own level", which no *specific* character class can
+# reliably encode; broadening it removes the one dimension (which
+# characters appear in a sibling key's name) most likely to change.
+DOCKER_RUN=$(awk '/^    command: \|/{f=1;next} f&&/^    [A-Za-z0-9_]+:/{exit} f' "$INFRA" | sed 's/^      //')
 [ -n "$DOCKER_RUN" ] || die "could not read docker_run.command from $INFRA"
 echo "$DOCKER_RUN" > "$LOGDIR/docker-run.txt"
 
