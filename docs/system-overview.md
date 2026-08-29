@@ -684,11 +684,17 @@ failure — so the system reports its own problems rather than waiting to be
 asked.
 
 **All alerts converge on the same admin Telegram bot** already built for
-access approvals (§B4), through two independent paths — one live in
-Logfire's own alert engine, one a direct send from the bot process
-itself — described below. Neither needed a new delivery mechanism, an
-email service, or a paging tool: the channel already existed for a
-different reason and alerting simply reuses it.
+access approvals (§B4), through one path — Logfire's own alert engine,
+via a Jira Automation relay (below) — not a delivery mechanism this
+project stood up itself: the channel already existed for a different
+reason and alerting simply reuses it. This used to be two independent
+paths, the second a direct send from the bot process itself whenever the
+HTML-validation retry loop hit its third failure; that path was removed
+the same day it shipped, once it became clear "the service decides this
+is an incident and sends Telegram itself" was the exact anti-pattern this
+section argues against (see "The service never decides what's an
+incident" below) — every outcome now reaches the admin the same way, via
+a span Logfire evaluates, not via a second bespoke code path.
 
 ### Three live alerts, evaluated by Logfire, delivered with no receiver of this project's own
 
@@ -710,7 +716,13 @@ flowchart TB
         RT --> SQL
     end
 
-    SQL -->|"webhook,<br/>format slack-legacy<br/>(the 3 live alerts today)"| TG
+    SQL -->|"webhook,<br/>format slack-blockkit"| JIRA
+
+    subgraph JIRA["Jira Automation relay<br/><i>notification layer — builds the message<br/>and delivers it, decides nothing</i><br/><i>live since 2026-08-29 —<br/>all 3 alerts route through here</i>"]
+        WH["Incoming Webhook trigger"] --> SWR["Send web request action —<br/>builds a clean message instead<br/>of forwarding Slack markup"]
+    end
+
+    SWR --> TG
 
     subgraph TG["Telegram Bot API"]
         SM["sendMessage<br/>chat_id in the URL,<br/>text from the payload"]
@@ -718,22 +730,19 @@ flowchart TB
 
     TG --> ADMIN(["Admin's Telegram client"])
 
-    subgraph JIRA["Jira Automation relay<br/><i>notification layer — builds the message<br/>and delivers it, decides nothing</i><br/><i>built + verified 2026-08-28 —<br/>not wired to a live alert yet</i>"]
-        WH["Incoming Webhook trigger"] --> SWR["Send web request action —<br/>builds a clean message instead<br/>of forwarding Slack markup"]
-    end
-
-    LF -.->|"planned: repoint the<br/>webhook channel here"| JIRA
-    JIRA -.-> TG
+    SQL -.->|"orphaned rollback path —<br/>format slack-legacy,<br/>channel kept, unused"| TG
 ```
 
-Solid arrows are the live path today; dotted arrows are either a second,
-independent path (the HTML-validation alert, §C4/below, which never
-goes through Logfire at all) or work that's built and verified but not
-yet switched on (the Jira relay — see
-`docs/plans/observability-platform-plan.md`'s 2026-08-28 section for
-exactly what's confirmed working and what's still open). Drawing them
-differently is deliberate: this document doesn't claim something is
-live until it's carrying real traffic.
+Solid arrows are the live path today. The one dotted arrow is a
+deliberate rollback path, not a second live route: the direct-to-Telegram
+channel every alert used before 2026-08-29 is still configured in
+Logfire but no alert points at it any more — repointing the three
+alerts back to it (see `local-infra/infrastructure.yaml`'s `logfire.
+channel_id`) is the fallback if the Jira relay ever proves unreliable.
+See `docs/plans/observability-platform-plan.md`'s 2026-08-29 section for
+the full discovery process (why `raw-data` doesn't work, why
+`slack-blockkit` does) and what's still open (the three "planned" alerts
+in the diagram above don't exist yet).
 
 Each is a saved SQL query over Logfire's `records` table (the same store
 the spans in §C4 land in), evaluated on a fixed cadence, with the query's
@@ -763,19 +772,28 @@ VM) is both expensive and circular. An endpoint on the bot VM would die
 with the bot VM, which is exactly the failure `argus bot liveness`
 exists to catch — so the one alarm most likely to fire during a real
 outage would lose its own delivery path at the moment it mattered.
-Instead, each alert's webhook channel POSTs directly at Telegram's own
-`sendMessage` endpoint: the chat id travels in the webhook URL's query
-string, and Telegram's own text field happens to be named the same
-thing (`text`) as the field in Logfire's `slack-legacy` webhook payload
-shape — no translation layer needed at all. The channel authenticates
-with a *dedicated, alert-only* bot token, deliberately not the admin or
-subscriber bot's — so a Logfire compromise can only ever send fake
-alerts, never act with either bot's real capability. The one real cost
-of skipping a receiver: Logfire's `slack-legacy` body is Slack markup,
-and Telegram renders it completely literally (`<url|text>`, `:emoji:`
-codes, code fences all show up as raw characters) — readable but
-permanently unpolished, a small, deliberate trade against standing up
-infrastructure that would undermine the alarm it exists to serve.
+Logfire's webhook channel POSTs at a Jira Automation "Incoming webhook"
+trigger instead — Atlassian's public endpoint, not this project's VM, so
+the same "can't die with the bot VM" property still holds. Jira's own
+"Send web request" action then builds the actual Telegram message and
+POSTs it to Telegram's `sendMessage` endpoint. This is a deliberate
+upgrade over the channel's original design (straight Logfire →
+Telegram, no receiver at all, kept configured as the rollback path
+above): that design's one real cost was that Logfire's webhook body is
+Slack markup, and Telegram renders it completely literally (`<url|text>`,
+`:emoji:` codes, code fences all show up as raw characters) — readable
+but permanently unpolished. Routing through Jira first means the
+message Telegram actually receives is built cleanly (see
+`local-infra/infrastructure.yaml`'s `jira_alert_relay.action` for the
+exact template) instead of forwarded verbatim — at the cost of one more
+external hop between an incident firing and it reaching a human, which
+is why the rollback path is kept rather than deleted.
+**The *dedicated, alert-only* bot token property still holds through this
+new hop** — confirmed 2026-08-29: the Jira rule's "Send web request"
+action authenticates with the same dedicated alert-only bot the old
+direct channel used, not the admin or subscriber bot's, so a Logfire *or*
+Jira compromise can still only ever send fake alerts, never act with
+either bot's real capability.
 
 ### What `argus delivery ratio` is actually protecting against
 
