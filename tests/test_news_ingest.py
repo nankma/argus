@@ -200,6 +200,126 @@ def test_run_ingestion_cycle_one_source_failing_does_not_block_others(
     assert cached[0]["link"] == "https://example.com/ok"
 
 
+class _FakeSpan:
+    """Same FakeSpan pattern as news_ingest._emit_heartbeat's own test,
+    news_push's, and news_sources'. Kept as a class here (rather than
+    redefined per-test) since every ingest_source_pull test below needs
+    the identical recording behavior."""
+
+    def __init__(self):
+        self.attrs = {}
+
+    def set_attribute(self, k, v):
+        self.attrs[k] = v
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _patch_pull_span(monkeypatch):
+    span = _FakeSpan()
+    monkeypatch.setattr(news_ingest._tracer, "start_as_current_span",
+                        lambda name: span)
+    return span
+
+
+def test_pull_source_not_due_sets_outcome_and_skips_fetch(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    users_db.set_source_last_pulled_at("bbc_business", now - timedelta(hours=1))
+    span = _patch_pull_span(monkeypatch)
+    fetch = MagicMock()
+
+    fetched, dup, non_latin = news_ingest._pull_source("bbc_business", fetch, now, set())
+
+    fetch.assert_not_called()
+    assert fetched == [] and dup == 0 and non_latin == 0
+    assert span.attrs["pull.outcome"] == "not_due"
+    assert span.attrs["pull.source"] == "bbc_business"
+
+
+def test_pull_source_budget_exhausted_sets_outcome(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    for _ in range(3):
+        users_db.try_consume_api_budget("perigon", 3, now.date().isoformat())
+    span = _patch_pull_span(monkeypatch)
+    fetch = MagicMock()
+
+    news_ingest._pull_source("perigon", fetch, now, set())
+
+    fetch.assert_not_called()
+    assert span.attrs["pull.outcome"] == "budget_exhausted"
+
+
+def test_pull_source_success_outcome_when_the_fetch_succeeds(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    span = _patch_pull_span(monkeypatch)
+    fetch = lambda q, n, section=None: [_article("https://example.com/1")]
+
+    fetched, _, _ = news_ingest._pull_source("bbc_business", fetch, now, set())
+
+    assert len(fetched) == 1
+    assert span.attrs["pull.outcome"] == "success"
+    assert span.attrs["pull.sections_attempted"] == 1
+    assert span.attrs["pull.sections_failed"] == 0
+
+
+def test_pull_source_failed_outcome_when_every_section_raises(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    span = _patch_pull_span(monkeypatch)
+
+    def failing(q, n, section=None):
+        raise RuntimeError("boom")
+
+    fetched, _, _ = news_ingest._pull_source("bbc_business", failing, now, set())
+
+    assert fetched == []
+    assert span.attrs["pull.outcome"] == "failed"
+    assert span.attrs["pull.sections_attempted"] == 1
+    assert span.attrs["pull.sections_failed"] == 1
+
+
+def test_pull_source_success_when_only_some_sections_of_a_multi_section_source_fail(
+    monkeypatch, isolated_subscribers_db
+):
+    """Outcome is source-level, not section-level -- a source with several
+    sections (arxiv has 6) that's basically alive shouldn't read as
+    `failed` over one transient section error."""
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    span = _patch_pull_span(monkeypatch)
+    monkeypatch.setattr(news_ingest.time, "sleep", MagicMock())
+
+    def flaky(q, n, section=None):
+        if section == "cs.AI":
+            raise RuntimeError("boom")
+        return []
+
+    news_ingest._pull_source("arxiv", flaky, now, set())
+
+    n = len(news_sources.SOURCE_SECTIONS["arxiv"])
+    assert span.attrs["pull.sections_attempted"] == n
+    assert span.attrs["pull.sections_failed"] == 1
+    assert span.attrs["pull.outcome"] == "success"
+
+
+def test_pull_source_carries_the_source_own_expected_interval(monkeypatch, isolated_subscribers_db):
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+    span = _patch_pull_span(monkeypatch)
+    news_ingest._pull_source("bbc_business", lambda q, n, section=None: [], now, set())
+    assert span.attrs["pull.expected_interval_hours"] == news_ingest.DEFAULT_INTERVAL_HOURS
+
+    span = _patch_pull_span(monkeypatch)
+    news_ingest._pull_source("perigon", lambda q, n, section=None: [], now, set())
+    assert span.attrs["pull.expected_interval_hours"] == 8
+
+    span = _patch_pull_span(monkeypatch)
+    news_ingest._pull_source("newsapi", lambda q, n, section=None: [], now, set())
+    assert span.attrs["pull.expected_interval_hours"] == 24
+
+
 def test_run_ingestion_cycle_cleans_up_expired_entries_first(monkeypatch, isolated_subscribers_db, isolated_news_cache):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     news_cache.write_article("bbc_business", _article("https://example.com/old"), [], now - timedelta(hours=49))

@@ -35,7 +35,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from agent import ROUTE_B_CATEGORIES, build_agent, build_model, dispatch_settings, run_agent, setup_telemetry
 import admin_bot
 import guardrails
-import healthcheck
 import message_archive
 import news_classify
 import news_embed
@@ -59,13 +58,6 @@ PUSH_TICK_SECONDS = 900
 # longer for budget-capped sources) decide whether this tick actually does
 # anything. See docs/plans/local-news-cache-plan.md.
 INGEST_TICK_SECONDS = 900
-
-# Much coarser than the two ticks above -- healthcheck.py only needs to
-# notice a job that's stopped running entirely (see
-# healthcheck.STALE_THRESHOLD_HOURS = 1h), not respond within minutes, so
-# checking once an hour is plenty and keeps this from adding meaningful
-# load of its own.
-HEALTH_CHECK_TICK_SECONDS = 3600
 
 # Per-chat conversation history. In-memory only — lost on restart, same as
 # the CLI's messages list. Not persisted; fine for now, revisit if needed.
@@ -741,27 +733,6 @@ def register_ingest_job(app: Application) -> None:
     app.job_queue.run_repeating(_ingest_job, interval=INGEST_TICK_SECONDS, first=10)
 
 
-async def _health_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    await healthcheck.run_health_check(
-        context.bot_data["admin_bot_token"], context.bot_data["admin_chat_id"]
-    )
-
-
-def register_health_check_job(app: Application) -> None:
-    """Wires up the liveness alert for the two periodic jobs above -- see
-    healthcheck.py. `first=HEALTH_CHECK_TICK_SECONDS`, not 10s like the
-    other two jobs: running this immediately at startup would compare
-    against source_pull_state timestamps from BEFORE this process even
-    started (a fresh container legitimately hasn't ticked yet), which
-    would either false-positive on every restart or require extra
-    startup-grace-period logic. Waiting one full interval before the
-    first check sidesteps that -- by then _ingest_job/_push_job have
-    already run at least once (they start at first=10s)."""
-    app.job_queue.run_repeating(
-        _health_check_job, interval=HEALTH_CHECK_TICK_SECONDS, first=HEALTH_CHECK_TICK_SECONDS
-    )
-
-
 async def _start_test_api(app: Application) -> None:
     """post_init hook -- run_polling() manages its own event loop
     internally, so this is the standalone-bot.py equivalent of
@@ -813,7 +784,6 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
     register_push_job(app)
     register_ingest_job(app)
-    register_health_check_job(app)
 
     print("Telegram bot ready (polling). Ctrl+C to stop.")
     app.run_polling()

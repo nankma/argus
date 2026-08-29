@@ -284,8 +284,10 @@ def init_db() -> None:
         # recording.
         #
         # Deliberately NOT recorded: the "not due yet" branch. It fires for
-        # every subscriber on every tick, carries no signal healthcheck.py
-        # doesn't already cover, and would dominate the table.
+        # every subscriber on every tick and would dominate the table for
+        # no signal this local DB is the right place to carry -- job
+        # liveness is Logfire's job now (news_push._emit_heartbeat,
+        # news_ingest._pull_source's ingest_source_pull span).
         # One row per (subscriber, interest) that has ever been pushed.
         # Rotation state, and only that: which of a subscriber's interests
         # went out longest ago, so a cycle capped at
@@ -1094,13 +1096,7 @@ def get_source_last_pulled_at(source: str) -> datetime | None:
     """Drives news_ingest.py's per-source due-check, same shape as
     get_last_push_at/record_push for subscribers -- a source's own pull
     frequency (docs/plans/local-news-cache-plan.md) is independent of any one
-    subscriber's push schedule. Also reused (with the synthetic keys
-    healthcheck.INGEST_TICK_KEY/PUSH_TICK_KEY, not a real source name) to
-    track whether the ingest/push jobs are ticking AT ALL, independent of
-    any individual source/subscriber's own due-check -- see
-    healthcheck.py. Same table, same shape, no separate schema needed:
-    "when did X last run" is the same question whether X is a source
-    pull or a whole job's tick."""
+    subscriber's push schedule."""
     with _connect() as conn:
         row = conn.execute(
             "SELECT last_pulled_at FROM source_pull_state WHERE source = ?", (source,)
@@ -1156,27 +1152,6 @@ def set_source_last_article_dt(source: str, when: datetime) -> None:
             ON CONFLICT(source) DO UPDATE SET last_article_dt = excluded.last_article_dt
             """,
             (source, when.isoformat(), when.isoformat()),
-        )
-
-
-def get_health_state() -> list[str]:
-    """The last set of healthcheck.py problem descriptions that were
-    actually alerted on -- used to debounce repeat alerts for a problem
-    that's still ongoing (see healthcheck.run_health_check). Empty list
-    if never set (e.g. never unhealthy, or a fresh database)."""
-    with _connect() as conn:
-        row = conn.execute("SELECT value FROM health_state WHERE key = 'last_alerted_problems'").fetchone()
-    return json.loads(row[0]) if row else []
-
-
-def set_health_state(problems: list[str]) -> None:
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO health_state (key, value) VALUES ('last_alerted_problems', ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (json.dumps(problems),),
         )
 
 

@@ -704,15 +704,17 @@ flowchart TB
         REC["news_push._record<br/>one call site per outcome"]
         VAL["news_push._emit_html_validation_attempt<br/>one span per retry-loop attempt"]
         ING["news_ingest._emit_heartbeat<br/>one span per ingest cycle"]
+        PULL["news_ingest._pull_source<br/>one span per source per cycle —<br/>outcome: not_due / budget_exhausted /<br/>success / failed"]
     end
 
     REC -->|OTel span| LF
     VAL -->|OTel span| LF
     ING -->|OTel span| LF
+    PULL -->|OTel span| LF
 
     subgraph LF["Pydantic Logfire — cloud<br/><i>decides what's an incident,<br/>and its severity</i>"]
         RT[("records table")]
-        SQL{"saved SQL alerts —<br/>bot liveness / model errors /<br/>delivery ratio (live) +<br/>ingest liveness / html validation<br/>retry / exhausted (planned)<br/>has_matches_changed"}
+        SQL{"saved SQL alerts —<br/>bot liveness / model errors /<br/>delivery ratio (live) +<br/>ingest liveness / ingest pull<br/>stalled / ingest pull failures /<br/>ingest source stale / html<br/>validation retry / exhausted<br/>(planned) — has_matches_changed"}
         RT --> SQL
     end
 
@@ -741,8 +743,10 @@ alerts back to it (see `local-infra/infrastructure.yaml`'s `logfire.
 channel_id`) is the fallback if the Jira relay ever proves unreliable.
 See `docs/plans/observability-platform-plan.md`'s 2026-08-29 section for
 the full discovery process (why `raw-data` doesn't work, why
-`slack-blockkit` does) and what's still open (the three "planned" alerts
-in the diagram above don't exist yet).
+`slack-blockkit` does) and what's still open (the six "planned" alerts
+in the diagram above don't exist yet -- four ingest-specific, listed
+below, plus the two html-validation ones described in "The service never
+decides" further down).
 
 Each is a saved SQL query over Logfire's `records` table (the same store
 the spans in §C4 land in), evaluated on a fixed cadence, with the query's
@@ -759,12 +763,24 @@ ever received and never once observing "zero."
 | `argus model errors` | any push cycle records a `model_error` outcome | 30 min / 5 min |
 | `argus delivery ratio` | delivered fewer than 80% of what was generated | 24 h / 15 min |
 
-All three use Logfire's `has_matches_changed` notification mode, which
-fires on a *transition* in either direction rather than on every
-evaluation that matches — onset and recovery are each exactly one
+**Planned, not yet created** — replace what `healthcheck.py` used to check
+in-process (retired 2026-08-29, see "The service never decides" below)
+with the finer-grained signal `_pull_source`'s span now provides:
+
+| Alert (planned) | Fires on |
+|---|---|
+| `argus ingest liveness` | no `ingest_heartbeat` span in 30 min — dead man's switch, ingest-specific |
+| `argus ingest pull stalled` | no `ingest_source_pull` span with `pull.outcome=success` anywhere, in 1h — the whole pipeline isn't succeeding, not just one source |
+| `argus ingest pull failures` | more than 5 `ingest_source_pull` spans with `pull.outcome=failed` in 30 min |
+| `argus ingest source stale` | per source: last successful `ingest_source_pull` is older than a multiple of that source's own `pull.expected_interval_hours` — deliberately per-source and interval-aware, since 24 of 27 sources pull every 4h by default (not hourly), so a flat threshold would misfire on nearly all of them nearly all the time |
+
+All three live alerts use Logfire's `has_matches_changed` notification
+mode, which fires on a *transition* in either direction rather than on
+every evaluation that matches — onset and recovery are each exactly one
 message, so a condition that's been true for hours doesn't repeat itself
 into noise, and "it's fixed now" is reported just as reliably as "it
-broke."
+broke." The four planned ingest alerts above are designed to use the
+same mode once created.
 
 **Delivery needs no public endpoint of this project's own** — worth
 stating plainly, because the obvious design (host a receiver on the bot
@@ -834,6 +850,26 @@ route through the same Jira relay as any other alert (§C5's
 architecture diagram above), not a second, bespoke delivery path — the
 whole point of drawing the line at "service emits facts" is that a new
 kind of incident never needs new delivery code, only a new query.
+
+**`healthcheck.py` was the last holdout of the same anti-pattern, and is
+gone as of 2026-08-29.** It polled two synthetic DB timestamps
+(`__ingest_tick__`/`__push_tick__`) once an hour from inside the bot
+process and sent an admin Telegram message directly on a change — the
+service deciding "this is an incident" and paging, exactly like the old
+HTML-validation retry loop above. It also had a real limitation the
+retry loop's old version didn't: zero per-source granularity, so a
+single ingest source silently broken for days (every other source still
+succeeding) was invisible to it — diagnosing a live alert from it turned
+into manual `docker exec` process inspection rather than a query,
+because the print-only per-source outcomes it depended on weren't
+queryable at all. Replaced by `news_ingest._pull_source`'s
+`ingest_source_pull` span (one per source per cycle, `pull.outcome` ∈
+`not_due`/`budget_exhausted`/`success`/`failed`, see the architecture
+diagram above) plus the four planned ingest alerts in the table above —
+deliberately shipped with a real gap before those alerts exist (no
+transition safety net this time, unlike the HTML-validation rework),
+since the old mechanism's own diagnosis this session is what proved it
+wasn't good enough to keep around.
 
 **The handling loop** is: *user-visible symptom or alert → gather evidence
 before theorizing → root cause → fix → close the hole that let it

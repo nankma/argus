@@ -138,7 +138,8 @@ gone stale in this project before because no one owned it explicitly.
 Own deciding *what should count as an incident* for this project — e.g.
 "a periodic job hasn't ticked in hours," "a source has returned zero
 results for days," "guardrail pass rate has drifted down" — not just the
-two conditions `healthcheck.py` happens to check today. See
+handful of Logfire alerts that exist or are planned today (see
+`docs/system-overview.md` §C5's alert table). See
 `docs/plans/incident-monitoring-plan.md` (currently a stub — genuinely nothing
 is designed yet) and turn it into an actual criteria list as you find
 time, alongside your other responsibilities, not as an immediate

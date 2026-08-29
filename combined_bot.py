@@ -47,15 +47,16 @@ import telemetry_monitor
 import test_api
 import users_db
 
-# Two independent, complementary liveness checks -- not the same thing:
 # telemetry_monitor.py answers "is Phoenix's OTLP port reachable" (only
 # meaningful, and only started, when PHOENIX_ENABLED is set -- see
-# _start_telemetry_monitor below); info_bot.register_health_check_job
-# (healthcheck.py) answers "are the ingest/push jobs still ticking at
-# all", which is meaningful regardless of whether Phoenix is configured
-# and doesn't depend on any external service being reachable. Real
-# incident, 2026-08-16: PHOENIX_ENABLED went missing from the deployed
-# container at some point, which broke telemetry AND silently prevented
+# _start_telemetry_monitor below). Whether the ingest/push jobs
+# themselves are still ticking is Logfire's question now (see
+# news_ingest._emit_heartbeat/_pull_source, news_push._emit_heartbeat,
+# and docs/plans/observability-platform-plan.md) -- not something this
+# process checks or alerts on directly any more (healthcheck.py, which
+# used to do that in-process, was retired 2026-08-29). Real incident,
+# 2026-08-16: PHOENIX_ENABLED went missing from the deployed container at
+# some point, which broke telemetry AND silently prevented
 # telemetry_monitor's own alert loop from ever starting in the same
 # stroke -- the exact misconfiguration that should have triggered an
 # alert also disabled the thing that would have sent it. See
@@ -86,7 +87,6 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.add_handler(MessageHandler(filters.COMMAND, info_bot.handle_unknown_command))
     info_bot.register_push_job(app)
     info_bot.register_ingest_job(app)
-    info_bot.register_health_check_job(app)
     return app
 
 
