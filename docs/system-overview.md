@@ -649,6 +649,27 @@ rather than a privacy control at this project's current scale, but free
 to do now and expensive to retrofit once a backlog of spans already
 carries the raw one.
 
+**A worked example, tracing one real failure through every stage from a
+log line to an admin's phone:**
+
+```mermaid
+flowchart LR
+    A["1. Push cycle runs —<br/>a send fails with<br/>chat_not_found"] --> B["2. news_push._record<br/>reports the outcome,<br/>once, from one call site"]
+    B --> C1["print<br/>docker logs —<br/>the fast path,<br/>read by hand"]
+    B --> C2[("push_outcomes row<br/>subscribers.db —<br/>the local floor,<br/>no network needed")]
+    B --> C3["OTel span<br/>exported to Logfire"]
+    C3 --> D[("3. Logfire records table —<br/>the log aggregate<br/>every alert query reads")]
+    D --> E{"4. argus delivery ratio<br/>saved SQL query,<br/>evaluated every 15 min"}
+    E -->|"ratio drops<br/>below 80%"| F["5. has_matches_changed<br/>fires on the transition"]
+    F --> G["6. webhook channel<br/>POSTs straight at Telegram's<br/>sendMessage endpoint"]
+    G --> H["7. Admin's Telegram client<br/>receives the alert"]
+```
+
+Steps 1–2 are the same for every outcome, always. Steps 3 onward only
+happen for the span — which is why an outcome that's logged and stored
+but never reaches Logfire is invisible past step 2, permanently, no
+matter how correct the print line or the database row are.
+
 Under Phoenix, trace retention was explicitly bounded at 30 days —
 self-hosted on the VM's own disk, so unbounded growth was a real,
 if slow-motion, outage risk. Logfire (§A1) is cloud-hosted, so that
@@ -670,6 +691,49 @@ email service, or a paging tool: the channel already existed for a
 different reason and alerting simply reuses it.
 
 ### Three live alerts, evaluated by Logfire, delivered with no receiver of this project's own
+
+```mermaid
+flowchart TB
+    subgraph BOT["Bot service — main VM<br/><i>emits facts only, decides nothing</i>"]
+        REC["news_push._record<br/>one call site per outcome"]
+        VAL["news_push._emit_html_validation_attempt<br/>one span per retry-loop attempt"]
+        ING["news_ingest._emit_heartbeat<br/>one span per ingest cycle"]
+    end
+
+    REC -->|OTel span| LF
+    VAL -->|OTel span| LF
+    ING -->|OTel span| LF
+
+    subgraph LF["Pydantic Logfire — cloud<br/><i>decides what's an incident,<br/>and its severity</i>"]
+        RT[("records table")]
+        SQL{"saved SQL alerts —<br/>bot liveness / model errors /<br/>delivery ratio (live) +<br/>ingest liveness / html validation<br/>retry / exhausted (planned)<br/>has_matches_changed"}
+        RT --> SQL
+    end
+
+    SQL -->|"webhook,<br/>format slack-legacy<br/>(the 3 live alerts today)"| TG
+
+    subgraph TG["Telegram Bot API"]
+        SM["sendMessage<br/>chat_id in the URL,<br/>text from the payload"]
+    end
+
+    TG --> ADMIN(["Admin's Telegram client"])
+
+    subgraph JIRA["Jira Automation relay<br/><i>notification layer — builds the message<br/>and delivers it, decides nothing</i><br/><i>built + verified 2026-08-28 —<br/>not wired to a live alert yet</i>"]
+        WH["Incoming Webhook trigger"] --> SWR["Send web request action —<br/>builds a clean message instead<br/>of forwarding Slack markup"]
+    end
+
+    LF -.->|"planned: repoint the<br/>webhook channel here"| JIRA
+    JIRA -.-> TG
+```
+
+Solid arrows are the live path today; dotted arrows are either a second,
+independent path (the HTML-validation alert, §C4/below, which never
+goes through Logfire at all) or work that's built and verified but not
+yet switched on (the Jira relay — see
+`docs/plans/observability-platform-plan.md`'s 2026-08-28 section for
+exactly what's confirmed working and what's still open). Drawing them
+differently is deliberate: this document doesn't claim something is
+live until it's carrying real traffic.
 
 Each is a saved SQL query over Logfire's `records` table (the same store
 the spans in §C4 land in), evaluated on a fixed cadence, with the query's
@@ -729,21 +793,29 @@ code-level circuit breaker (three consecutive undeliverable cycles turns
 push off for that one subscriber) that now bounds how much any single
 broken chat can cost even before an alert fires.
 
-### A newer, parallel signal: content-quality alerts straight from the bot
+### The service never decides what's an incident — not even for its own retries
 
-Not every alert goes through Logfire. A subscriber-visible formatting
-failure (added 2026-08-28: malformed Telegram HTML the model produced,
-caught by a non-LLM validator and retried with the specific failure fed
-back into the prompt, up to three times, before being sent anyway so a
-subscriber never gets *nothing*) reports the same three ways as a push
-outcome — print, span, and here also a **direct** Telegram message from
-the bot process itself, not a Logfire alert rule. No rule exists yet for
-this specific span (`html_validation_exhausted`); routing it through
-Logfire first would have meant either no alert at all until one was
-configured, or writing the code twice. The direct-send path costs
-nothing extra to keep even once a Logfire rule for the same span exists
-— an independent second way the same failure can surface is a feature
-worth having, not redundancy to prune.
+A subscriber-visible formatting failure (malformed Telegram HTML the
+model produced) is caught by a non-LLM validator and retried with the
+specific failure fed back into the prompt, up to three times, before
+being sent anyway so a subscriber never gets *nothing*
+(`telegram_html.validate` + the retry loop in `news_push.run_push_cycle`).
+The first version of this, shipped and then reworked the same day,
+had the retry loop decide for itself that "3 failed attempts is an
+incident" and send a Telegram message directly — precisely the
+service-makes-the-call anti-pattern the rest of this section argues
+against. **It doesn't do that anymore.** Every attempt — pass or fail,
+first or last — emits the same-shaped span
+(`html_validation_attempt`, with `attempt`/`valid`/`reason` attributes)
+and nothing else; the service has no opinion on whether one failed
+attempt is noise or three in a row is worth telling anyone about. That
+judgment, like the three live alerts above, belongs entirely to a
+Logfire query — planned but not yet created, so today these spans are
+recorded and queryable by hand, not yet paging anyone. Once built, they
+route through the same Jira relay as any other alert (§C5's
+architecture diagram above), not a second, bespoke delivery path — the
+whole point of drawing the line at "service emits facts" is that a new
+kind of incident never needs new delivery code, only a new query.
 
 **The handling loop** is: *user-visible symptom or alert → gather evidence
 before theorizing → root cause → fix → close the hole that let it

@@ -656,9 +656,11 @@ async def _push_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # .get(), not [] -- an embedder is an enhancement (near-duplicate
     # collapse, offbeat selection), never something run_push_cycle
     # requires to function. See news_embed's module docstring.
-    await news_push.run_push_cycle(
-        model, send, context.bot_data["admin_bot_token"], context.bot_data["admin_chat_id"],
-        embedder=context.bot_data.get("embedder"))
+    #
+    # No admin_bot_token/admin_chat_id here (removed 2026-08-28) -- the
+    # retry loop no longer decides anything alert-worthy or sends
+    # Telegram directly, see news_push._emit_html_validation_attempt.
+    await news_push.run_push_cycle(model, send, embedder=context.bot_data.get("embedder"))
 
 
 def register_push_job(app: Application) -> None:

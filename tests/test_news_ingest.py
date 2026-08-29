@@ -140,6 +140,44 @@ def test_run_ingestion_cycle_advances_last_pulled_at(monkeypatch, isolated_subsc
     assert users_db.get_source_last_pulled_at("bbc_business") == now
 
 
+def test_emit_heartbeat_carries_the_job_attribute(monkeypatch):
+    """Same FakeSpan pattern as news_push._emit_heartbeat's own test."""
+    recorded = {}
+
+    class FakeSpan:
+        def set_attribute(self, k, v):
+            recorded[k] = v
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(news_ingest._tracer, "start_as_current_span",
+                        lambda name: FakeSpan())
+
+    news_ingest._emit_heartbeat()
+
+    assert recorded == {"heartbeat.job": "ingest_tick"}
+
+
+def test_run_ingestion_cycle_emits_a_heartbeat_even_when_nothing_was_fetched(
+    monkeypatch, isolated_subscribers_db, isolated_news_cache
+):
+    """The dead-man's-switch case this whole span exists for: a cycle
+    that fetches nothing still has to prove it RAN, not just a cycle
+    that found something. run_ingestion_cycle has an early `if not
+    fetched: return` well past where this heartbeat fires -- this is
+    what pins the heartbeat call above that return, not below it."""
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", lambda q, n: [])])
+    emitted = MagicMock()
+    monkeypatch.setattr(news_ingest, "_emit_heartbeat", emitted)
+
+    news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
+
+    emitted.assert_called_once_with()
+
+
 def test_run_ingestion_cycle_one_source_failing_does_not_block_others(
     monkeypatch, isolated_subscribers_db, isolated_news_cache
 ):
