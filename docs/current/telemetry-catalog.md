@@ -2,25 +2,25 @@
 
 No decision history here — read `docs/plans/observability-platform-plan.md`
 for how/why this got built, and `docs/system-overview.md` §C4/§C5 for the
-architecture narrative. This doc is a **current-state reference**: every
-span this project actually sends to Logfire, its real attribute keys
-(verified against live data, not reconstructed from memory), and which
-alert (if any) currently reads it. Re-verify against a live query before
-trusting this if it's been a while — this is a snapshot, and new spans
-get added without this file necessarily being updated in the same PR.
+architecture narrative. This doc describes **what the code currently
+emits**: every span this project's own source actually sends to Logfire,
+its real attribute keys, and which alert (if any) reads it. Attribute
+keys and `level`/`message` behavior were cross-checked against a live
+`records` query (see `docs/reference/observability-and-debugging.md` for
+the technique) to catch any drift from what a docstring claims, but the
+inventory itself — which spans exist, from which module — is the code,
+not a point-in-time query result. Keep this in sync with the code when a
+span is added, renamed, or removed; a query re-check is only for
+catching attribute-shape drift, not for deciding what belongs here.
 
-Verified via `SELECT service_name, otel_scope_name, span_name, level,
-count(*) ... GROUP BY ...` against the real `records` table, 30-day
-window, 2026-08-30 — see `docs/reference/observability-and-debugging.md`
-for the query technique.
+## Service name
 
-## Services seen
-
-| `service_name` | What it is |
-|---|---|
-| `myfirstagent` | The one production service — set via `Resource.create({"service.name": "myfirstagent"})` in `agent.py`'s `setup_telemetry()`. Everything below that matters is under this. |
-| `unknown_service` | Historical — spans from before `service_name` was set correctly on some code path. No `push_outcome`/`html_validation_attempt`/`ingest_heartbeat` under it (those features didn't exist yet when these landed) — a dating marker, not a live concern. Ignore for current alerting. |
-| `argus-gate-probe`, `argus-relay-probe` | Ad hoc OTLP probes sent directly from a dev machine during this project's Logfire migration and Jira-relay discovery work (not from the deployed bot) — testing artifacts, not production telemetry. Excluded from the table below. |
+The code sets exactly one: `myfirstagent`, via
+`Resource.create({"service.name": SERVICE_NAME})` in `agent.py`'s
+`setup_telemetry()` (also forced onto `OTEL_SERVICE_NAME` before any
+provider is built, so every path — Phoenix-driven or Logfire-only —
+agrees). Every span below is under this service; nothing in the current
+codebase produces any other `service_name`.
 
 ## `level` — what the two values mean
 
