@@ -714,13 +714,13 @@ flowchart TB
 
     subgraph LF["Pydantic Logfire — cloud<br/><i>decides what's an incident,<br/>and its severity</i>"]
         RT[("records table")]
-        SQL{"saved SQL alerts —<br/>bot liveness / model errors /<br/>delivery ratio (live) +<br/>ingest liveness / ingest pull<br/>stalled / ingest pull failures /<br/>ingest source stale / html<br/>validation retry / exhausted<br/>(planned) — has_matches_changed"}
+        SQL{"saved SQL alerts —<br/>bot liveness / model errors /<br/>delivery ratio / ingest liveness /<br/>ingest pull stalled / ingest pull<br/>failures / ingest source stale<br/>(live) + html validation retry /<br/>exhausted (planned) —<br/>has_matches_changed"}
         RT --> SQL
     end
 
     SQL -->|"webhook,<br/>format slack-blockkit"| JIRA
 
-    subgraph JIRA["Jira Automation relay<br/><i>notification layer — builds the message<br/>and delivers it, decides nothing</i><br/><i>live since 2026-08-29 —<br/>all 3 alerts route through here</i>"]
+    subgraph JIRA["Jira Automation relay<br/><i>notification layer — builds the message<br/>and delivers it, decides nothing</i><br/><i>live since 2026-08-29 —<br/>all 7 live alerts route through here</i>"]
         WH["Incoming Webhook trigger"] --> SWR["Send web request action —<br/>builds a clean message instead<br/>of forwarding Slack markup"]
     end
 
@@ -741,12 +741,11 @@ channel every alert used before 2026-08-29 is still configured in
 Logfire but no alert points at it any more — repointing the three
 alerts back to it (see `local-infra/infrastructure.yaml`'s `logfire.
 channel_id`) is the fallback if the Jira relay ever proves unreliable.
-See `docs/plans/observability-platform-plan.md`'s 2026-08-29 section for
+See `docs/plans/observability-platform-plan.md`'s 2026-08-29 sections for
 the full discovery process (why `raw-data` doesn't work, why
-`slack-blockkit` does) and what's still open (the six "planned" alerts
-in the diagram above don't exist yet -- four ingest-specific, listed
-below, plus the two html-validation ones described in "The service never
-decides" further down).
+`slack-blockkit` does, and the SQL quirks hit building the ingest
+alerts below) and what's still open (the two html-validation alerts
+described in "The service never decides" further down don't exist yet).
 
 Each is a saved SQL query over Logfire's `records` table (the same store
 the spans in §C4 land in), evaluated on a fixed cadence, with the query's
@@ -762,25 +761,29 @@ ever received and never once observing "zero."
 | `argus bot liveness` | no span reaches Logfire at all — a dead man's switch | 30 min / evaluated every 5 min |
 | `argus model errors` | any push cycle records a `model_error` outcome | 30 min / 5 min |
 | `argus delivery ratio` | delivered fewer than 80% of what was generated | 24 h / 15 min |
+| `argus ingest liveness` | no `ingest_heartbeat` span at all — dead man's switch, ingest-specific | 30 min / 5 min |
+| `argus ingest pull stalled` | no `ingest_source_pull` span with `pull.outcome=success` anywhere — the whole pipeline isn't succeeding, not just one source | 1 h / 15 min |
+| `argus ingest pull failures` | more than 5 `ingest_source_pull` spans with `pull.outcome=failed` | 30 min / 5 min |
+| `argus ingest source stale` | per source: last successful `ingest_source_pull` older than 3× that source's own `pull.expected_interval_hours` — deliberately per-source and interval-aware, since 24 of 27 sources pull every 4h by default (not hourly), so a flat threshold would misfire on nearly all of them nearly all the time | 7 d / 6 h |
 
-**Planned, not yet created** — replace what `healthcheck.py` used to check
-in-process (retired 2026-08-29, see "The service never decides" below)
-with the finer-grained signal `_pull_source`'s span now provides:
-
-| Alert (planned) | Fires on |
-|---|---|
-| `argus ingest liveness` | no `ingest_heartbeat` span in 30 min — dead man's switch, ingest-specific |
-| `argus ingest pull stalled` | no `ingest_source_pull` span with `pull.outcome=success` anywhere, in 1h — the whole pipeline isn't succeeding, not just one source |
-| `argus ingest pull failures` | more than 5 `ingest_source_pull` spans with `pull.outcome=failed` in 30 min |
-| `argus ingest source stale` | per source: last successful `ingest_source_pull` is older than a multiple of that source's own `pull.expected_interval_hours` — deliberately per-source and interval-aware, since 24 of 27 sources pull every 4h by default (not hourly), so a flat threshold would misfire on nearly all of them nearly all the time |
-
-All three live alerts use Logfire's `has_matches_changed` notification
+All seven live alerts use Logfire's `has_matches_changed` notification
 mode, which fires on a *transition* in either direction rather than on
 every evaluation that matches — onset and recovery are each exactly one
 message, so a condition that's been true for hours doesn't repeat itself
 into noise, and "it's fixed now" is reported just as reliably as "it
-broke." The four planned ingest alerts above are designed to use the
-same mode once created.
+broke."
+
+**The four ingest alerts' first-ever evaluation already fired for
+real**, immediately on creation (2026-08-30) — not a synthetic test.
+`argus ingest liveness` and `argus ingest pull stalled` both came back
+`has_matches=true` on their very first run, because the ingest-job
+dispatch hang this project has hit repeatedly after a deploy (see
+Appendix / this project's own incident memory) had recurred yet again
+and was still unresolved at that moment. `argus ingest pull failures`
+read `false` at the same time — consistent with a dispatch-level hang
+(the job never gets far enough to attempt a fetch) rather than fetches
+themselves failing. Confirms the alert mechanism works end to end
+against real data; the recurring hang itself remains open.
 
 **Delivery needs no public endpoint of this project's own** — worth
 stating plainly, because the obvious design (host a receiver on the bot

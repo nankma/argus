@@ -1054,12 +1054,50 @@ plan: `idempotent-sprouting-quail` (the same plan-file name as the
 earlier PR #50 work this session -- reused/overwritten rather than a
 new file, since it's a direct continuation).
 
-**Still open**: the four alerts above (plus the two html-validation ones
-from earlier) aren't created yet -- this is the deliberate gap the user
-authorized. Create them against the live Jira relay channel per this
-document's own alert-management procedure, force-verify at least the
-count-based and per-source ones before trusting them (same "force a
-transition, read the real result" discipline used throughout this
-session), then update `local-infra/infrastructure.yaml`'s `logfire.
-alerts` list once live.
+**Created 2026-08-30**, closing the gap the user had explicitly
+authorized leaving open. All four created via the OAuth device-flow
+procedure, delivering to the same live Jira relay channel as the three
+original alerts; ids and exact queries in `local-infra/infrastructure.yaml`'s
+`logfire.alerts`.
+
+- `argus ingest liveness`: mirrors `argus bot liveness`'s exact shape
+  (`SELECT 1 WHERE (SELECT count(*) ... ) = 0`), scoped to
+  `ingest_heartbeat` specifically. PT30M/PT5M/PT1M.
+- `argus ingest pull stalled`: same shape, scoped to `ingest_source_pull`
+  spans with `pull.outcome='success'`, 1h window. PT1H/PT15M/PT1M.
+- `argus ingest pull failures`: `count(*) > 5` over `pull.outcome='failed'`
+  spans, 30 min. PT30M/PT5M/PT1M.
+- `argus ingest source stale`: the trickiest one, as flagged during
+  planning. Per-source `GROUP BY`, comparing elapsed time since last
+  success against `3 × pull.expected_interval_hours`. Two real SQL
+  constraints surfaced only by trying it against Logfire's actual query
+  engine (DataFusion), not discoverable by reading docs:
+  - `float * interval` isn't valid arithmetic (`Cannot get result type
+    for temporal operation Float64 * Interval`) -- worked around with
+    `extract(epoch from (now() - max(start_timestamp))) >
+    max(interval_hours) * 3.0 * 3600`, comparing plain seconds instead of
+    constructing an interval.
+  - Logfire caps how large `time_window` can be relative to `frequency`
+    (a `P7D` window at `PT30M` frequency was rejected: "Max allowed:
+    1d"). Fixed by widening frequency to `PT6H` (a staleness check
+    measured in hours doesn't need 30-minute evaluation anyway), which
+    permits the needed 7-day lookback.
+
+**Not force-tested via a synthetic probe span this time -- verified for
+real instead, which turned out to be more informative.** The first
+live evaluation immediately after creation showed `argus ingest
+liveness` and `argus ingest pull stalled` both already
+`has_matches=true` (a real `has_matches_changed` transition, so both
+should have delivered a genuine Telegram message through the relay) --
+because the ingest-job dispatch hang documented in this project's
+`project-ingest-hang-post-deploy-20260825` memory recurred YET AGAIN on
+the 2bb1e59 deploy this same session, still unresolved. `argus ingest
+pull failures` read `has_matches=false` at the same moment -- consistent
+with the hang being a dispatch-level failure (the job never gets far
+enough to attempt a fetch, let alone fail one), not a fetch-level one.
+This is a real, useful confirmation that the new alert mechanism works
+end to end against real production data, but it also means the
+recurring ingest hang remains an open, unfixed problem, now backed by
+real alerting instead of manual `docker exec` diagnosis every time
+someone happens to check.
 
