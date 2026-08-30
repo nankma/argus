@@ -1,6 +1,6 @@
 ---
 name: deploy-engineer
-description: Use when building the myfirstagent-bot Docker image, deploying/redeploying it to the Oracle VM, or diagnosing/verifying a live deployment (container crash, Phoenix connectivity, smoke-test failures). Not for local-only code changes with nothing to deploy.
+description: Use when building the myfirstagent-bot Docker image, deploying/redeploying it to the Oracle VM, or diagnosing/verifying a live deployment (container crash, Logfire connectivity, smoke-test failures). Not for local-only code changes with nothing to deploy.
 tools: Read, Bash, PowerShell, Grep, Glob, Edit, Write
 model: sonnet
 skills:
@@ -91,7 +91,7 @@ repeat what's already written down.
    - `docker logs` has real output (not empty — see the
      `PYTHONUNBUFFERED` incident in the preloaded skill).
    - `python tools/run_smoke_tests.py` passes.
-   - `python tools/check_telemetry.py` passes, if `PHOENIX_ENABLED` is set.
+   - `python tools/check_logfire.py` passes, if `LOGFIRE_ENABLED` is set.
    - `python tools/check_data_persistence.py` passes — every directory
      meant to outlive a restart resolves inside `/data`.
 
@@ -129,7 +129,7 @@ deploy may be a fresh instance of you with no memory of this one.
 
 Same for tooling gaps: if verifying something means hand-parsing SSH
 output instead of running a script, say so and propose a
-`tools/check_X.py` (pattern: `check_telemetry.py`) rather than quietly
+`tools/check_X.py` (pattern: `check_logfire.py`) rather than quietly
 eating the manual cost every time.
 
 # Non-goals

@@ -11,14 +11,14 @@ dependencies:
   - pytest
   - pytest-cov
   - requests-mock
-  - arize-phoenix-otel
   - openinference-instrumentation-langchain
   # Imported directly, not just pulled in transitively: news_push.py's
   # heartbeat span needs the api, and agent.py's Logfire exporter needs the
-  # sdk and the OTLP/HTTP exporter. Undeclared, they would arrive only as a
-  # dependency of arize-phoenix-otel -- which step 8 of
-  # docs/plans/observability-platform-plan.md removes -- and telemetry would
-  # stop silently, which is the failure that plan exists to prevent.
+  # sdk and the OTLP/HTTP exporter. Declared explicitly on purpose --
+  # arize-phoenix-otel used to pull these in transitively, and removing it
+  # (Phoenix fully retired, see docs/plans/observability-platform-plan.md)
+  # would otherwise have stopped telemetry silently, which is the failure
+  # this explicit declaration exists to prevent.
   - opentelemetry-api
   - opentelemetry-sdk
   - opentelemetry-exporter-otlp-proto-http

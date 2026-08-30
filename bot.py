@@ -43,6 +43,9 @@ import news_push
 import telegram_html
 import test_api
 import users_db
+from logfire_logger import Level, Logger, LogfireLogger
+
+_events: Logger = LogfireLogger("argus.bot")
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -529,7 +532,7 @@ async def process_message(chat_id: int, user_text: str, agent, guard_model) -> d
     Returns {"blocked_at": str|None, "category": str|None, "reply": str}.
     blocked_at names which layer stopped the message (None if it went all
     the way through) -- useful for a test caller to assert on without
-    parsing the reply text or cross-referencing docker logs/Phoenix.
+    parsing the reply text or cross-referencing docker logs/Logfire.
     `category` is the first (or only) category classified for this turn --
     see _process_multi_category for how more than one is handled."""
     # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
@@ -687,7 +690,7 @@ async def review_category_proposals(model, admin_bot_token: str, admin_chat_id: 
     Runs after ingestion because that is when new sightings appear, and
     from the ingest job rather than the admin bot because this is a push:
     nobody is going to open the admin bot to check whether the taxonomy has
-    gaps. Same shape as telemetry_monitor alerting through the admin token.
+    gaps.
 
     A proposal is marked alerted only AFTER its message is sent. Marking
     first would drop it permanently if the send failed -- `alerted_at IS
@@ -718,7 +721,10 @@ async def review_category_proposals(model, admin_bot_token: str, admin_chat_id: 
             await bot.send_message(chat_id=admin_chat_id, text=text,
                                    parse_mode=ParseMode.HTML, reply_markup=keyboard)
         except Exception as exc:
-            print(f"[news_ingest] could not raise category {name!r} with the admin: {exc!r}")
+            _events.log("category_admin_notify_failed",
+                         {"message": f"could not raise category {name!r} with the admin",
+                          "name": name},
+                         level=Level.WARN, exc=exc)
             continue
         users_db.mark_category_alerted(name, now, draft)
         raised += 1

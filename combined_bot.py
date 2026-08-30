@@ -14,12 +14,15 @@ bot.py and admin_bot.py keep their own standalone main()s too -- this file
 only adds a combined option, reusing their handler functions and bot_data
 wiring unchanged.
 
-Also runs telemetry_monitor.py's Phoenix health-check loop alongside the
-two bots (only when PHOENIX_ENABLED is set) -- alerts the admin via
-admin_bot.py's token if Phoenix's OTLP endpoint (PHOENIX_ENDPOINT, from
-agent.py) goes unreachable or recovers, since a telemetry outage is
-otherwise silent (OpenTelemetry doesn't raise export failures into
-application code by design).
+Whether the ingest/push jobs themselves are still ticking, and whether
+Logfire itself is reachable, are Logfire's own questions now (see
+news_ingest._emit_heartbeat/_pull_source, news_push._emit_heartbeat, the
+Logfire alerts they feed, and docs/plans/observability-platform-plan.md)
+-- not something this process checks or alerts on directly (Phoenix's
+own reachability-monitoring loop, telemetry_monitor.py, was retired
+alongside Phoenix itself; healthcheck.py's in-process job-liveness
+polling was retired 2026-08-29 for the same reason -- see
+docs/plans/telemetry-and-testing-plan.md).
 
 Run:
     conda activate myfirstagent
@@ -27,40 +30,19 @@ Run:
     export TELEGRAM_BOT_TOKEN=<info-bot-token>
     export ADMIN_BOT_TOKEN=<admin-bot-token>
     export ADMIN_CHAT_ID=<your-telegram-numeric-user-id>
-    export PHOENIX_ENABLED=true          # optional
-    export PHOENIX_ENDPOINT=http://<phoenix-host>:4317   # optional
     python combined_bot.py
 """
 
 import asyncio
-import contextlib
 import os
 import signal
-from urllib.parse import urlparse
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
-import agent as agent_module
 from agent import build_agent, build_model, run_agent, setup_telemetry
 import bot as info_bot
 import admin_bot
 import news_embed
-import telemetry_monitor
 import test_api
 import users_db
-
-# telemetry_monitor.py answers "is Phoenix's OTLP port reachable" (only
-# meaningful, and only started, when PHOENIX_ENABLED is set -- see
-# _start_telemetry_monitor below). Whether the ingest/push jobs
-# themselves are still ticking is Logfire's question now (see
-# news_ingest._emit_heartbeat/_pull_source, news_push._emit_heartbeat,
-# and docs/plans/observability-platform-plan.md) -- not something this
-# process checks or alerts on directly any more (healthcheck.py, which
-# used to do that in-process, was retired 2026-08-29). Real incident,
-# 2026-08-16: PHOENIX_ENABLED went missing from the deployed container at
-# some point, which broke telemetry AND silently prevented
-# telemetry_monitor's own alert loop from ever starting in the same
-# stroke -- the exact misconfiguration that should have triggered an
-# alert also disabled the thing that would have sent it. See
-# docs/plans/telemetry-and-testing-plan.md.
 
 
 def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None, embedder=None) -> Application:
@@ -102,22 +84,6 @@ def build_admin_app(admin_chat_id: int, info_bot_token: str) -> Application:
     return app
 
 
-def _start_telemetry_monitor(admin_bot_token: str, admin_chat_id: int) -> asyncio.Task | None:
-    """Starts the Phoenix health-check/alert loop (telemetry_monitor.py) only
-    when telemetry is actually enabled -- pointless (and noisy, since
-    PHOENIX_ENDPOINT defaults to localhost) otherwise, e.g. in local dev
-    without PHOENIX_ENABLED set."""
-    if not os.environ.get("PHOENIX_ENABLED"):
-        return None
-    parsed = urlparse(agent_module.PHOENIX_ENDPOINT)
-    if not parsed.hostname:
-        return None
-    port = parsed.port or 4317
-    return asyncio.create_task(
-        telemetry_monitor.monitor_telemetry_health(admin_bot_token, admin_chat_id, parsed.hostname, port)
-    )
-
-
 async def run_both(
     info_app: Application, admin_app: Application, admin_bot_token: str, admin_chat_id: int
 ) -> None:
@@ -127,7 +93,6 @@ async def run_both(
         await admin_app.start()
         await admin_app.updater.start_polling()
 
-        monitor_task = _start_telemetry_monitor(admin_bot_token, admin_chat_id)
         test_api_server = test_api.start(info_app.bot_data["agent"], info_app.bot_data["guard_model"])
 
         print("Both bots ready (polling). Ctrl+C to stop.")
@@ -144,10 +109,6 @@ async def run_both(
         except KeyboardInterrupt:
             pass
         finally:
-            if monitor_task:
-                monitor_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await monitor_task
             test_api.stop(test_api_server)
             await admin_app.updater.stop()
             await admin_app.stop()

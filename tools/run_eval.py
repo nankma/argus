@@ -258,12 +258,6 @@ def main():
     if not os.environ.get("DEEPSEEK_API_KEY"):
         print("DEEPSEEK_API_KEY not set -- this harness needs a real model call.", file=sys.stderr)
         sys.exit(1)
-    if not os.environ.get("PHOENIX_ENABLED"):
-        print(
-            "Note: PHOENIX_ENABLED is not set -- traces for this run won't reach Phoenix. "
-            "Not required, but recommended for debugging a failing case.",
-            file=sys.stderr,
-        )
 
     agent.setup_telemetry()
     users_db.init_db()

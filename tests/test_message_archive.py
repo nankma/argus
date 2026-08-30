@@ -4,8 +4,16 @@ from pathlib import Path
 
 import message_archive
 import users_db
+from logfire_logger import Level
+from tests.fakes import FakeSpan
 
 NOW = datetime(2026, 8, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _patch_events_span(monkeypatch):
+    span = FakeSpan()
+    monkeypatch.setattr(message_archive._events._tracer, "start_as_current_span", lambda name: span)
+    return span
 
 
 def test_archive_message_writes_one_file_with_the_right_fields(
@@ -55,10 +63,15 @@ def test_archive_message_fails_open_on_a_write_error(
         raise OSError("disk full")
 
     monkeypatch.setattr(Path, "mkdir", boom)
+    span = _patch_events_span(monkeypatch)
 
     message_archive.archive_message(42, "push_digest", "text", now=NOW)  # must not raise
 
     assert "could not archive" in capsys.readouterr().out
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert span.attrs["kind"] == "push_digest"
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], OSError)
 
 
 # --- prune_message_archive --------------------------------------------------

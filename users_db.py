@@ -6,7 +6,7 @@ docs/plans/bot-features-plan.md item 1.
 
 DB_FILE is configurable via SUBSCRIBERS_DB_FILE so a containerized
 deployment can point both bots at the same file on a shared volume (see
-docs/plans/deployment-plan.md) — same reasoning as agent.py's PHOENIX_ENDPOINT.
+docs/plans/deployment-plan.md).
 """
 
 import hashlib

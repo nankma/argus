@@ -8,7 +8,8 @@ import news_keyness
 import news_push
 import news_sources
 import users_db
-from tests.fakes import FakeEmbedder
+from logfire_logger import Level
+from tests.fakes import FakeEmbedder, FakeSpan
 
 
 def _article(link, title="Some title", source="TestSource", published_dt=None, summary=None):
@@ -200,28 +201,16 @@ def test_run_ingestion_cycle_one_source_failing_does_not_block_others(
     assert cached[0]["link"] == "https://example.com/ok"
 
 
-class _FakeSpan:
-    """Same FakeSpan pattern as news_ingest._emit_heartbeat's own test,
-    news_push's, and news_sources'. Kept as a class here (rather than
-    redefined per-test) since every ingest_source_pull test below needs
-    the identical recording behavior."""
-
-    def __init__(self):
-        self.attrs = {}
-
-    def set_attribute(self, k, v):
-        self.attrs[k] = v
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-
 def _patch_pull_span(monkeypatch):
-    span = _FakeSpan()
+    span = FakeSpan()
     monkeypatch.setattr(news_ingest._tracer, "start_as_current_span",
+                        lambda name: span)
+    return span
+
+
+def _patch_events_span(monkeypatch):
+    span = FakeSpan()
+    monkeypatch.setattr(news_ingest._events._tracer, "start_as_current_span",
                         lambda name: span)
     return span
 
@@ -279,6 +268,8 @@ def test_pull_source_failed_outcome_when_every_section_raises(monkeypatch, isola
     assert span.attrs["pull.outcome"] == "failed"
     assert span.attrs["pull.sections_attempted"] == 1
     assert span.attrs["pull.sections_failed"] == 1
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
 def test_pull_source_success_when_only_some_sections_of_a_multi_section_source_fail(
@@ -1122,10 +1113,14 @@ def test_keyness_refresh_failure_does_not_block_ingestion(
         news_ingest.news_keyness, "build_noun_index",
         MagicMock(side_effect=RuntimeError("keyness died")),
     )
+    span = _patch_events_span(monkeypatch)
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Hardware"]}), now)
 
     assert len(news_cache.read_all()) == 1
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
 def test_keyness_refresh_does_nothing_on_an_empty_cache(isolated_subscribers_db, isolated_news_cache, fake_nltk):

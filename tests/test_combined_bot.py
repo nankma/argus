@@ -1,7 +1,4 @@
-import asyncio
-
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler
-import agent as agent_module
 import combined_bot
 import users_db
 
@@ -74,38 +71,3 @@ def test_build_admin_app_wires_bot_data(monkeypatch):
     assert any(isinstance(h, MessageHandler) for h in handlers)
 
 
-async def _run_and_cancel(coro_factory):
-    task = coro_factory()
-    if task is not None:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    return task
-
-
-def test_start_telemetry_monitor_skipped_when_phoenix_disabled(monkeypatch):
-    monkeypatch.delenv("PHOENIX_ENABLED", raising=False)
-    task = asyncio.run(
-        _run_and_cancel(lambda: combined_bot._start_telemetry_monitor("admin-token", 999))
-    )
-    assert task is None
-
-
-def test_start_telemetry_monitor_skipped_when_endpoint_has_no_host(monkeypatch):
-    monkeypatch.setenv("PHOENIX_ENABLED", "true")
-    monkeypatch.setattr(agent_module, "PHOENIX_ENDPOINT", "not-a-valid-url")
-    task = asyncio.run(
-        _run_and_cancel(lambda: combined_bot._start_telemetry_monitor("admin-token", 999))
-    )
-    assert task is None
-
-
-def test_start_telemetry_monitor_starts_when_enabled(monkeypatch):
-    monkeypatch.setenv("PHOENIX_ENABLED", "true")
-    monkeypatch.setattr(agent_module, "PHOENIX_ENDPOINT", "http://10.0.0.234:4317")
-    task = asyncio.run(
-        _run_and_cancel(lambda: combined_bot._start_telemetry_monitor("admin-token", 999))
-    )
-    assert isinstance(task, asyncio.Task)

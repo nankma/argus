@@ -1,6 +1,14 @@
 from unittest.mock import MagicMock
 
 import guardrails
+from logfire_logger import Level
+from tests.fakes import FakeSpan
+
+
+def _patch_events_span(monkeypatch):
+    span = FakeSpan()
+    monkeypatch.setattr(guardrails._events._tracer, "start_as_current_span", lambda name: span)
+    return span
 
 
 def test_fails_local_prefilter_catches_instruction_override():
@@ -179,15 +187,19 @@ def test_is_output_on_topic_news_query_category_uses_full_check():
     assert guardrails.is_output_on_topic(model, "off-topic content", category="news_query") is False
 
 
-def test_layer2_failure_is_announced_not_just_swallowed(capsys):
+def test_layer2_failure_is_announced_not_just_swallowed(monkeypatch, capsys):
     """Failing open is correct -- a router outage must not take the bot down.
     Failing open SILENTLY is what let the 2026-08-21 DeepSeek thinking-mode
     change hide: every settings command was misrouted as a news query for
     real users, with no error anywhere and no way to tell a provider outage
-    apart from a genuine news question."""
+    apart from a genuine news question. ERROR level specifically -- this is
+    the load-bearing site the incident is about, don't let it downgrade to
+    routine WARN noise."""
     class Exploding:
         def with_structured_output(self, _schema):
             raise RuntimeError("400 Thinking mode does not support this tool_choice")
+
+    span = _patch_events_span(monkeypatch)
 
     result = guardrails.classify_message(Exploding(), "add robotics to my interests")
 
@@ -195,12 +207,22 @@ def test_layer2_failure_is_announced_not_just_swallowed(capsys):
     err = capsys.readouterr().out
     assert "layer 2 FAILED" in err
     assert "Thinking mode" in err                        # the cause survives
+    assert span.attrs["logfire.level_num"] == Level.ERROR
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
-def test_layer4_failure_is_announced_not_just_swallowed(capsys):
+def test_layer4_failure_is_announced_not_just_swallowed(monkeypatch, capsys):
+    """Layer 4's mirror of the layer2 test above -- same load-bearing ERROR
+    level, same incident."""
     class Exploding:
         def with_structured_output(self, _schema):
             raise RuntimeError("provider exploded")
 
+    span = _patch_events_span(monkeypatch)
+
     assert guardrails.is_output_on_topic(Exploding(), "<b>anything</b>") is True
     assert "layer 4 FAILED" in capsys.readouterr().out
+    assert span.attrs["logfire.level_num"] == Level.ERROR
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)

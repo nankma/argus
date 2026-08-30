@@ -1,22 +1,28 @@
 """
 Post-deployment check: confirms Logfire is actually RECEIVING traces from
-the deployed bot -- the Logfire counterpart of check_telemetry.py.
+the deployed bot -- not just that the bot process started without error.
 
-Same reasoning as that script, and the same incident behind it: on
-2026-08-16 PHOENIX_ENABLED/PHOENIX_ENDPOINT silently fell off a
-`docker run` and nothing noticed for weeks, because a bot with no
-telemetry looks exactly like a bot with telemetry until you go looking.
-Logfire can fail the same way and one more besides -- `LOGFIRE_ENABLED`
-unset, the Vault secret unresolved, or the token minted in the wrong
-region -- and every one of those is silent: the OTLP HTTP exporter logs
-failures rather than raising, so the bot starts cleanly and exports
-nothing.
+A real incident, 2026-08-16 (back when Phoenix was the telemetry backend):
+its env vars silently fell off a `docker run` and nothing noticed for
+weeks, because a bot with no telemetry looks exactly like a bot with
+telemetry until you go looking. Logfire can fail the same way and one
+more besides -- `LOGFIRE_ENABLED` unset, the Vault secret unresolved, or
+the token minted in the wrong region -- and every one of those is
+silent: the OTLP HTTP exporter logs failures rather than raising, so the
+bot starts cleanly and exports nothing.
 
-Reuses check_telemetry.py's trigger (SSH + curl to test_api on the bot VM,
-no local tunnel -- see that file for why) and then queries Logfire's own
-API for a span newer than the moment the message was sent. Both halves
-matter: a span from before the restart proves nothing about the running
-container.
+Runs entirely via SSH `curl` on the bot VM, not a local SSH tunnel --
+deliberately avoids the tunnel-reliability issue documented in
+docs/reference/local-testing-api-plan.md's "Resolved issue" section
+(accumulated session state, dual-stack ambiguity). This check only needs
+one one-shot request/response round trip, not a sustained tunnel.
+
+Two steps: (1) SSH to the bot VM, POST a message to test_api.py's
+/test_message endpoint (see docs/reference/local-testing-api-plan.md --
+requires ENABLE_TEST_API=true on that deploy), recording the timestamp
+right before sending; (2) query Logfire's own API for a span newer than
+that timestamp. Both halves matter: a span from before the restart
+proves nothing about the running container.
 
     python tools/check_logfire.py --bot-vm ubuntu@<ip> --bot-key <key>
 
@@ -25,7 +31,9 @@ export also reads, so there is no second credential.
 """
 
 import argparse
+import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -34,14 +42,46 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.check_telemetry import send_test_message  # noqa: E402
-
 # Imported, not repeated: a check that filters on a different name
 # than the exporter sets is a check that always passes or always
 # fails, and 2026-08-23 was the always-fails version.
 from agent import SERVICE_NAME  # noqa: E402
 LOGFIRE_HOSTS = {"us": "https://logfire-us.pydantic.dev",
                  "eu": "https://logfire-eu.pydantic.dev"}
+TEST_API_PORT = 8765
+
+
+def _ssh_run(host: str, key: str, remote_command: str, timeout: int) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["ssh", "-i", key, "-o", "ConnectTimeout=15", "-o", "BatchMode=yes", host, remote_command],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def send_test_message(bot_vm: str, bot_key: str, chat_id: int, text: str, timeout: int) -> bool:
+    """Runs curl ON the bot VM (not through a local tunnel) against its
+    own loopback -- test_api.py binds 0.0.0.0 inside the container, and
+    the container publishes to the VM's own loopback only
+    (`-p 127.0.0.1:8765:8765`, see docs/reference/local-testing-api-plan.md's
+    security model), so 127.0.0.1 is correct from the VM's own shell."""
+    payload = json.dumps({"chat_id": chat_id, "text": text})
+    # POSIX single-quote escaping: '\'' for a literal quote inside a
+    # single-quoted string, not just "hope the text never contains one" --
+    # a real bug this project hit once with an apostrophe in a test message.
+    escaped_payload = payload.replace("'", "'\\''")
+    curl_timeout = max(timeout - 5, 10)
+    remote_command = (
+        f"curl -sS -m {curl_timeout} -X POST http://127.0.0.1:{TEST_API_PORT}/test_message "
+        f"-H 'Content-Type: application/json' -d '{escaped_payload}'"
+    )
+    result = _ssh_run(bot_vm, bot_key, remote_command, timeout)
+    if result.returncode != 0:
+        print(f"FAIL: could not reach the bot VM's test_api endpoint.\n  stderr: {result.stderr.strip()}")
+        return False
+    print(f"  bot response: {result.stdout.strip()[:200]}")
+    return True
 
 
 def query_url(token: str) -> str:

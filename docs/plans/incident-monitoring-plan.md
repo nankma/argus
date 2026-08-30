@@ -21,6 +21,20 @@ up to date against the new mechanism is `qa-engineer`'s own ongoing
 responsibility (this doc is explicitly theirs to maintain), not done as
 part of the code change that retired `healthcheck.py`.
 
+**`telemetry_monitor.py`, the other of the two "existing narrower
+pieces" below, was ALSO retired — 2026-08-30, alongside Phoenix itself
+being removed from this repo entirely** (see `docs/current/infrastructure.md`
+and `logfire_logger.py`). Every "Phoenix cannot be the answer"/"why
+Phoenix is not the answer" argument later in this doc is now moot in a
+different way than intended when written: Phoenix isn't a candidate to
+reject anymore because it doesn't exist in this project at all, not
+because the reasoning was wrong. Logfire (the current, sole telemetry
+backend) DOES support native alerting — see
+`docs/plans/observability-platform-plan.md` for what's actually live —
+which changes several of this doc's "why not X" conclusions rather than
+just removing Phoenix as an option. Same as the `healthcheck.py` note
+above: left unedited otherwise, `qa-engineer`'s to reconcile.
+
 ## The gap this is meant to close
 
 This project has two existing, narrower pieces that already do part of

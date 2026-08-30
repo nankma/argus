@@ -33,7 +33,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import dynamic_prompt
 from langchain.chat_models import init_chat_model
 from langchain.tools import ToolRuntime
-from phoenix.otel import register
+from logfire_logger import LogfireLogger
 import news_classify
 import news_sources
 import users_db
@@ -58,10 +58,6 @@ import users_db
 # doesn't need.
 DEFAULT_MODEL = "deepseek:deepseek-v4-flash"
 NOTES_FILE = "notes.jsonl"
-# Configurable because "localhost" only works for local dev — once Phoenix
-# runs as its own container/Kubernetes service, this needs to point there
-# instead (e.g. PHOENIX_ENDPOINT=http://phoenix:4317 or a cluster DNS name).
-PHOENIX_ENDPOINT = os.environ.get("PHOENIX_ENDPOINT", "http://localhost:4317")
 
 
 def build_model(env_var: str, default: str = DEFAULT_MODEL, default_timeout: float = 60.0):
@@ -551,65 +547,28 @@ def logfire_traces_endpoint(token: str) -> str:
     )
 
 
-def _logfire_processor(token: str):
-    """A span processor exporting to Logfire over OTLP/HTTP.
-
-    Deliberately the plain OTLP exporter rather than the `logfire` SDK: the
-    spans we care about are produced by
-    openinference-instrumentation-langchain, which already speaks OTLP, so
-    the SDK would add a dependency and a second instrumentation path
-    without adding a span. Verified 2026-08-21 -- see
-    docs/plans/observability-platform-plan.md."""
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
-    return BatchSpanProcessor(
-        OTLPSpanExporter(endpoint=logfire_traces_endpoint(token),
-                         headers={"Authorization": token})
-    )
-
-
 def setup_telemetry():
-    """Wires up tracing to Phoenix, Logfire, both, or neither.
+    """Wires up tracing to Logfire, or does nothing.
 
-    Each backend has its own explicit enable flag and is a no-op without
-    it. `LOGFIRE_ENABLED` is required even though `LOGFIRE_API_KEY` alone
+    `LOGFIRE_ENABLED` is required even though `LOGFIRE_API_KEY` alone
     would be enough to export, because the key is present in the
     development environment: keying off the credential would turn every
-    local script and test run into a live exporter. Same reason
-    PHOENIX_ENABLED exists -- tests and CI set neither and so never reach a
-    collector.
-
-    Both can run at once, on purpose. Retiring the Phoenix VM is the last
-    step of the migration, not the first, and dual-writing is what makes it
-    possible to compare the two before committing."""
+    local script and test run into a live exporter. Tests/CI set neither,
+    so they never reach a collector."""
     # Set before any provider is built, because the OTel SDK reads it when
-    # it constructs the default Resource and never revisits it.
-    #
-    # Phoenix's register() sets `openinference.project.name` and nothing
-    # else, so with Phoenix driving the provider every span reached Logfire
-    # as `service.name = unknown_service` -- found 2026-08-23. Logfire
-    # groups by service.name, so production traffic was invisible under the
-    # name everything queries by, and the dead man's switch had been
-    # watching an empty set. It only escaped notice because local test runs
-    # (which take the Logfire-only branch below, and do set the name) kept
-    # feeding it.
+    # it constructs the default Resource and never revisits it. Not
+    # strictly required now that LogfireLogger.setup() always sets
+    # service.name explicitly on its own Resource -- kept anyway as the
+    # general discipline LogfireLogger's own docstring asks callers to
+    # follow (a portable class shouldn't assume it's the only thing
+    # touching OTel setup), and as a real regression test still covers.
     #
     # setdefault, not assignment: a deployment that wants a different name
     # per instance should be able to say so from the outside.
     os.environ.setdefault("OTEL_SERVICE_NAME", SERVICE_NAME)
 
-    provider = None
-    if os.environ.get("PHOENIX_ENABLED"):
-        provider = register(
-            endpoint=PHOENIX_ENDPOINT,
-            project_name=SERVICE_NAME,
-            protocol="grpc",
-            auto_instrument=True,
-        )
-
     if not os.environ.get("LOGFIRE_ENABLED"):
-        return provider
+        return None
 
     token = os.environ.get("LOGFIRE_API_KEY")
     if not token:
@@ -618,32 +577,12 @@ def setup_telemetry():
         # prevent.
         raise RuntimeError("LOGFIRE_ENABLED is set but LOGFIRE_API_KEY is not")
 
-    if provider is None:
-        # No Phoenix, so nothing has built a provider or instrumented
-        # LangChain yet.
-        from openinference.instrumentation.langchain import LangChainInstrumentor
-        from opentelemetry import trace
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-
-        provider = TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
-        trace.set_tracer_provider(provider)
-        LangChainInstrumentor().instrument(tracer_provider=provider)
-        provider.add_span_processor(_logfire_processor(token))
-        return provider
-
-    # Phoenix's provider is NOT a plain OTel one: its add_span_processor
-    # defaults to replace_default_processor=True, which shuts down and
-    # discards the exporter register() just installed. Adding Logfire the
-    # obvious way therefore turns Phoenix OFF -- silently, since spans keep
-    # being produced and simply go elsewhere. Found on 2026-08-21 by a
-    # deploy that enabled Logfire and left Phoenix receiving nothing.
-    #
-    # Its own banner does say so ("add_span_processor will overwrite this
-    # default"), and the parameter to opt out is public.
-    provider.add_span_processor(_logfire_processor(token),
-                                replace_default_processor=False)
-    return provider
+    return LogfireLogger.setup(
+        service_name=SERVICE_NAME,
+        token=token,
+        endpoint=logfire_traces_endpoint(token),
+        instrument_langchain=True,
+    )
 
 
 # --- CLI chat interface ----------------------------------------------------

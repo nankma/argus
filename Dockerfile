@@ -35,7 +35,7 @@ RUN micromamba run -n base python -c \
     "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('punkt_tab')"
 
 WORKDIR /app
-COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_embed.py news_keyness.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry_monitor.py guardrails.py users_db.py test_api.py telegram_html.py message_archive.py docker-entrypoint.sh ./
+COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_embed.py news_keyness.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py logfire_logger.py guardrails.py users_db.py test_api.py telegram_html.py message_archive.py docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
 # Real incident, 2026-08-09: `docker logs` returned zero lines for this
@@ -57,7 +57,7 @@ ENV PYTHONUNBUFFERED=1
 # pass the plain env vars directly via `docker run -e` as before -- the
 # entrypoint only touches Vault when a *_SECRET_OCID var is actually set.
 # See docs/security-plan.md finding 2 and docs/deployment-plan.md.
-# PHOENIX_ENABLED / PHOENIX_ENDPOINT / SUBSCRIBERS_DB_FILE are optional,
+# LOGFIRE_ENABLED / LOGFIRE_API_KEY / SUBSCRIBERS_DB_FILE are optional,
 # same reasoning as always.
 #
 # CMD runs combined_bot.py -- both Telegram bots (info + admin) in one

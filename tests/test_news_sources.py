@@ -324,8 +324,8 @@ def test_raise_for_status_redacts_the_key(requests_mock, monkeypatch):
 
 
 def test_traced_fetch_redacts_the_key_before_it_reaches_telemetry(monkeypatch):
-    # traced_fetch's span attribute is shipped to Phoenix and retained 30 days,
-    # so it is the last point the value could escape the process.
+    # traced_fetch's span attribute is shipped to the telemetry backend
+    # (Logfire), so it is the last point the value could escape the process.
     recorded = {}
 
     class FakeSpan:
