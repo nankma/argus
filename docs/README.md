@@ -56,6 +56,7 @@ stale.
 |---|---|
 | `ai-news-sources.md` | The live source registry — what's enabled, what needs a key |
 | `infrastructure.md` | VM topology, security model, deploy process shape (no real IPs/keys — see `local-infra/infrastructure.yaml`) |
+| `telemetry-catalog.md` | Every span reaching Logfire — service/scope/attributes/level — and which alert (if any) reads each one |
 
 ## `docs/reference/` — how to do something
 
