@@ -64,16 +64,25 @@ python combined_bot.py
 Both processes need to see the same SQLite file — `SUBSCRIBERS_DB_FILE`
 env var (defaults to `subscribers.db` in the working directory).
 
-## Running Phoenix (telemetry) locally
+## ~~Running Phoenix (telemetry) locally~~
 
+**OBSOLETE — Phoenix was fully retired; this section is kept struck
+through for historical reference only, do not run these commands.**
+`agent.py` no longer has a Phoenix code path at all (see
+`docs/plans/observability-platform-plan.md`). For local telemetry now,
+set `LOGFIRE_ENABLED=true` and `LOGFIRE_API_KEY=<your key>` before
+running `agent.py`/`combined_bot.py` — no local container needed,
+Logfire is a hosted service.
+
+<!-- Kept struck through, not deleted, per this project's own
+     obsolete-content convention:
 ```powershell
 docker run -d --name phoenix -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
 $env:PHOENIX_ENABLED = "true"
 python agent.py
 ```
-
-Dashboard: `http://localhost:6006`. Unset `PHOENIX_ENABLED` (or leave it
-unset, the default) for a no-op — every test/CI run relies on this.
+Dashboard was `http://localhost:6006`.
+-->
 
 ## Docker (local build, not the live deploy)
 

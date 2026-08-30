@@ -24,6 +24,10 @@ from functools import cached_property
 
 from pydantic import BaseModel
 
+from logfire_logger import Level, Logger, LogfireLogger
+
+_events: Logger = LogfireLogger("argus.news_classify")
+
 
 @dataclass(frozen=True)
 class Taxonomy:
@@ -178,7 +182,10 @@ def _classify_one_batch(model, articles: list[dict], taxonomy: Taxonomy,
             ]
         )
     except Exception as exc:
-        print(f"[news_classify] batch of {len(articles)} failed: {exc!r}")
+        _events.log("batch_classify_failed",
+                     {"message": f"batch of {len(articles)} failed",
+                      "batch_size": len(articles)},
+                     level=Level.WARN, exc=exc)
         return {}
     if result is None:
         print(f"[news_classify] batch of {len(articles)} returned no result")
@@ -341,7 +348,10 @@ def draft_category_description(model, name: str, examples: list[str],
                 + f"\n\nExisting categories:\n{existing.prompt_fragment()}"},
         ])
     except Exception as exc:
-        print(f"[news_classify] could not draft a description for {name!r}: {exc!r}")
+        _events.log("description_draft_failed",
+                     {"message": f"could not draft a description for {name!r}",
+                      "name": name},
+                     level=Level.WARN, exc=exc)
         return None
     if result is None or not result.description.strip():
         return None
@@ -455,7 +465,10 @@ def normalize_interest_detailed(model, text: str, alongside: list[str] | None = 
             {"role": "user", "content": _interest_request(text, alongside)},
         ])
     except Exception as exc:
-        print(f"[news_classify] could not normalize interest {text!r}: {exc!r}")
+        _events.log("interest_normalize_failed",
+                     {"message": f"could not normalize interest {text!r}",
+                      "text": text},
+                     level=Level.WARN, exc=exc)
         return None
     if result is None or not result.english.strip():
         return None
@@ -543,7 +556,10 @@ def expand_interest_for_retrieval(model, interest: str) -> str | None:
             {"role": "user", "content": f"Interest: {interest}"},
         ])
     except Exception as exc:
-        print(f"[news_classify] could not expand interest {interest!r} for retrieval: {exc!r}")
+        _events.log("interest_expand_failed",
+                     {"message": f"could not expand interest {interest!r} for retrieval",
+                      "interest": interest},
+                     level=Level.WARN, exc=exc)
         return None
     if result is None or not result.definition.strip():
         return None

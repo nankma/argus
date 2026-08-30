@@ -2,11 +2,19 @@ from unittest.mock import MagicMock
 
 import news_classify
 import users_db
+from logfire_logger import Level
+from tests.fakes import FakeSpan
 
 # The same 13 categories users_db seeds, so these tests exercise the
 # real taxonomy without needing a database -- Taxonomy is a parameter
 # precisely so this is possible (see its docstring).
 TAXONOMY = news_classify.Taxonomy.from_rows(users_db.SEED_CATEGORIES)
+
+
+def _patch_events_span(monkeypatch):
+    span = FakeSpan()
+    monkeypatch.setattr(news_classify._events._tracer, "start_as_current_span", lambda name: span)
+    return span
 
 
 def _fake_structured_model(return_value) -> MagicMock:
@@ -43,11 +51,18 @@ def test_classify_articles_empty_input_returns_empty_without_calling_model():
     model.with_structured_output.assert_not_called()
 
 
-def test_classify_articles_fails_open_on_model_error():
+def test_classify_articles_fails_open_on_model_error(monkeypatch):
     model = MagicMock()
     model.with_structured_output.side_effect = RuntimeError("boom")
+    span = _patch_events_span(monkeypatch)
+
     result = news_classify.classify_articles(model, [{"title": "x", "summary": None}], TAXONOMY)
+
     assert result == {}
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert span.attrs["batch_size"] == 1
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
 def test_classify_articles_handles_missing_index_gracefully():
@@ -412,6 +427,29 @@ def test_a_label_seen_only_on_a_malformed_entry_is_still_reported():
     assert seen == [("Education", {})]
 
 
+# --- draft_category_description ---------------------------------------
+
+
+def test_draft_category_description_failure_returns_none(monkeypatch):
+    """A missing description is recoverable -- the caller falls back to
+    asking the admin -- so this must fail open, not raise."""
+    class Boom:
+        def with_structured_output(self, schema):
+            return self
+        def invoke(self, messages):
+            raise RuntimeError("model down")
+
+    span = _patch_events_span(monkeypatch)
+
+    result = news_classify.draft_category_description(Boom(), "Healthcare", ["a story"], TAXONOMY)
+
+    assert result is None
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert span.attrs["name"] == "Healthcare"
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
+
+
 # --- interest normalization -----------------------------------------------
 
 
@@ -451,7 +489,7 @@ def test_no_peers_means_no_context_paragraph():
     assert "also follows" not in type(model).seen
 
 
-def test_a_failed_normalization_returns_none_so_the_caller_keeps_the_original():
+def test_a_failed_normalization_returns_none_so_the_caller_keeps_the_original(monkeypatch):
     """A stored interest that searches badly beats one that silently
     wasn't saved."""
     class Boom:
@@ -460,7 +498,13 @@ def test_a_failed_normalization_returns_none_so_the_caller_keeps_the_original():
         def invoke(self, messages):
             raise RuntimeError("model down")
 
+    span = _patch_events_span(monkeypatch)
+
     assert news_classify.normalize_interest(Boom(), "光通訊") is None
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert span.attrs["text"] == "光通訊"
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
 def test_empty_interest_text_is_rejected_without_calling_the_model():
@@ -515,7 +559,13 @@ def test_expand_interest_failure_returns_none(monkeypatch):
         def invoke(self, messages):
             raise RuntimeError("model down")
 
+    span = _patch_events_span(monkeypatch)
+
     assert news_classify.expand_interest_for_retrieval(Boom(), "AI coding") is None
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert span.attrs["interest"] == "AI coding"
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
 def test_expand_interest_none_result_returns_none():

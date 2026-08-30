@@ -22,11 +22,12 @@ SSH key pair.
 
 **Telemetry is Logfire now, not Phoenix.** `agent.setup_telemetry()`
 sends spans straight to Logfire's cloud API (`LOGFIRE_ENABLED`/
-`LOGFIRE_API_KEY`) — no second VM, no self-hosted collector, no OTLP hop
-across the private subnet. The bot VM's `docker run` has carried no
-`PHOENIX_*` vars since 2026-08-23; `PHOENIX_ENABLED` still exists as a
-dead/unused code path in `agent.py` (fails open, costs nothing to leave
-in), not because Phoenix is live anywhere.
+`LOGFIRE_API_KEY`) via `logfire_logger.py`'s `LogfireLogger` — no second
+VM, no self-hosted collector, no OTLP hop across the private subnet. The
+bot VM's `docker run` has carried no `PHOENIX_*` vars since 2026-08-23;
+the Phoenix code path itself (`phoenix.otel.register()`, `PHOENIX_ENABLED`/
+`PHOENIX_ENDPOINT`, `telemetry_monitor.py`) was removed from this repo
+entirely, not just left unused.
 
 **The second VM (`instance-mnk-phoenix-20260808-1012` in
 `local-infra/infrastructure.yaml`'s `vm_phoenix` entry) still exists —

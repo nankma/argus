@@ -40,13 +40,8 @@ fi
 if [ -n "$ADMIN_CHAT_ID_SECRET_OCID" ]; then
     export ADMIN_CHAT_ID="$(fetch_secret "$ADMIN_CHAT_ID_SECRET_OCID")"
 fi
-if [ -n "$PHOENIX_API_KEY_SECRET_OCID" ]; then
-    export PHOENIX_API_KEY="$(fetch_secret "$PHOENIX_API_KEY_SECRET_OCID")"
-fi
-# Logfire is a second telemetry backend alongside Phoenix during the
-# migration in docs/plans/observability-platform-plan.md, not a replacement
-# yet. Export still needs LOGFIRE_ENABLED as well -- resolving the secret
-# does not by itself turn tracing on.
+# Resolving the secret alone does not turn tracing on -- the deployment
+# still needs LOGFIRE_ENABLED set as well (see agent.setup_telemetry).
 if [ -n "$LOGFIRE_API_KEY_SECRET_OCID" ]; then
     export LOGFIRE_API_KEY="$(fetch_secret "$LOGFIRE_API_KEY_SECRET_OCID")"
 fi

@@ -169,7 +169,19 @@ Now reads from a `PHOENIX_ENDPOINT` env var (defaulting to the old
 to set it to wherever Phoenix's service actually is (e.g. a Kubernetes
 service DNS name once that manifest exists).
 
-### Live Phoenix deployment: dedicated Oracle VM, no Docker
+### Live Phoenix deployment: dedicated Oracle VM, no Docker (RETIRED 2026-08-24)
+
+**Phoenix was fully retired 2026-08-24, and its code path removed from
+this repo entirely 2026-08-30** (`phoenix.otel.register()`,
+`PHOENIX_ENABLED`/`PHOENIX_ENDPOINT`, `telemetry_monitor.py` — see
+`docs/current/infrastructure.md` and `logfire_logger.py`). Everything in
+this section describes an architecture that no longer exists and no
+longer needs setting up — kept as historical record of how it was built
+and secured at the time, not as instructions to follow today. The second
+VM it describes still physically exists (powered off, boot volume
+intact) but is unused; see `docs/current/infrastructure.md` for its
+current status. Telemetry today is Logfire, a cloud-hosted API needing
+no VM of its own — see that same doc's "Telemetry is Logfire now" section.
 
 A second Always Free instance, `myfirstagent-phoenix`
 (`VM.Standard.E2.1.Micro`, same VCN/subnet as the bot VM, same SSH key),
@@ -304,7 +316,7 @@ that scheme inside it).
   preferable for isolation. See `docs/plans/bot-features-plan.md` item 1 and
   `CLAUDE.md`'s "Running both bots in one process" section.
 - `DEEPSEEK_API_KEY` / `TELEGRAM_BOT_TOKEN` / `ADMIN_CHAT_ID` /
-  `ADMIN_BOT_TOKEN` / `PHOENIX_ENABLED` / `PHOENIX_ENDPOINT` /
+  `ADMIN_BOT_TOKEN` / `LOGFIRE_ENABLED` / `LOGFIRE_API_KEY` /
   `SUBSCRIBERS_DB_FILE` are all runtime env vars (`docker run -e`, later a
   Kubernetes `Secret`/`ConfigMap`) — nothing is baked into the image.
 - `.dockerignore` excludes `tests/`, `docs/`, `.git/`, etc. from the build

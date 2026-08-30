@@ -47,7 +47,7 @@ _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 # respectively. Not a one-off mistake -- systematic, and it had been
 # happening on every error since these sources were added. Both keys were
 # rotated. traced_fetch's OpenTelemetry span carried the same value into
-# Phoenix.
+# the telemetry backend (Phoenix at the time; Logfire now).
 _SECRET_QUERY_PARAM_RE = re.compile(r"((?:api[-_]?key|apikey|token)=)[^&\s]+", re.IGNORECASE)
 
 
@@ -601,22 +601,24 @@ _tracer = trace.get_tracer(__name__)
 def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int,
                  section: str | None = None) -> list[dict]:
     """Wraps one source's fetch call in an OpenTelemetry span, so it shows
-    up in Phoenix's unified trace view alongside LLM calls -- this is the
-    layer openinference-instrumentation-langchain's auto-instrumentation
-    can't reach on its own. A plain fetch() here is a bare requests.get()
-    invoked from news_ingest.py's scheduled pull loop or agent.py's
-    search_news, entirely outside LangChain's tool-calling loop; auto-
-    instrumentation only sees LangChain-mediated calls (LLM invocations,
-    @tool-decorated tool calls), so without this wrapper these fetches are
-    invisible to Phoenix regardless of whether tracing is enabled. See
-    docs/plans/local-news-cache-plan.md's "API call visibility" section.
+    up in the telemetry backend's unified trace view alongside LLM calls
+    -- this is the layer openinference-instrumentation-langchain's
+    auto-instrumentation can't reach on its own. A plain fetch() here is a
+    bare requests.get() invoked from news_ingest.py's scheduled pull loop
+    or agent.py's search_news, entirely outside LangChain's tool-calling
+    loop; auto-instrumentation only sees LangChain-mediated calls (LLM
+    invocations, @tool-decorated tool calls), so without this wrapper
+    these fetches are invisible to telemetry regardless of whether it's
+    enabled. See docs/plans/local-news-cache-plan.md's "API call
+    visibility" section.
 
     trace.get_tracer() returns a real tracer once agent.py's
-    setup_telemetry() has called phoenix.otel.register(), or a safe no-op
-    tracer if it hasn't (PHOENIX_ENABLED unset, or register() never
-    called at all, e.g. in tests) -- this call has no effect either way
-    when tracing isn't configured, same "no-op by default" shape as
-    everywhere else telemetry touches this project.
+    setup_telemetry() has called LogfireLogger.setup() (see
+    logfire_logger.py), or a safe no-op tracer if it hasn't
+    (LOGFIRE_ENABLED unset, or setup_telemetry() never called at all,
+    e.g. in tests) -- this call has no effect either way when tracing
+    isn't configured, same "no-op by default" shape as everywhere else
+    telemetry touches this project.
 
     Re-raises on fetch failure after recording it on the span -- callers
     already have their own per-source try/except (news_ingest.py,
@@ -638,7 +640,9 @@ def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int,
         except Exception as exc:
             # Redacted for the same reason as _raise_for_status: a fetch
             # error's text can carry the request URL, and this attribute is
-            # shipped to Phoenix and retained for 30 days. Belt-and-braces --
+            # shipped to the telemetry backend and retained there (Logfire's
+            # own retention policy, not configured here -- see
+            # docs/system-overview.md §C4). Belt-and-braces --
             # _raise_for_status already strips it at the source for the
             # key-gated fetchers, but this is the last point before the value
             # leaves the process.

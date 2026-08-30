@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import users_db
+from logfire_logger import Level, Logger, LogfireLogger
+
+_events: Logger = LogfireLogger("argus.message_archive")
 
 ARCHIVE_DIR = os.environ.get("MESSAGE_ARCHIVE_DIR", "message_archive")
 
@@ -72,7 +75,10 @@ def archive_message(chat_id: int, kind: str, text: str, topic: str | None = None
         with open(path, "w", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False, indent=2)
     except OSError as exc:
-        print(f"[message_archive] could not archive a {kind!r} message for chat_id={chat_id}: {exc!r}")
+        _events.log("archive_write_failed",
+                     {"message": f"could not archive a {kind!r} message",
+                      "kind": kind},
+                     level=Level.WARN, exc=exc)
 
 
 def prune_message_archive(now: datetime, ttl_days: int = DEFAULT_TTL_DAYS) -> int:

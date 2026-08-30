@@ -65,5 +65,5 @@ Technique and tool usage, not a decision record.
 | Doc | Covers |
 |---|---|
 | `setup.md` | First-time environment setup, running any piece locally |
-| `observability-and-debugging.md` | Diagnosing a live issue — Phoenix traces, hot-patching |
+| `observability-and-debugging.md` | Diagnosing a live issue — Logfire traces, hot-patching (Phoenix section kept for historical/frozen-data queries only) |
 | `local-testing-api-plan.md` | `test_api.py`'s design and how to use it (named `-plan` from before it was built; content is now a reference, not an open plan) |

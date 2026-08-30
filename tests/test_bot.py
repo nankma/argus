@@ -18,6 +18,8 @@ from bot import (
     _trim_history,
     split_for_telegram,
 )
+from logfire_logger import Level
+from tests.fakes import FakeSpan
 
 
 @pytest.fixture(autouse=True)
@@ -936,6 +938,12 @@ def _seed_proposal(name, now, hits=5):
         users_db.record_category_sighting(name, now, f"https://e/{i}", f"{name} story {i}")
 
 
+def _patch_events_span(monkeypatch):
+    span = FakeSpan()
+    monkeypatch.setattr(bot._events._tracer, "start_as_current_span", lambda name: span)
+    return span
+
+
 def test_review_raises_a_proposal_past_the_threshold(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 20, tzinfo=timezone.utc)
     _seed_proposal("Healthcare", now)
@@ -973,9 +981,14 @@ def test_a_failed_send_leaves_the_proposal_raisable(monkeypatch, isolated_subscr
     monkeypatch.setattr(bot.news_classify, "draft_category_description", lambda *a, **k: "d")
     monkeypatch.setattr(bot, "Bot", lambda token: MagicMock(
         send_message=AsyncMock(side_effect=RuntimeError("telegram down"))))
+    span = _patch_events_span(monkeypatch)
 
     assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 0
     assert users_db.categories_ready_for_review(now) != [], "still eligible next cycle"
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert span.attrs["name"] == "Healthcare"
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
 def test_review_still_raises_when_the_description_could_not_be_drafted(

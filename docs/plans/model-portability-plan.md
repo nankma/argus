@@ -188,7 +188,7 @@ Evaluated and **not recommended at current scale.**
 |---|---|---|
 | **LiteLLM (self-hosted)** | Budget caps, caching, unified multi-provider routing, per-key quotas | Another process competing for the same **1 GB** — directly against principle P5. The single-process topology exists precisely to avoid loading a second runtime (overview, Appendix B.1) |
 | **OpenRouter / Portkey (hosted)** | Same, without local memory cost; one key for many providers | Adds a network hop to every call, a third-party dependency in the critical path, and (for some) per-token markup |
-| **Cloudflare AI Gateway** | Caching, analytics, rate limiting; generous free tier | Still an extra hop; overlaps with Phoenix, which already provides full trace fidelity |
+| **Cloudflare AI Gateway** | Caching, analytics, rate limiting; generous free tier | Still an extra hop; overlaps with Logfire, which already provides full trace fidelity |
 
 The distinctive benefits of a gateway are **budget enforcement, response
 caching, and managing many providers at once**. None are pressing:

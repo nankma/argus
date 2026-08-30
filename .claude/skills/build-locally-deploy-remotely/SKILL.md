@@ -191,8 +191,7 @@ the same incidents inline.
 
 **Step 3.5, before the smoke test below:** run
 `sudo docker logs myfirstagent-bot` and confirm you see the startup
-messages (Phoenix's OTel registration banner, "Both bots ready
-(polling)..."). Real incident, 2026-08-09: `docker logs` returned zero
+messages ("Both bots ready (polling)..."). Real incident, 2026-08-09: `docker logs` returned zero
 lines for this container's *entire* uptime across this whole session's
 deploys — not a subtle bug, but nobody checked `docker logs` itself
 until a user asked a timing question that needed it. Root cause: Python
@@ -205,59 +204,44 @@ the first thing to verify is still set.
 ## After every deploy: confirm telemetry is actually connected
 
 **Step 3.6, right after the `docker logs` check above:** run
-`python tools/check_telemetry.py --bot-vm ubuntu@<bot-vm-ip> --bot-key
-<key> --phoenix-vm ubuntu@<phoenix-vm-ip> --phoenix-key <key>` and
-confirm it prints `OK`. Real incident, found 2026-08-16: `PHOENIX_ENABLED`
-and `PHOENIX_ENDPOINT` were missing from the bot's `docker run` command —
-a regression from a previously-verified-working state
-(`docs/plans/deployment-plan.md`) that nobody noticed because nothing checked
-for it; it was only found weeks later while investigating something
-unrelated (API call counts). A container that starts cleanly and answers
+`python tools/check_logfire.py --bot-vm ubuntu@<bot-vm-ip> --bot-key <key>`
+and confirm it prints `OK`. A container that starts cleanly and answers
 messages normally gives zero signal that its traces are actually
-reaching Phoenix — `docker logs` showing the OTel registration banner
-only proves `register()` was *called*, not that the collector received
-anything. This step exists specifically to catch that class of silent
-regression on the very next deploy instead of an indeterminate time
-later. See `docs/plans/telemetry-and-testing-plan.md`'s "Currently NOT
-connected on the live deployment" section for the full incident and
-`tools/check_telemetry.py`'s own docstring for how the check works (it
-sends one message through `test_api.py`, then queries Phoenix's GraphQL
-API from the Phoenix VM for a matching span — two SSH round trips, no
-local tunnel).
+reaching Logfire — the OTLP HTTP exporter logs failures rather than
+raising, so a missing `LOGFIRE_ENABLED`, an unresolved Vault secret, or a
+token minted in the wrong region all look identical to a healthy deploy
+from `docker logs` alone. This step exists specifically to catch that
+class of silent regression on the very next deploy instead of an
+indeterminate time later. See `tools/check_logfire.py`'s own docstring
+for how the check works (it sends one message through `test_api.py`,
+then queries Logfire's own API for a matching span — one SSH round trip,
+no local tunnel).
 
 If it fails, do not consider the deploy done — same rule as a failed
 smoke-test case below, treat this as a blocking check, not an optional
 nice-to-have. A `FAIL` at the "sending a test message" step means the
 bot itself is unreachable (a different, more urgent problem); a `FAIL`
-at the "polling Phoenix" step with the bot reachable is the specific
-missing-env-var regression this check was built for.
+at the "polling Logfire" step with the bot reachable is the specific
+missing-env-var/wrong-region regression this check was built for.
 
-**If a second telemetry backend is ever added alongside Phoenix (e.g.
-Logfire), re-run this Phoenix check even though it "shouldn't" be
-affected.** Real incident, 2026-08-21: enabling `LOGFIRE_ENABLED`
-alongside the existing `PHOENIX_ENABLED` silently stopped Phoenix from
-receiving any spans at all — no error anywhere, container logs looked
-identical, and the bot answered messages normally. Root cause: Phoenix's
-own `register()` banner says outright — "Using a default SpanProcessor.
+**Historical note — this check's predecessor caught a real dual-backend
+bug, 2026-08-21, back when Phoenix and Logfire briefly ran side by
+side.** Enabling `LOGFIRE_ENABLED` alongside the-then-live
+`PHOENIX_ENABLED` silently stopped Phoenix from receiving any spans at
+all — no error anywhere, container logs looked identical, and the bot
+answered messages normally. Root cause: Phoenix's own `register()`
+banner said outright — "Using a default SpanProcessor.
 `add_span_processor` will overwrite this default." — and
-`agent.setup_telemetry()`'s Logfire branch, when Phoenix is already
-registered, calls `provider.add_span_processor(_logfire_processor(token))`
-on that *same* Phoenix provider. That call doesn't add a second
-processor; it *replaces* Phoenix's lazy default one, so whichever
-backend's `add_span_processor()` runs last is the only one that ever
-gets spans. Diagnosed by querying Logfire's own read API directly
-(`curl .../v1/query` with the resolved `LOGFIRE_API_KEY`, `--data-urlencode
-"sql=SELECT trace_id, span_name, start_timestamp FROM records ORDER BY
-start_timestamp DESC LIMIT 5"`) and finding fresh spans landing there —
-proof they were being exported, just to the wrong (only the newest)
-place. Rolled back by dropping `-e LOGFIRE_ENABLED=true` and restarting
-(no rebuild needed, the whole Logfire path is behind that flag);
-re-ran `check_telemetry.py` and got a clean `OK` again. Don't re-enable
-Logfire until `setup_telemetry()` is fixed to keep both processors live
-at once (e.g. don't call `add_span_processor` on Phoenix's own
-provider — build Logfire's own provider/processor instead, the way the
-Phoenix-absent branch already does), and re-verify with this same check
-afterward.
+`agent.setup_telemetry()`'s Logfire branch, when Phoenix was already
+registered, called `add_span_processor()` on that *same* Phoenix
+provider, which *replaced* Phoenix's default processor rather than
+adding a second one — whichever backend's `add_span_processor()` ran
+last was the only one that ever got spans. This is exactly why
+`LogfireLogger.setup()` (Phoenix has since been fully retired, see
+`docs/current/infrastructure.md`) never calls `add_span_processor` on a
+provider it didn't itself build, and why `setup_telemetry()` still sets
+`OTEL_SERVICE_NAME` before constructing anything — see that function's
+own docstring.
 
 ## After every deploy: confirm volume-backed directories actually are
 

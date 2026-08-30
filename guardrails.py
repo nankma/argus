@@ -39,6 +39,10 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from logfire_logger import Level, Logger, LogfireLogger
+
+_events: Logger = LogfireLogger("argus.guardrails")
+
 REDIRECT_MESSAGE = (
     "I only help with tech industry news and this bot's own subscription "
     "features. Here's what you can ask, in plain language:\n\n"
@@ -238,7 +242,11 @@ def classify_message(model, user_message: str) -> MessageClassification:
         # news query for real users, and the only evidence anywhere was that
         # people's interests stopped updating. A provider outage and "this
         # really is a news query" must not look identical from outside.
-        print(f"[guardrails] layer 2 FAILED, defaulting to news_query: {exc!r}")
+        # ERROR, not WARN: this is the load-bearing level for the exact
+        # 2026-08-21 incident above -- a silent fail-open here reads as
+        # routine WARN noise, which is what let it hide. Don't downgrade.
+        _events.log("router_failed", "layer 2 FAILED, defaulting to news_query",
+                     level=Level.ERROR, exc=exc)
         return MessageClassification(on_topic=True, categories=["news_query"])
 
 
@@ -333,8 +341,11 @@ def is_output_on_topic(model, response_text: str, category: str | None = None) -
             print("[guardrails] layer 4 returned nothing -- allowing output")
             return True
     except Exception as exc:
-        # Same reasoning as layer 2 above: fail open, but say so.
-        print(f"[guardrails] layer 4 FAILED, allowing output: {exc!r}")
+        # Same reasoning as layer 2 above: fail open, but say so, at ERROR
+        # -- this is layer 2's mirror and carries the same load-bearing
+        # 2026-08-21 lesson. Don't downgrade.
+        _events.log("output_check_failed", "layer 4 FAILED, allowing output",
+                     level=Level.ERROR, exc=exc)
         return True
     if result.discusses_own_configuration:
         return False

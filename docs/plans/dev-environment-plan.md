@@ -60,7 +60,7 @@ Both stores are already environment-configurable:
 SUBSCRIBERS_DB_FILE   → a local file
 NEWS_CACHE_DIR        → a local directory
 NEWS_ARCHIVE_DIR      → a local directory
-PHOENIX_ENABLED       → unset, so telemetry is a no-op
+LOGFIRE_ENABLED       → unset, so telemetry is a no-op
 ```
 
 Pointing those at a scratch directory and running the same code locally
@@ -119,7 +119,7 @@ the choice between "expensive" and "flaky".
 ```
 tools/dev_env.py          brings up a scratch environment:
                           temp SUBSCRIBERS_DB_FILE / NEWS_CACHE_DIR /
-                          NEWS_ARCHIVE_DIR, PHOENIX_ENABLED unset,
+                          NEWS_ARCHIVE_DIR, LOGFIRE_ENABLED unset,
                           placeholder Telegram tokens, test_api on
                           localhost, and a push `send` that collects
                           instead of transmitting

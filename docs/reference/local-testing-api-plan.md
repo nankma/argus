@@ -23,7 +23,7 @@ POST /test_message
 (`layer1_prefilter`, `layer2_router`, `layer4_output_check`,
 `agent_error`, or `null` if it went all the way through) — lets a test
 assert on *why* something was blocked without parsing reply text or
-cross-referencing `docker logs`/Phoenix.
+cross-referencing `docker logs`/Logfire.
 
 ## Why this design, specifically
 

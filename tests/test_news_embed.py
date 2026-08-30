@@ -1,5 +1,12 @@
 import news_embed
-from tests.fakes import FakeEmbedder
+from logfire_logger import Level
+from tests.fakes import FakeEmbedder, FakeSpan
+
+
+def _patch_events_span(monkeypatch):
+    span = FakeSpan()
+    monkeypatch.setattr(news_embed._events._tracer, "start_as_current_span", lambda name: span)
+    return span
 
 
 def test_embed_texts_returns_one_vector_per_input_in_order():
@@ -20,13 +27,19 @@ def test_embed_texts_with_empty_input_returns_empty_list():
     assert news_embed.embed_texts(FakeEmbedder(), []) == []
 
 
-def test_embed_texts_survives_an_encode_failure():
+def test_embed_texts_survives_an_encode_failure(monkeypatch):
     class Boom:
         def encode(self, texts):
             raise RuntimeError("model died")
 
+    span = _patch_events_span(monkeypatch)
     result = news_embed.embed_texts(Boom(), ["a", "b", "c"])
+
     assert result == [None, None, None]
+    assert span.attrs["logfire.level_num"] == Level.WARN
+    assert span.attrs["batch_size"] == 3
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
 
 
 def test_embed_one_returns_a_single_vector():
@@ -83,7 +96,12 @@ def test_build_embedder_returns_none_on_import_failure(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+    span = _patch_events_span(monkeypatch)
+
     assert news_embed.build_embedder() is None
+    assert span.attrs["logfire.level_num"] == Level.ERROR
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], ImportError)
 
 
 def test_mean_vector_of_identical_vectors_equals_that_vector():

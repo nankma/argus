@@ -35,6 +35,10 @@ either the embedder or a specific article's embedding is unavailable.
 
 import os
 
+from logfire_logger import Level, Logger, LogfireLogger
+
+_events: Logger = LogfireLogger("argus.news_embed")
+
 # model2vec's own encode() already L2-normalizes its output (confirmed by
 # measurement: every vector's norm is 1.0), which is what makes a plain
 # dot product the correct cosine similarity -- no renormalization needed
@@ -60,13 +64,16 @@ def build_embedder():
     Returns None on any failure (import error, missing/corrupt model
     files, HF_HUB_OFFLINE rejecting an unexpected download) rather than
     raising -- see the module docstring on why this must never be
-    startup-fatal. The failure is printed so it's visible in `docker
-    logs`, the same discipline guardrails.py's fail-open paths follow."""
+    startup-fatal. Logged at ERROR (not WARN): this degrades embeddings
+    for the whole process, not just one call, so it's worth a human
+    noticing rather than one more line in a batch of routine failures."""
     try:
         from model2vec import StaticModel
         return StaticModel.from_pretrained(MODEL_NAME)
     except Exception as exc:
-        print(f"[news_embed] could not load {MODEL_NAME}, embeddings disabled: {exc!r}")
+        _events.log("embedder_load_failed",
+                     f"could not load {MODEL_NAME}, embeddings disabled",
+                     level=Level.ERROR, exc=exc)
         return None
 
 
@@ -89,7 +96,10 @@ def embed_texts(embedder, texts: list[str]) -> list[list[float] | None]:
     try:
         vectors = embedder.encode(texts)
     except Exception as exc:
-        print(f"[news_embed] encode() failed for a batch of {len(texts)}: {exc!r}")
+        _events.log("embed_batch_failed",
+                     {"message": f"encode() failed for a batch of {len(texts)}",
+                      "batch_size": len(texts)},
+                     level=Level.WARN, exc=exc)
         return [None] * len(texts)
     # Rounded before it ever reaches a caller -- these get stored as a
     # plain YAML float list (news_cache.write_article), where full

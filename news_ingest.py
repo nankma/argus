@@ -84,11 +84,13 @@ import news_keyness
 import news_sources
 import users_db
 from opentelemetry import trace
+from logfire_logger import Level, Logger, LogfireLogger
 
 # A no-op when no tracer provider is configured -- which is every test and
 # CI run -- because OpenTelemetry's default is a no-op tracer. Same
 # reasoning as news_push._tracer.
 _tracer = trace.get_tracer("argus.news_ingest")
+_events: Logger = LogfireLogger("argus.news_ingest")
 
 # Raised from 5 to 200 on 2026-08-16 -- see module docstring. Still a real
 # cap, not "unlimited": RSS feeds are the publisher's own choice of how
@@ -412,6 +414,7 @@ def _pull_source(
             except Exception as exc:
                 print(f"[news_ingest] {source_key}: fetch(section={section!r}) "
                       f"failed with {exc!r}")
+                pull_span.record_exception(exc)
                 sections_failed += 1
                 continue
             if time_filterable and last_article_dt is not None:
@@ -626,4 +629,6 @@ def _refresh_category_keyness(now: datetime) -> None:
             users_db.set_category_keyness(category, scores)
         print(f"[news_ingest] tick at {now.isoformat()}: refreshed keyness for {len(categories)} categor{'y' if len(categories) == 1 else 'ies'}")
     except Exception as exc:
-        print(f"[news_ingest] category keyness refresh failed, offbeat selection degrades to keyword-only/recency this cycle: {exc!r}")
+        _events.log("keyness_refresh_failed",
+                     "category keyness refresh failed, offbeat selection degrades to keyword-only/recency this cycle",
+                     level=Level.WARN, exc=exc)

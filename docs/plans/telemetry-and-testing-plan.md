@@ -12,9 +12,9 @@ they're constructed, rather than hardcoded.
 |---|------|--------|
 | 1 | Dependency injection (model + callbacks as parameters) | Done |
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
-| 3 | Telemetry service install + hook (real backend for normal runs) | Done — originally Arize Phoenix via Docker, then a second backend (Logfire) added alongside it 2026-08-21. **Superseded 2026-08-24: Phoenix retired, Logfire is now the sole live backend** (`docs/plans/observability-platform-plan.md`'s migration completed; `PHOENIX_ENABLED` remains in `agent.setup_telemetry()` as a dead/unused fail-open path, not because Phoenix is live anywhere — see `docs/current/infrastructure.md`). The row below this one (its own text, not yet updated at the time of the migration) still describes the two-backend-coexistence period as current; read it as history, not present tense. |
+| 3 | Telemetry service install + hook (real backend for normal runs) | Done — originally Arize Phoenix via Docker, then a second backend (Logfire) added alongside it 2026-08-21. **Superseded 2026-08-24: Phoenix retired, Logfire is now the sole live backend** (`docs/plans/observability-platform-plan.md`'s migration completed). **Updated 2026-08-30: the `PHOENIX_ENABLED` fail-open path itself is gone too, not just unused** — `agent.py`'s Phoenix branch, `telemetry_monitor.py`, `tests/test_telemetry_monitor.py`, and `tools/check_telemetry.py` were deleted outright, and `setup_telemetry()` now just resolves the Logfire endpoint and delegates to the new `logfire_logger.LogfireLogger.setup()` (see `docs/current/telemetry-catalog.md`). The row below this one (its own text, not yet updated at the time of the migration) still describes the two-backend-coexistence period as current; read it as history, not present tense. |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
-| 5 | Test cases (actual scenarios) | Done — 681 tests as of 2026-08-29 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
+| 5 | Test cases (actual scenarios) | Done — 683 tests as of 2026-08-30 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
@@ -109,7 +109,7 @@ needed. That didn't survive contact with reality:
   running a Docker Compose stack with Postgres + ClickHouse, heavier than
   this project needs).
 
-**How it's wired up:** `agent.py`'s `setup_telemetry()` calls
+~~**How it's wired up:** `agent.py`'s `setup_telemetry()` calls
 `phoenix.otel.register(endpoint=PHOENIX_ENDPOINT, project_name="myfirstagent",
 protocol="grpc", auto_instrument=True)`, gated behind the `PHOENIX_ENABLED`
 env var — unset (the default, including in every test and CI run) means
@@ -119,15 +119,19 @@ mechanism as `run_agent`'s `callbacks` parameter — Phoenix/OTel
 instrumentation is global and set up once at startup, unlike the
 per-invocation `callbacks` list. `run_agent`'s `callbacks` param remains
 available for the local/in-memory case (`RecordingCallbackHandler` in
-tests) but Phoenix doesn't go through it.
+tests) but Phoenix doesn't go through it.~~ **OBSOLETE — Phoenix retired,
+this code path no longer exists in `agent.py` at all. See
+`logfire_logger.py`/`agent.setup_telemetry()` for how it works now.**
 
-**Run it:**
+~~**Run it:**~~ **OBSOLETE, do not run:**
+<!--
 ```powershell
 docker run -d --name phoenix -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
 $env:PHOENIX_ENABLED = "true"
 python agent.py
 ```
-Dashboard: `http://localhost:6006`.
+Dashboard was `http://localhost:6006`.
+-->
 
 **Verified end-to-end** (not just "the code runs without error") — queried
 Phoenix's GraphQL API directly after a real run and confirmed 20 real spans
@@ -380,7 +384,7 @@ without-a-key contract, one shared `TracerProvider` when both backends are
 on, and the token-prefix → region derivation (`logfire_traces_endpoint`).
 
 **This "Test cases" section and its counts are stale project-wide** (the
-suite is now 610 tests, not 16 — `qa-engineer` tracks the current total,
+suite is now 683 tests, not 16 — `qa-engineer` tracks the current total,
 this doc doesn't attempt to stay in sync test-by-test). Notable additions
 since, called out specifically because each is a new *category* of
 behaviour rather than more of an existing one:
@@ -451,6 +455,27 @@ behaviour rather than more of an existing one:
   single transient section error. See `docs/plans/observability-
   platform-plan.md`'s 2026-08-29 "healthcheck.py retired" section for
   the design.
+- **Phoenix retirement + `logfire_logger.py` (2026-08-30)** — `tests/
+  test_telemetry.py` was rewritten around `setup_telemetry()` delegating
+  to the new `logfire_logger.LogfireLogger.setup()` (idempotent
+  provider construction, `instrument_langchain` opt-in, service-name
+  ordering); `tests/test_logfire_logger.py` is new (12 tests) covering
+  `LogfireLogger.log()` itself (default/explicit level, tags only when
+  given, dict-vs-string `message`, exception recording + `ERROR` status,
+  the printed line) and `setup()`'s idempotency/instrumentation
+  branches. Eleven previously print-only `except Exception:` sites
+  across `news_embed.py`, `message_archive.py`, `news_ingest.py`,
+  `bot.py`, `news_classify.py`, and `guardrails.py` were converted to
+  call a per-module `_events: Logger = LogfireLogger(...)` instead;
+  every converted site's test now asserts the right span name, level,
+  and recorded exception via a shared `tests.fakes.FakeSpan` — see
+  `docs/current/telemetry-catalog.md`'s `LogfireLogger`-emitted events
+  table for the full inventory. The two `guardrails.py` sites
+  (`router_failed`, `output_check_failed`) stayed at `ERROR` — tied to
+  the 2026-08-21 silent-fail-open incident — and their fail-open return
+  values are byte-identical to before (only the `print()` inside the
+  `except` block changed), so this carries no guardrail-reliability risk
+  and didn't need a `measure_guardrails.py` re-run to confirm.
 
 **Not covered yet** (candidates for later):
 - ~~`agent._logfire_processor`'s actual body, and the Logfire-only wiring

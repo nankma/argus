@@ -41,6 +41,37 @@ class FakeToolCallingModel(BaseChatModel):
         return "fake-tool-calling-model"
 
 
+class FakeSpan:
+    """Stand-in for an OTel span, for asserting on LogfireLogger.log(...)
+    calls -- monkeypatch a module's `<logger>._tracer.start_as_current_span`
+    to `lambda name: FakeSpan()` and check `.attrs`/`.exceptions` after.
+    Shared here because Part 3 of the LogfireLogger rollout (news_embed.py,
+    message_archive.py, news_ingest.py, bot.py, news_classify.py,
+    guardrails.py) needed the identical class in six test files -- keeping
+    one copy means `Logger.log()` growing a new span method only needs
+    updating here, not in lockstep across all six."""
+
+    def __init__(self):
+        self.attrs = {}
+        self.exceptions = []
+        self.status = None
+
+    def set_attribute(self, k, v):
+        self.attrs[k] = v
+
+    def record_exception(self, exc):
+        self.exceptions.append(exc)
+
+    def set_status(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 class RecordingCallbackHandler(BaseCallbackHandler):
     """In-memory stand-in for a real telemetry backend. Records LLM and tool
     start/end events as plain dicts in self.events, in call order, for tests

@@ -29,8 +29,9 @@ list — was wanted).
 - **`users_db.py`** — a `subscribers` table (`chat_id`, `username`,
   `first_name`, `status` — `pending`/`approved`/`denied` —, `requested_at`,
   `decided_at`) in a SQLite file (`subscribers.db`, path configurable via
-  `SUBSCRIBERS_DB_FILE`, same reasoning as `agent.py`'s `PHOENIX_ENDPOINT`
-  being configurable). Shared by both bots below — this is what lets them
+  `SUBSCRIBERS_DB_FILE`, same reasoning as other deployment-specific
+  paths/endpoints elsewhere in this project being configurable rather
+  than hardcoded). Shared by both bots below — this is what lets them
   agree on who's approved without talking to each other directly.
 - **`bot.py`** (the public info bot) — `check_access()` runs before every
   message is handled. `ADMIN_CHAT_ID` (env var, not literally hardcoded in

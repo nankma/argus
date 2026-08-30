@@ -144,9 +144,9 @@ deployment; see the `build-locally-deploy-remotely` skill.
 
 ## Deployment
 
-Two VMs on Oracle Cloud's Always Free tier: the bot container, and a
-separate server running [Arize Phoenix](https://phoenix.arize.com/) for
-LLM tracing.
+One VM on Oracle Cloud's Always Free tier, running the bot container.
+LLM tracing goes to [Pydantic Logfire](https://pydantic.dev/logfire), a
+cloud-hosted OpenTelemetry backend, so no second VM is needed for it.
 
 ```bash
 docker build -t myfirstagent-bot .

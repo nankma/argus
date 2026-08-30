@@ -304,10 +304,10 @@ for fn in host_check run; do
 done
 
 # Wait for readiness rather than sleeping a fixed amount. A restart has to
-# activate the conda env, fetch four secrets from OCI Vault and register
-# with Phoenix before it prints anything, which took longer than a flat 20s
-# and made the first run of this script report an empty log for a container
-# that was perfectly healthy.
+# activate the conda env and fetch four secrets from OCI Vault before it
+# prints anything, which took longer than a flat 20s and made the first
+# run of this script report an empty log for a container that was
+# perfectly healthy.
 READY=0
 for _ in $(seq 1 30); do
     if "${SSH[@]}" "sudo docker logs --tail 200 $CONTAINER 2>&1 | grep -q 'Both bots ready'"; then
@@ -323,27 +323,12 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
-# These three run from HERE, not inside the container: they open their own
+# These run from HERE, not inside the container: they open their own
 # SSH connections, and tools/ is deliberately not in the image's COPY list.
 # Check whichever backends the deploy actually enabled, read from the same
 # docker run command that enabled them -- so retiring one backend does not
 # leave a check that fails forever. A check known to fail is worse than no
 # check: it trains you to ignore the output.
-case "$DOCKER_RUN" in
-    *PHOENIX_ENABLED=true*)
-        PHOENIX_VM=$(grep -oE 'ubuntu@[0-9.]+' "$INFRA" | sort | uniq | grep -v "$VM_IP" | head -1)
-        if [ -n "$PHOENIX_VM" ]; then
-            host_check phoenix-telemetry tools/check_telemetry.py \
-                --bot-vm "$SSH_USER@$VM_IP" --bot-key "$SSH_KEY" \
-                --phoenix-vm "$PHOENIX_VM" --phoenix-key "$SSH_KEY" --timeout 90
-        else
-            warn "PHOENIX_ENABLED is set but no Phoenix VM is recorded in $INFRA"
-            FAILURES=$((FAILURES + 1))
-        fi
-        ;;
-    *) ok "Phoenix not enabled -- skipping its check" ;;
-esac
-
 case "$DOCKER_RUN" in
     *LOGFIRE_ENABLED=true*)
         if [ -n "${LOGFIRE_API_KEY:-}" ]; then
