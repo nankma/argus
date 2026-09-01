@@ -19,7 +19,11 @@ from datetime import datetime, timedelta, timezone
 
 from app_settings import get_settings
 
-DB_FILE = get_settings().resolved("storage.subscribers_db_file", default="subscribers.db")
+# required=True, no default -- both bots need a real, shared db path;
+# settings.yml not having it is a deployment mistake, not something to
+# paper over. See
+# docs/standaloneplan/01-settings-migration.md's "Migration methodology".
+DB_FILE = get_settings().resolved("storage.subscribers_db_file", required=True)
 
 PENDING = "pending"
 APPROVED = "approved"

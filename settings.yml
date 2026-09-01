@@ -1,0 +1,42 @@
+# Local-dev settings file -- committed, safe forever, working example.
+# CRITERION: only env-var names, placeholder identifiers, relative
+# paths, and structure -- never a real, this-deployment-specific value
+# (OCID, IP, hostname, literal secret). See CLAUDE.md's Landmines and
+# settings.oracle.yml's own header for the same rule applied to the
+# production-target file. This is what SETTINGS_FILE defaults to
+# (app_settings.py) if unset -- clone this repo, run it, works as-is;
+# edit freely for your own paths/values.
+#
+# Only sections that have actually been migrated exist here (uncommented
+# and live) -- see docs/standaloneplan/01-settings-migration.md for what
+# has and hasn't moved off raw os.environ yet.
+
+storage:
+  news_cache_dir: news_cache
+  message_archive_dir: message_archive
+  subscribers_db_file: subscribers.db
+  # news_archive_dir intentionally omitted -- archiving off, same as the
+  # pre-migration default (unset NEWS_ARCHIVE_DIR). default=None in code
+  # (news_cache.py), a legitimate state, not a required key.
+
+# Not yet migrated onto Settings -- still raw os.environ reads as of
+# 2026-09-01 (models.*, delivery.*, telemetry.*, news_source.*). See
+# docs/standaloneplan/01-settings-migration.md for current status. These
+# sections are a preview of the eventual shape, not live yet -- and per
+# the criterion above, DEEPSEEK_API_KEY/TELEGRAM_BOT_TOKEN etc. below are
+# env-var *names*, not real values, safe to leave uncommented as-is when
+# these sections do go live:
+#
+# models:
+#   main:
+#     api-key:
+#       trailsign-resolve: environment-variable
+#       name: DEEPSEEK_API_KEY
+#     url: https://api.deepseek.com
+#     model: deepseek-v4-flash
+#
+# delivery:
+#   telegram:
+#     bot-token:
+#       trailsign-resolve: environment-variable
+#       name: TELEGRAM_BOT_TOKEN

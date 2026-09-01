@@ -8,6 +8,99 @@ happen before each phase can safely reach production, and current
 status. Living document — update the status column as each phase lands,
 don't let it drift from the code.
 
+## Migration methodology — read this before touching any call site
+
+This section went through two real corrections on 2026-09-01 (both
+below, marked with the date) — re-read the whole thing before starting
+models, news sources, Telegram/admin, or telemetry, not just the parts
+that seem relevant.
+
+1. **No code-level fallback to the old source, ever. Untouched settings
+   stay 100% untouched until their own turn; touched settings read only
+   from `Settings`, full stop.** (Corrected 2026-09-01 — the first
+   version of this rule said the opposite: wrap the old env var as
+   `default=`. That was wrong. The actual discipline is simpler and
+   stricter.)
+   ```python
+   # Before touching NEWS_CACHE_DIR at all: leave it exactly as it was.
+   # Don't pre-wrap it in Settings "just in case" while working on
+   # something else -- an untouched setting is not this migration's
+   # business yet.
+   CACHE_DIR = os.environ.get("NEWS_CACHE_DIR", "news_cache")
+
+   # The moment NEWS_CACHE_DIR is actually being migrated: read Settings
+   # only. No os.environ fallback baked into the call site -- that would
+   # just recreate the old hidden-dual-source problem in a new place.
+   CACHE_DIR = get_settings().resolved("storage.news_cache_dir", required=True)
+   ```
+   `required=True` (no `default=`) for anything the service always needs
+   a real value for — an absent key is a deployment mistake and should
+   fail loudly at import time, not silently paper over with a maybe-wrong
+   guess. `default=<a plain literal>` only for a value where "unset" is
+   a genuinely legitimate, intentional state (e.g. `LLM_REQUEST_TIMEOUT_SECONDS`
+   defaulting to a sensible timeout, or `news_archive_dir` defaulting to
+   `None` — archiving off is a real, expected state, not a
+   misconfiguration). Never `default=os.environ.get(...)` — once a
+   setting is migrated, the old env var is dead for it, not a permanent
+   safety net.
+2. **Touching the code and updating *both* real settings.yml files
+   (local dev's and the Oracle-target one) is one atomic unit of
+   change, not two.** You cannot migrate a call site to
+   `required=True`/no-default and leave either settings.yml without that
+   key — the app won't start. Deploying the code and deploying its
+   settings.yml value happen together, in the same batch, verified
+   together — never "ship the code now, add the config value later" (see
+   "Deploying past storage paths" below for what this actually looks
+   like when it went wrong).
+3. **Secrets fetched via `docker-entrypoint.sh` are a different, wider
+   shape than a plain `os.environ` read — most of what's left in this
+   migration is this shape, not the simple one.** (Added 2026-09-01,
+   after `DEEPSEEK_API_KEY` was used as a concrete counter-example to
+   rule 1's first, wrong version.) `docker-entrypoint.sh` conditionally
+   fetches `DEEPSEEK_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ADMIN_BOT_TOKEN`,
+   `ADMIN_CHAT_ID`, `LOGFIRE_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY`,
+   and `NEWSAPI_API_KEY` from OCI Vault *before Python even starts*,
+   exporting each as a plain env var only if its `*_SECRET_OCID`
+   companion var is set. For these, "the old place" is the whole chain
+   — the shell fetch block *and* however Python consumes the resulting
+   env var (sometimes implicit, e.g. `ChatDeepSeek` reading
+   `DEEPSEEK_API_KEY` internally, no explicit `os.environ.get` line in
+   `agent.py` at all). Migrating one of these means touching **three**
+   places together, in the same batch:
+   1. `settings.yml` — add a `trailsign-resolve: oracleKeyVault` node
+      using the *same* secret OCID the entrypoint script already fetches
+   2. the Python construction site — read from `Settings` explicitly
+      instead of relying on the env var
+   3. `docker-entrypoint.sh` — remove that variable's now-redundant fetch
+      block (and its `*_SECRET_OCID` env var from `docker_run.command`),
+      since Python now fetches it directly via the same instance-principal
+      auth Trailsign's `OracleKeyVaultResolver` already proved works
+
+   Until a given secret's turn actually comes, none of these three get
+   touched — same "untouched stays untouched" principle as rule 1, just
+   correctly scoped to what the old mechanism actually is for a secret
+   versus a plain value.
+4. **One setting at a time, one small change at a time.** Move exactly
+   one variable (plain or entrypoint-fetched) per change — don't batch
+   multiple variables together just because they share a file, a
+   subsystem, or the same entrypoint script.
+5. **Verify against something as close to real as possible after every
+   single change, before moving to the next ("test to INT").** Unit
+   tests with fakes aren't sufficient on their own for this class of
+   change — the risk is specifically in the wiring between settings.yml,
+   the real filesystem, and (for entrypoint-fetched secrets) the real
+   OCI Vault, none of which a mocked `Settings` exercises. **There is no
+   dedicated INT environment yet** — building one is literally one of
+   this whole plan's own goals (see `docs/standaloneplan/README.md`'s
+   "Why" #1), still not done. Until it exists, "test to INT" means
+   testing against the real Oracle instance this project already has
+   SSH access to (`instance-mnk-phoenix-20260808-1012` — the same one
+   Trailsign's own `OracleKeyVaultResolver` was verified against), not
+   just a local Windows simulation of the same values.
+6. **The discipline doesn't relax as stakes go up.** If anything it
+   matters more once real secrets (models, Telegram tokens) are
+   involved, not less.
+
 ## Bootstrap: how `app_settings.py` finds its config
 
 `app_settings.py` (repo root) is the one process-wide `Settings`
@@ -21,51 +114,82 @@ file's *path*:
   — `-e SETTINGS_FILE=/config/settings.yml -v /host/settings.yml:/config/settings.yml:ro`
   — no new deployment mechanism needed, just one more `-e`/`-v` pair in
   `local-infra/infrastructure.yaml`'s `docker_run.command` when
-  production actually gets a real settings file (see "Before deploying
-  any phase" below — hasn't happened yet).
+  production actually gets a real settings file (see "Deploying storage
+  paths" below — hasn't happened yet).
 - **If no file exists at the resolved path**, `app_settings.get_settings()`
-  falls back to an empty `Settings({})`. Every migrated call site was
-  written with its own `default=` argument specifically so this doesn't
-  break anything — it just means every setting resolves to its
-  hardcoded default, same as before migration. This is deliberate: it's
-  what let the storage-path migration (Phase 1 below) land and pass
-  tests with zero settings.yml deployed anywhere yet.
+  falls back to an empty `Settings({})`. What that means depends on
+  whether a given call site has been migrated yet — see "Migration
+  methodology" below: an **unmigrated** setting doesn't care (it's still
+  a plain `os.environ.get(...)` line, Settings being empty is
+  irrelevant); a **migrated, `required=True`** setting throws
+  `SettingsError` immediately at import time. That's intentional, not a
+  gap — a deployment missing a required setting should fail loudly, not
+  silently guess. This is exactly why rule 2 below makes "update the
+  code" and "update both real settings.yml files" one atomic change, not
+  two.
 
-## Two templates, not one file
+## Three real environments, not one file
 
-- **`settings.example.yml`** (committed, repo root) — the shape,
-  showing every currently-migrated section plus a commented-out preview
-  of sections not built yet. No real values.
-- **The real `settings.yml`** — gitignored (`.gitignore` entry added
-  alongside `local-infra/`), never committed. **Local dev's copy and
-  PROD's copy are not the same file and don't have the same shape**:
-  local dev can use plain `trailsign-resolve: plaintext` or
-  `environment-variable` nodes for everything; PROD's real secrets
-  (once Phase 3+ migrates them) will reference
-  `credential_sources.oci-vault-main` and `trailsign-resolve: oracleKeyVault`
-  nodes, matching `local-infra/infrastructure.yaml`'s existing vault
-  OCIDs. This split is why the real file lives outside git entirely
-  rather than being one checked-in file with placeholder secrets.
+**`settings.yml` and `settings.oracle.yml` (both repo root) are
+committed on purpose, as of 2026-09-01** — reconsidered from an earlier
+gitignored-by-default design. Neither has ever contained a real secret,
+IP, or this-deployment-specific OCID, and a committed, working example
+is genuinely useful (clone the repo, run it, works — one of this whole
+plan's own "Why" goals). The boundary that makes this safe:
+
+> **Criterion — also in CLAUDE.md's Landmines**: `settings.yml` and
+> `settings.oracle.yml` may only ever contain env-var *names*,
+> placeholder/example identifiers, relative paths, and structure —
+> never a real, this-deployment-specific value (a real OCID, IP,
+> hostname, or literal secret). The moment Phase 2+ needs one of this
+> project's actual vault/secret/compartment OCIDs, that value goes into
+> a **new** gitignored file under `local-infra/` instead (matching
+> `local-infra/infrastructure.yaml`'s existing convention) — these two
+> files keep placeholder versions, forever, not the real one.
+
+- **`settings.yml`** — local dev's real, working file, what
+  `SETTINGS_FILE` defaults to. `storage.*` fully populated (required, so
+  it has to be), plus a commented-out preview of sections not built yet
+  (folded in from a since-removed separate `settings.example.yml` — one
+  file, not two that could drift apart).
+- **`settings.oracle.yml`** — the production-target template. Bridges
+  `storage.*` to the exact same env vars `docker_run.command` already
+  sets, via `trailsign-resolve: environment-variable` nodes — genuinely
+  deployable as-is today, not just illustrative. Once models/Telegram
+  secrets are migrated (Phase 2+), *this file* gains the
+  `credential_sources.oci-vault-main` + `trailsign-resolve: oracleKeyVault`
+  shape using placeholder OCIDs, while the real deploy uses a sibling
+  file under `local-infra/` with this project's actual OCIDs filled in.
+- **The test environment** — not a yaml file at all. `tests/conftest.py`
+  injects a `Settings({"storage": {...}})` dict directly (via
+  `app_settings.reset_settings_for_tests(...)`) before importing any
+  migrated module, since module-level constants are computed once at
+  first import — before any pytest fixture could run. Forgetting to add
+  a newly-`required=True` key here breaks the *entire* test suite
+  immediately and loudly (every test that imports the affected module
+  fails at collection) — a real, useful forcing function, not just an
+  inconvenience.
 
 ## Full inventory — every raw `os.environ` read, current status
 
 Re-grepped 2026-09-01, not carried over from memory:
 
-| Variable | Read in | Secret? | Target settings path | Status |
-|---|---|---|---|---|
-| `NEWS_CACHE_DIR` | ~~`news_cache.py`~~ | no | `storage.news_cache_dir` | **Migrated** 2026-09-01 |
-| `NEWS_ARCHIVE_DIR` | ~~`news_cache.py`~~ | no | `storage.news_archive_dir` | **Migrated** 2026-09-01 |
-| `MESSAGE_ARCHIVE_DIR` | ~~`message_archive.py`~~ | no | `storage.message_archive_dir` | **Migrated** 2026-09-01 |
-| `SUBSCRIBERS_DB_FILE` | ~~`users_db.py`~~ | no | `storage.subscribers_db_file` | **Migrated** 2026-09-01 |
-| `DEEPSEEK_API_KEY` | `tools/measure_guardrails.py`, `tools/run_eval.py` (`agent.py` reads it implicitly via `ChatDeepSeek`) | **yes** | `models.main.api-key` | Not started |
-| `LLM_MODEL` / `LLM_MODEL_CLASSIFIER` | `agent.py` (`build_model`) | no | `models.main.model` / `models.guardrail.model` | Not started — feeds the already-built `model-portability-plan.md` mechanism, no new design |
-| `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | `agent.py` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` | Not started |
-| `LOGFIRE_ENABLED` / `LOGFIRE_API_KEY` | `agent.py`, `tools/check_logfire.py` | key: **yes** | `telemetry.tracing.*` (folds into the seam-4 split, see `docs/standaloneplan/README.md` Phase 3) | Not started |
-| `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | `news_sources.py` | **yes** | `news_source.<name>.api-key` | Not started |
-| `TELEGRAM_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **yes** | `delivery.telegram.bot-token` | Not started — highest blast radius of the "current" set, bot startup itself depends on it |
-| `ADMIN_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **yes** | `delivery.telegram.admin_bot_token` | Not started |
-| `ADMIN_CHAT_ID` | `bot.py`, `combined_bot.py`, `admin_bot.py` | no | `delivery.telegram.admin_chat_id` | Not started |
-| `TEST_API_PORT` / `ENABLE_TEST_API` | `test_api.py` | no | `test_api.port` / `test_api.enabled` | Not started — lowest priority, dev-only tool |
+| Variable | Read in | Old mechanism | Secret? | Target settings path | Status |
+|---|---|---|---|---|---|
+| `NEWS_CACHE_DIR` | ~~`news_cache.py`~~ | plain `os.environ` | no | `storage.news_cache_dir` | **Migrated** 2026-09-01, `required=True` |
+| `NEWS_ARCHIVE_DIR` | ~~`news_cache.py`~~ | plain `os.environ` | no | `storage.news_archive_dir` | **Migrated** 2026-09-01, `default=None` (intentional "off" state) |
+| `MESSAGE_ARCHIVE_DIR` | ~~`message_archive.py`~~ | plain `os.environ` | no | `storage.message_archive_dir` | **Migrated** 2026-09-01, `required=True` |
+| `SUBSCRIBERS_DB_FILE` | ~~`users_db.py`~~ | plain `os.environ` | no | `storage.subscribers_db_file` | **Migrated** 2026-09-01, `required=True` |
+| `DEEPSEEK_API_KEY` | `tools/measure_guardrails.py`, `tools/run_eval.py` (`agent.py` reads it implicitly via `ChatDeepSeek`) | **`docker-entrypoint.sh` vault-fetch** (via `DEEPSEEK_API_KEY_SECRET_OCID`) | **yes** | `models.main.api-key` | Not started — see methodology rule 3, this is the worked example |
+| `LLM_MODEL` / `LLM_MODEL_CLASSIFIER` | `agent.py` (`build_model`) | plain `os.environ` | no | `models.main.model` / `models.guardrail.model` | Not started — feeds the already-built `model-portability-plan.md` mechanism, no new design |
+| `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | `agent.py` | plain `os.environ` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` | Not started — legitimate `default=<literal>` candidates, not `required=True` |
+| `LOGFIRE_ENABLED` | `agent.py` | plain `os.environ` | no | `telemetry.tracing.*` (folds into the seam-4 split, see `docs/standaloneplan/README.md` Phase 3) | Not started |
+| `LOGFIRE_API_KEY` | `agent.py`, `tools/check_logfire.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `telemetry.tracing.*` | Not started |
+| `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | `news_sources.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `news_source.<name>.api-key` | Not started |
+| `TELEGRAM_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.bot-token` | Not started — highest blast radius of the "current" set, bot startup itself depends on it |
+| `ADMIN_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.admin_bot_token` | Not started |
+| `ADMIN_CHAT_ID` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | no (an id, not a credential — still fetched the same way) | `delivery.telegram.admin_chat_id` | Not started |
+| `TEST_API_PORT` / `ENABLE_TEST_API` | `test_api.py` | plain `os.environ` | no | `test_api.port` / `test_api.enabled` | Not started — lowest priority, dev-only tool |
 
 Deliberately **not** migrating (stay raw `os.environ`, out of scope):
 `SETTINGS_FILE` itself (the bootstrap exception, see above),
@@ -78,9 +202,11 @@ image, not part of the running service).
 ## Migration order and reasoning
 
 1. ~~**Storage paths**~~ — **done** 2026-09-01. No secrets, lowest
-   blast radius, proved the `app_settings.py` bootstrap pattern and the
-   "empty-Settings fallback means nothing breaks pre-deployment" design
-   before touching anything riskier.
+   blast radius, plain `os.environ` reads (no `docker-entrypoint.sh`
+   involved) — proved the `app_settings.py` bootstrap pattern and the
+   `required=True`/"code and both settings.yml files move together"
+   discipline before touching anything with real secrets or the
+   entrypoint-fetch shape.
 2. **Models** (`DEEPSEEK_API_KEY`, `LLM_MODEL`, `LLM_MODEL_CLASSIFIER`,
    `LLM_REASONING_EFFORT`, `LLM_REQUEST_TIMEOUT_SECONDS`) — next up.
    First real secret migrated, but low-traffic-surface (one construction
@@ -101,55 +227,38 @@ image, not part of the running service).
    1–4 — real design work (the file-based `Logger`/`SpanExporter`)
    happens at the same time.
 
-## Before deploying ANY phase past storage paths: a real production cutover step is required, not optional
+## Deploying storage paths: what "code and settings.yml move together" actually requires
 
-**Real risk found while building this inventory, not hypothetical.**
-`local-infra/infrastructure.yaml`'s live `docker_run.command` still sets
-`-e NEWS_CACHE_DIR=/data/news_cache -e NEWS_ARCHIVE_DIR=/data/news_archive
--e MESSAGE_ARCHIVE_DIR=/data/message_archive -e SUBSCRIBERS_DB_FILE=/data/subscribers.db`.
-The migrated code (Phase 1, done) no longer reads any of these four env
-vars directly — it reads `storage.*` from `app_settings.get_settings()`
-instead, which falls back to relative-path defaults
-(`news_cache`, `message_archive`, `subscribers.db`, unset archive) when
-no `settings.yml` exists on the container. **If this code were deployed
-today with no settings.yml shipped alongside it, the container's
-`/data`-pointed env vars would go silently unread, and the cache/db
-paths would revert to the container's own filesystem** — exactly the
-class of bug this project already has a full incident write-up for
-(`docs/plans/deployment-plan.md`, 2026-08-19/20: `NEWS_CACHE_DIR` unset
-→ every redeploy silently reset the article cache).
+`news_cache.py`/`message_archive.py`/`users_db.py` now use `required=True`
+for `news_cache_dir`/`message_archive_dir`/`subscribers_db_file` (only
+`news_archive_dir` keeps a plain `default=None`, since "off" is a real,
+intentional state — see methodology rule 1). **This means the current
+code cannot start at all without a settings.yml that has those three
+keys** — confirmed directly: importing `news_cache` with no settings.yml
+anywhere throws `SettingsError` immediately, not a silent fallback.
+That's the point (fail loud on a real misconfiguration), but it makes
+this phase's actual deploy prerequisite a hard requirement, not an
+optional nicety:
 
-**The fix, before this phase's code ever reaches PROD**: ship a real
-`settings.yml` on the container that bridges to the exact same env vars
-docker_run already sets, so behavior is provably unchanged:
+**Before this code can ever run on the Oracle VM, `settings.oracle.yml`
+(prepared, verified locally, not yet deployed) has to ship to the
+container in the same deploy.** It bridges `storage.*` to the exact same
+env vars `docker_run.command` already sets
+(`-e NEWS_CACHE_DIR=/data/news_cache` etc.), via
+`trailsign-resolve: environment-variable` nodes — so once deployed,
+behavior is unchanged from today, but the failure mode if this step gets
+skipped is now a crash at container startup, not a silent
+`docs/plans/deployment-plan.md`-style cache reset. That's a real
+improvement over the original design (a *silent* wrong-path bug) even
+though it means the deploy has one more hard prerequisite than before.
 
-```yaml
-storage:
-  news_cache_dir:
-    trailsign-resolve: environment-variable
-    name: NEWS_CACHE_DIR
-  news_archive_dir:
-    trailsign-resolve: environment-variable
-    name: NEWS_ARCHIVE_DIR
-  message_archive_dir:
-    trailsign-resolve: environment-variable
-    name: MESSAGE_ARCHIVE_DIR
-  subscribers_db_file:
-    trailsign-resolve: environment-variable
-    name: SUBSCRIBERS_DB_FILE
-```
-
-This is zero-risk (same env vars, same values, just read through one
-more layer) and should be the **first** real settings.yml PROD ever
-gets, landing in the same deploy as (or before) this phase's code. Add
-`-e SETTINGS_FILE=... -v .../settings.yml:...` to
-`local-infra/infrastructure.yaml`'s `docker_run.command` at the same
-time, and verify with `tools/check_data_persistence.py` (already exists,
-already built for this exact failure mode) immediately after that
-deploy — don't just trust the code compiled and tests passed. This same
-"bridge to the existing env var first, don't jump straight to a vault
-reference" approach should be the default move for every later phase
-too, not just this one.
+To actually deploy: add
+`-e SETTINGS_FILE=/config/settings.yml -v <path-on-vm>/settings.yml:/config/settings.yml:ro`
+to `docker_run.command`, scp `settings.oracle.yml` to the
+VM, then verify with `tools/check_data_persistence.py` (already exists,
+already built for this exact failure mode) — don't just trust the
+deploy succeeded because the container started; a crash-on-missing-key
+is loud, but confirm the *values* are actually right too.
 
 ## Production secrets (Phase 2+): the pattern is proven, not theoretical
 
@@ -167,13 +276,28 @@ doc is ready to use, not speculative.
 
 ## Testing
 
-Already built, not just planned: `app_settings.reset_settings_for_tests()`
-(no-arg resets to force a reload; pass a `Settings` instance to inject a
-fake) plus the fact that `trailsign.Settings.__init__` accepts a plain
-dict directly (`Settings({"storage": {"news_cache_dir": "/tmp/x"}})`) —
-no file needed for tests. `tests/test_app_settings.py` covers the
-bootstrap itself. Existing tests for migrated modules needed **zero**
-changes across Phase 1, because they already monkeypatched the
-module-level constant (`monkeypatch.setattr(news_cache, "CACHE_DIR", ...)`)
-rather than the env var — expect the same to hold for Phases 2–4, worth
-confirming per-phase rather than assuming.
+Already built, not just planned. Two layers:
+
+- **`app_settings.reset_settings_for_tests()`** (no-arg resets to force
+  a reload; pass a `Settings` instance to inject a fake) plus
+  `trailsign.Settings.__init__` accepting a plain dict directly
+  (`Settings({"storage": {"news_cache_dir": "/tmp/x"}})`) — no file
+  needed. `tests/test_app_settings.py` covers `app_settings.py` itself.
+- **`tests/conftest.py` injects a real `Settings` dict** (the `storage.*`
+  section, matching what's `required=True` today) **before** importing
+  `news_cache`/`message_archive`/`users_db`/etc. — has to happen at
+  conftest's own module level, not inside a fixture, since the migrated
+  modules' constants are computed once at first import (collection
+  time), before any fixture runs. **This is a real forcing function, not
+  just plumbing**: forgetting to add a newly-`required=True` key here
+  when migrating a new setting breaks the entire test suite immediately
+  and loudly (every test importing the affected module fails to even
+  collect) — treat that failure as "you forgot a step," not a bug to
+  route around.
+
+Existing tests for migrated modules needed **zero** further changes
+across Phase 1 beyond the conftest.py injection above, because they
+already monkeypatched the module-level constant
+(`monkeypatch.setattr(news_cache, "CACHE_DIR", ...)`) rather than the
+env var or `Settings` itself — expect the same to hold for Phases 2–4,
+worth confirming per-phase rather than assuming.

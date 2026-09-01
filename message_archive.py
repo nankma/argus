@@ -25,7 +25,10 @@ from logfire_logger import Level, Logger, LogfireLogger
 
 _events: Logger = LogfireLogger("argus.message_archive")
 
-ARCHIVE_DIR = get_settings().resolved("storage.message_archive_dir", default="message_archive")
+# required=True, no default -- archiving is always on, so an absent
+# key here is a deployment mistake, not a legitimate "unset" state. See
+# docs/standaloneplan/01-settings-migration.md's "Migration methodology".
+ARCHIVE_DIR = get_settings().resolved("storage.message_archive_dir", required=True)
 
 DEFAULT_TTL_DAYS = 7
 

@@ -1,4 +1,26 @@
 import pytest
+
+import app_settings
+from trailsign import Settings
+
+# Required settings, injected before the imports below -- module-level
+# constants like news_cache.CACHE_DIR are computed once at import time,
+# so this has to run before those imports, not inside a fixture
+# (fixtures run per-test, long after collection-time imports already
+# happened). Values are placeholders -- individual tests that care
+# override them via monkeypatch.setattr on the module constant directly
+# (see isolated_news_cache etc. below), not by touching Settings again.
+# See docs/standaloneplan/01-settings-migration.md's "Migration
+# methodology" for why these are required=True with no code-level
+# fallback in the modules themselves.
+app_settings.reset_settings_for_tests(Settings({
+    "storage": {
+        "news_cache_dir": "news_cache",
+        "message_archive_dir": "message_archive",
+        "subscribers_db_file": "subscribers.db",
+    }
+}))
+
 import agent
 import message_archive
 import news_cache

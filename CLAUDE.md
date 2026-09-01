@@ -39,6 +39,16 @@ scope, since different subscribers care about different topics.
   specifically so tests can substitute fakes — see `tests/fakes.py`'s
   `FakeToolCallingModel`, not LangChain's built-in fakes (they don't
   override `bind_tools()` and raise `NotImplementedError`).
+- **`settings.yml`/`settings.oracle.yml` (repo root) are committed on
+  purpose and must stay that way — never add a real, this-deployment-
+  specific value to either one.** Only env-var names, placeholder
+  identifiers, relative paths, and structure belong here; a real OCID,
+  IP, hostname, or literal secret goes into a **new** gitignored file
+  under `local-infra/` instead (same convention as
+  `local-infra/infrastructure.yaml`), never into these two. See
+  `docs/standaloneplan/01-settings-migration.md`'s "Three real
+  environments" section for the full reasoning and the required=True
+  migration discipline these files exist to support.
 
 ## Where to look
 
