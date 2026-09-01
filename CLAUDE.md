@@ -171,4 +171,4 @@ drifts and CI's doesn't.)
 
 If CI is genuinely wrong and the change must land, turn protection off
 explicitly rather than working around it — and say so:
-`gh api -X DELETE repos/nankma/argus/branches/main/protection`.
+`gh api -X DELETE repos/nankma/auguring/branches/main/protection`.

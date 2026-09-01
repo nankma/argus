@@ -1101,3 +1101,188 @@ recurring ingest hang remains an open, unfixed problem, now backed by
 real alerting instead of manual `docker exec` diagnosis every time
 someone happens to check.
 
+---
+
+# 2026-08-30, later same day: two of the four ingest alerts had a real
+# query bug -- "success" isn't the common case, so "no success" doesn't
+# mean "stalled"
+
+A deploy that evening (PR #59, Phoenix retirement + `logfire_logger.py`)
+did NOT reproduce the ingest hang -- clean ticks, exactly on the 15-minute
+schedule, from the very first one after restart (see this project's
+`project-ingest-hang-post-deploy-20260825` memory for the full data:
+four deploys now, three hung, one clean -- not deterministic on every
+restart after all). But the user noticed `argus ingest liveness` and
+`argus ingest pull stalled` both fire-then-resolve in a Telegram
+notification anyway, right after that deploy, and asked why -- which is
+what surfaced this section's actual finding.
+
+## The bug in `argus ingest pull stalled`
+
+Its original query only counted `ingest_source_pull` spans with
+`pull.outcome = 'success'`:
+
+```sql
+SELECT 1 AS stalled WHERE (
+  SELECT count(*) FROM records
+  WHERE span_name = 'ingest_source_pull'
+    AND attributes->>'pull.outcome' = 'success'
+    AND start_timestamp > now() - interval '1 hour'
+) = 0
+```
+
+`_pull_source()` (`news_ingest.py`) checks every registered source every
+15-minute cycle, but only *attempts* a fetch once that source's own
+`pull.expected_interval_hours` has actually elapsed -- otherwise it
+immediately records `pull.outcome = 'not_due'` and returns. With most of
+this project's ~27 sources on 4h/8h/24h intervals, `not_due` is the
+overwhelming majority outcome on any given cycle, and `success` only
+appears in short bursts whenever some source's interval happens to
+elapse. The query's `WHERE ... = 'success'` treats `not_due` exactly the
+same as "no span at all" -- so it cannot tell "every source correctly
+wasn't due yet" apart from "the pipeline is dead." Verified live: the
+alert was open with the last real `success` span 65 minutes old, purely
+because no source had come due again yet, while `docker logs` showed
+ingestion ticking perfectly on schedule the entire time.
+
+**Fixed** by dropping the outcome filter entirely -- it now fires only
+when zero `ingest_source_pull` spans of *any* kind land in the window,
+which only happens if the per-source loop itself isn't running:
+
+```sql
+SELECT 1 AS stalled WHERE (
+  SELECT count(*) FROM records
+  WHERE span_name = 'ingest_source_pull'
+    AND start_timestamp > now() - interval '1 hour'
+) = 0
+```
+
+Note this isn't fully redundant with `argus ingest liveness`:
+`_emit_heartbeat()` fires at the very top of `run_ingestion_cycle`,
+before the per-source loop starts, so a hang between the heartbeat and
+the loop (or partway through it) would show `ingest_heartbeat` healthy
+while this query still correctly catches it. Kept as a second, later
+checkpoint in the same function rather than merged into one alert.
+
+## The blind spot in `argus ingest source stale`
+
+Same root problem, different alert. The original query:
+
+```sql
+SELECT attributes->>'pull.source' AS source,
+       max(start_timestamp) AS last_success
+FROM records
+WHERE span_name = 'ingest_source_pull'
+  AND attributes->>'pull.outcome' = 'success'
+  AND start_timestamp > now() - interval '7 days'
+GROUP BY attributes->>'pull.source'
+HAVING extract(epoch from (now() - max(start_timestamp))) >
+       max((attributes->>'pull.expected_interval_hours')::float) * 3.0 * 3600
+```
+
+filters to `pull.outcome = 'success'` *before* the `GROUP BY` -- so a
+source with **zero** successes anywhere in the 7-day window has no group
+to belong to and never appears in the result at all. A source broken
+for the entire lookback window is invisible to this alert instead of
+being exactly what it should catch. Live and current as this was
+written: `perigon` has been failing with `403 Client Error: Forbidden`
+(a source-side API-key/quota issue, unrelated to this project's code)
+and had zero successes in the checked window -- the old query would
+never have flagged it.
+
+**Fixed**, per the user's own corrected design: anchor the `GROUP BY` on
+spans of *any* outcome (so a chronically-failing source still has a
+group to be in), and separately track the last successful timestamp
+(`NULL` if there isn't one). Also tightened the multiplier from `3x` to
+`2x` each source's own interval, and the lookback from 7 days to 3 --
+still comfortably above `2 x` the longest interval in use (`newsapi` at
+24h needs 48h; 3 days covers it with margin), since the "which sources
+exist" lookback has to be at least that wide or a slow-cadence source
+can look falsely stale just because the query window is too short to
+see its last real success:
+
+```sql
+SELECT source, expected_interval_hours
+FROM (
+  SELECT
+    attributes->>'pull.source' AS source,
+    max((attributes->>'pull.expected_interval_hours')::float) AS expected_interval_hours,
+    max(CASE WHEN attributes->>'pull.outcome' = 'success'
+             THEN extract(epoch from start_timestamp) ELSE NULL END) AS last_success_epoch
+  FROM records
+  WHERE span_name = 'ingest_source_pull'
+    AND start_timestamp > now() - interval '3 days'
+  GROUP BY attributes->>'pull.source'
+)
+WHERE last_success_epoch IS NULL
+   OR extract(epoch from now()) - last_success_epoch > expected_interval_hours * 2 * 3600
+```
+
+Verified live before shipping, not assumed: ran it directly against
+`/v2/query` (project-scoped `LOGFIRE_API_KEY`, no management token
+needed for a read) and it correctly returned exactly one row --
+`perigon`, `last_success_epoch: null` -- matching the known 403 issue.
+The old query, run the same way, returns nothing for `perigon` at all.
+
+## `argus ingest pull failures`: window/threshold widened too
+
+Not a bug, but recalibrated alongside the other two while already
+touching this alert group. Old: `> 5` failures in 30 minutes. New: `> 3`
+in 12 hours.
+
+```sql
+SELECT count(*) AS failures FROM records
+WHERE span_name = 'ingest_source_pull'
+  AND attributes->>'pull.outcome' = 'failed'
+  AND start_timestamp > now() - interval '12 hours'
+HAVING count(*) > 3
+```
+
+Reasoning: with `perigon` on an 8h interval, a single known-broken
+source can contribute at most 2 failures in any 12h window -- so `> 3`
+(needs 4+) tolerates one persistently-broken source without paging on it
+alone, while still catching a second, independent problem happening at
+the same time. The old 30min/>5 was backwards for this project's actual
+source cadence: getting 6 failures inside one 30-minute window requires
+several sources failing at once, which is a narrower and less useful
+signal than "the pipeline has real, sustained trouble" over a period
+long enough for its slower sources to actually be attempted.
+
+## Applied and verified, same session
+
+All three PUT via `PUT /v1/projects/{project_id}/alerts/{alert_id}/`
+(`AlertUpdate` body, partial -- confirmed via `/api/openapi.json` that
+every field is optional despite the PUT verb), using a fresh OAuth
+device-flow token (`project:read project:read_alert
+project:write_alert` scopes, same procedure as
+`docs/reference/observability-and-debugging.md`'s "managing Logfire
+alerts/channels" section). All three returned `200` with the new query
+echoed back, `has_errors: false` on the next evaluation.
+
+**One false alarm during verification, worth recording as a lesson**:
+checking `argus ingest pull stalled` ~20 seconds after the edit showed
+`has_matches: true` -- looked like the fix hadn't worked. It was a
+stale-evaluation artifact: `last_run` on both `pull failures` and `pull
+stalled` showed the identical timestamp (23:09:45), meaning that was the
+last *scheduled* batch evaluation, which almost certainly ran against
+the pre-edit query. Directly re-querying the underlying data (not the
+alert's cached state) settled it immediately: 108 `ingest_source_pull`
+spans in the last hour (4 ticks x 27 sources, exactly as expected), so
+the new query genuinely evaluates to "not stalled" -- confirmed without
+needing to wait out the `PT15M` frequency for the next real evaluation.
+**Lesson**: right after editing a live alert, check the underlying data
+directly rather than trusting the alert's own `has_matches` for the
+next few minutes -- the same "verify against real behavior, don't
+assume" discipline this whole document has needed repeatedly, just
+applied to the alert's own evaluation cache this time.
+
+| Alert | id | Change |
+|---|---|---|
+| `argus ingest pull failures` | `71a73c21-6300-4a4f-bc29-ab09ce547512` | `30min/>5` -> `12h/>3` |
+| `argus ingest pull stalled` | `c87762fa-55ca-4573-ae2b-bc0fba046488` | drop the `success`-only filter; fire on zero spans of any kind |
+| `argus ingest source stale` | `a2436903-281d-4ae7-9c8f-882ef2f4e347` | anchor on any-status spans (not success-only), `7d`->`3d` lookback, `3x`->`2x` multiplier |
+
+`argus ingest liveness` was not touched -- its `ingest_heartbeat`-based
+query never had this bug, since a heartbeat span carries no `pull.outcome`
+attribute to filter on in the first place.
+

@@ -9,6 +9,19 @@ index exists so it's clear which is which at a glance.
 > that produce them. The split from `plans/` is deliberate: `plans/`
 > records what we decided and built; `analysis/` records what we measured
 > and what the literature says, most of which will never become code.
+>
+> A fifth lives at [`docs/standaloneplan/`](standaloneplan/README.md) —
+> the rough, evolving plan for refactoring this into a service that runs
+> standalone (no cloud dependency required) as well as on the current
+> cloud deployment: settings abstraction was built and extracted to its
+> own project, **[Trailsign](https://pypi.org/project/trailsign/)**,
+> because the design turned out to be genuinely content-independent;
+> delivery channels, management surface, telemetry pluggability, and
+> storage are still rough/not started (`docs/standaloneplan/README.md`).
+> This repo's own migration of its `os.environ` reads onto Trailsign is
+> tracked separately, since it moves faster than the rest of the plan —
+> [`docs/standaloneplan/01-settings-migration.md`](standaloneplan/01-settings-migration.md),
+> storage paths done 2026-09-01, everything else not yet.
 
 ## `docs/` (top level) — kept at a stable path, linked externally
 

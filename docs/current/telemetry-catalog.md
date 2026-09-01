@@ -126,9 +126,9 @@ This table is the quick cross-reference; that file is the source of truth.
 | `argus model errors` | `push_outcome` | `push.outcome='model_error'` in 30 min |
 | `argus delivery ratio` | `push_outcome` | `delivered` count < 80% of `push.generated=true` count, 24h, only once ≥5 generated |
 | `argus ingest liveness` | `ingest_heartbeat` | none in 30 min |
-| `argus ingest pull stalled` | `ingest_source_pull` | no `pull.outcome='success'` anywhere in 1h |
-| `argus ingest pull failures` | `ingest_source_pull` | more than 5 `pull.outcome='failed'` in 30 min |
-| `argus ingest source stale` | `ingest_source_pull` | per source (`GROUP BY pull.source`): time since last `pull.outcome='success'` exceeds `3 × pull.expected_interval_hours` |
+| `argus ingest pull stalled` | `ingest_source_pull` | no span of any outcome anywhere in 1h (fixed 2026-08-30 — a `pull.outcome='success'`-only version couldn't tell "every source correctly not due yet" apart from "the pipeline is dead," since `not_due` is the majority outcome for a fleet of 4h+-interval sources) |
+| `argus ingest pull failures` | `ingest_source_pull` | more than 3 `pull.outcome='failed'` in 12h (widened 2026-08-30 from 30min/>5 — a single known-broken 8h-interval source can contribute at most 2 failures per 12h, so this tolerates one persistently-broken source without paging on it alone) |
+| `argus ingest source stale` | `ingest_source_pull` | per source (`GROUP BY pull.source`, any outcome — not success-only): no `pull.outcome='success'` (or none ever) within `2 × pull.expected_interval_hours`, 3-day lookback (fixed 2026-08-30 — the original success-only `GROUP BY` made a source with zero successes in the whole window invisible instead of flagged; `perigon`'s real, ongoing 403 was the live case that caught this) |
 | `argus html validation retry` *(planned)* | `html_validation_attempt` | `valid=false` AND `attempt` in (1,2) |
 | `argus html validation exhausted` *(planned)* | `html_validation_attempt` | `attempt=3 AND valid=false` |
 

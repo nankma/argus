@@ -18,6 +18,12 @@ showcase.html
 # and the rules around it.
 local-infra/
 
+# The real settings file (trailsign/app_settings.py) -- may reference real
+# vault OCIDs, plaintext dev secrets, or anything else settings.example.yml
+# only shows the shape of. Never commit the real one; edit
+# settings.example.yml instead when the shape changes.
+settings.yml
+
 # docs/analysis/ build artifacts -- regenerate with docs/analysis/tools/
 # (see docs/analysis/README.md).
 # The report is a ~700KB generated file; the snapshot is a point-in-time pull

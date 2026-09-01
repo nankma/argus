@@ -18,11 +18,13 @@ Each item is **synthesized across sources** rather than listed — the first
 entry above merges New Scientist, Wired, and TechCrunch coverage into one
 paragraph, with every claim carrying its links.
 
-> **Why "Argus"** — Argus Panoptes, the *all-seeing* watchman of Greek
-> myth, was covered in eyes and so could rest some while others stayed
-> open. He never fully slept, which made him the one you posted on watch.
-> Fitting for a service that keeps an eye on more sources than a person
-> reasonably can, and reports back without being asked.
+> **Why "Auguring"** — an augur read scattered signs — the flight of
+> birds, the weather, whatever was in front of them — and turned them
+> into a reading of what was coming. That's closer to what this service
+> actually does than "watching" is: the value isn't in seeing every
+> source, it's in synthesizing what they add up to. Fitting for
+> something that reads across more sources than a person reasonably
+> can, and tells you what they mean rather than just listing them.
 
 ---
 

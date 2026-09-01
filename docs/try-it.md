@@ -1,13 +1,13 @@
-# Try Argus
+# Try Auguring
 
 A Telegram bot that watches tech news for you — Hacker News, arXiv,
 company blogs, the tech press — and either answers on demand or sends a
 digest on a schedule, written as an actual summary instead of a list of
 headlines.
 
-**Code:** [github.com/nankma/argus](https://github.com/nankma/argus) —
-the [README](https://github.com/nankma/argus#readme) has an overview, and
-[`docs/system-overview.md`](https://github.com/nankma/argus/blob/main/docs/system-overview.md)
+**Code:** [github.com/nankma/auguring](https://github.com/nankma/auguring) —
+the [README](https://github.com/nankma/auguring#readme) has an overview, and
+[`docs/system-overview.md`](https://github.com/nankma/auguring/blob/main/docs/system-overview.md)
 is the full architecture and design write-up if you want the details.
 
 ## Getting access

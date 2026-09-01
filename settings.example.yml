@@ -1,0 +1,38 @@
+# Template for settings.yml (gitignored -- this file is the committed
+# shape, not the real one). Copy this to settings.yml and fill in real
+# values for local development; production's real settings.yml lives
+# outside git entirely, same as local-infra/infrastructure.yaml.
+#
+# See app_settings.py for how this gets loaded (SETTINGS_FILE env var,
+# defaulting to settings.yml in the working directory -- and if no file
+# exists at all, every setting below just falls back to its own
+# hardcoded default, so an incomplete or missing settings.yml doesn't
+# break anything already migrated onto it).
+#
+# Full design: https://github.com/nankma/trailsign/blob/main/docs/design.md
+
+storage:
+  news_cache_dir: news_cache
+  # news_archive_dir: unset by default (archiving off) -- uncomment to enable
+  # news_archive_dir: news_archive
+  message_archive_dir: message_archive
+  subscribers_db_file: subscribers.db
+
+# Not yet migrated onto Settings -- still raw os.environ reads as of
+# 2026-09-01 (models.*, delivery.*, telemetry.*, news_source.*). See
+# docs/README.md for the current migration status. These sections are
+# a preview of the eventual shape, not live yet:
+#
+# models:
+#   main:
+#     api-key:
+#       trailsign-resolve: environment-variable
+#       name: DEEPSEEK_API_KEY
+#     url: https://api.deepseek.com
+#     model: deepseek-v4-flash
+#
+# delivery:
+#   telegram:
+#     bot-token:
+#       trailsign-resolve: environment-variable
+#       name: TELEGRAM_BOT_TOKEN
