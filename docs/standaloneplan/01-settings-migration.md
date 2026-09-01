@@ -199,6 +199,96 @@ migrating it would defeat the test's own point), `OMP_NUM_THREADS`
 (`docs/analysis/tools/build_taxonomy.py`, an analysis tool outside the
 image, not part of the running service).
 
+## Hardcoded constants (beyond `os.environ`) — surveyed 2026-09-01, not migrated
+
+A second, separate inventory. Every constant above already had an env
+var; these never did — they're plain `ALL_CAPS = <literal>` module-level
+constants, found by grepping every top-level file for
+`^[A-Z_][A-Z0-9_]*\s*=\s*[0-9{]`. **Not being touched by any phase
+above** — documented here purely so they aren't lost before their own
+turn comes, per explicit instruction. Add rows as more are found; don't
+assume this grep caught everything forever.
+
+### Worth exposing — real operational tuning knobs
+
+All are `default=<literal>` candidates matching their current value
+(never `required=True` — every one of these already has a sensible,
+working default; the point is letting it be *overridden*, not demanding
+it be set).
+
+| Constant | File | Controls |
+|---|---|---|
+| `PUSH_TICK_SECONDS = 900` | `bot.py` | Push heartbeat cadence |
+| `INGEST_TICK_SECONDS = 900` | `bot.py` | Ingest periodic-check cadence |
+| `DEFAULT_INTERVAL_HOURS = 4` | `news_ingest.py` | Default per-source pull interval |
+| `_SOURCE_INTERVAL_HOURS` | `news_ingest.py` | Per-source interval overrides (dict) |
+| `_DAILY_CAPS` | `news_ingest.py` | Per-source daily API-call budget (dict) |
+| `REQUEST_DELAY_SECONDS = 1.1` | `news_ingest.py` | Rate-limit delay between source requests |
+| `DEFAULT_TTL_HOURS = 48` | `news_cache.py` | Article cache retention |
+| `DEFAULT_TTL_DAYS = 7` | `message_archive.py` | Message archive retention |
+| `DEFAULT_PUSH_INTERVAL_HOURS = 24` / `MIN_PUSH_INTERVAL_HOURS = 1` | `users_db.py` | Subscriber push-frequency default/floor |
+| `PUSHED_LINK_RETENTION_HOURS = 72` | `users_db.py` | How long "already seen" dedup memory lasts |
+| `CATEGORY_PROPOSAL_THRESHOLD = 5` | `users_db.py` | Sightings needed before proposing a new category |
+| `MAX_INTERESTS = 10` | `users_db.py` | Per-subscriber interest cap |
+| `MAX_HTML_ATTEMPTS = 3` | `news_push.py` | HTML-validation retry budget |
+| `NEAR_DUPLICATE_SIMILARITY = 0.95` | `news_push.py` | Near-dup collapse threshold |
+| `MAX_ARTICLE_AGE_HOURS = 168` | `news_push.py` | How stale an article can be and still get pushed |
+| `UNREACHABLE_STRIKES = 3` | `news_push.py` | Retries before giving up on a subscriber |
+| `CALL_TIMEOUT_SECONDS = 60` | `test_api.py` | Dev-tool only, low priority, same reasoning as the others |
+| **`MAX_ARTICLES_PER_TOPIC = 5`** | `news_push.py` | **Tied to this deployment's own cloud sizing** — see below |
+| **`MAX_INTERESTS_PER_PUSH = 5`** | `news_push.py` | same |
+| **`RELEVANCE_KEEP_FRACTION/MIN/MAX`, `NOVELTY_RELEVANCE_KEEP_FRACTION/MIN/MAX`** | `news_push.py` | same |
+| **`CATEGORY_SIGHTING_RETENTION_DAYS = 30`** | `users_db.py` | same |
+| **`PUSH_OUTCOME_RETENTION_DAYS = 90`** | `users_db.py` | same |
+
+**Why the bolded five aren't just "borderline"** (corrected 2026-09-01
+— originally filed as "nobody's ever asked to change these"): their
+specific values exist *because of this deployment's own cloud
+constraints* (the free-tier VM's RAM/CPU, article volume at current
+subscriber count, what fits comfortably per push cycle) — not because
+5 or 30 or 90 is intrinsically correct. A different deployment (bigger
+machine, far more subscribers, a corpus-heavy self-hosted use case)
+would legitimately want different numbers, which is exactly what makes
+these settings rather than constants — the same reasoning that applies
+to the plain tuning knobs above, just easier to miss because nothing
+about them looks environment-specific at a glance.
+
+**Also newly noticed while grounding this section**: `news_sources.py`'s
+`_USER_AGENT = "Mozilla/5.0 (compatible; ArgusNewsBot/1.0;
++https://github.com/nankma/argus)"` — still says the pre-rename project
+name and repo URL (missed during the Argus→Auguring rename, since it
+reads as a "live functional constant," not a doc mention — see that
+rename's own commit). Belongs in this same "worth exposing" bucket for
+a different reason than the others: a self-hoster running this under
+their *own* project name needs their own identifying User-Agent, not
+this project's.
+
+### Needs design thought, not simply "no"
+
+Flagged as tricky rather than dismissed — each for a different reason,
+not one blanket "internal, skip it":
+
+| Constant | File | Why it's not a simple config-knob add |
+|---|---|---|
+| **`LOGFIRE_HOSTS`** | `agent.py` | **Architecturally misplaced, not just "maybe configurable."** It's a Logfire-specific region→host map, used only by `logfire_traces_endpoint()` — Logfire-vendor knowledge that has nothing to do with `agent.py`'s actual job (building the LangChain agent). It ended up there because `setup_telemetry()` currently lives in `agent.py` too. This should move as part of `docs/standaloneplan/README.md`'s Phase 3 (the `telemetry.events`/`telemetry.tracing` split) — once a Logfire-specific backend implementation exists behind that seam, `LOGFIRE_HOSTS`/`logfire_traces_endpoint()` belong inside *it*, not as a bare constant a deployer pokes at directly. Don't just add a setting here without doing that move first — it would cement the wrong location. |
+| `_ALLOWED_TAGS` | `telegram_html.py` | A security allowlist, and channel-specific — Telegram HTML's safe tag set isn't the same question as email's would be. Naturally belongs inside each delivery-channel's own formatter (Phase 4, the email-client work) rather than one global setting; loosening it casually is a real injection-risk, not a convenience knob. |
+| `RESTRICTED_SOURCES` | `news_sources.py` | Already tied to per-source config (`news_source.<name>.*`) once the news-source factory pattern lands (migration order step 3) — likely becomes a per-source flag there rather than a separate global set. |
+| `NOUN_TAGS`, `MIN_GLOBAL_DF`, `MIN_EXPECTED_COUNT` | `news_keyness.py` | Algorithm hyperparameters for the novelty-detection statistic, not deployment config — closer to a research/tuning knob than something a self-hoster would reach for. Could theoretically be exposed later if someone's actually experimenting with the algorithm, different category of "configurable" than the rest of this doc. |
+| `ROUTE_B_CATEGORIES` | `agent.py` | Coupled to the guardrail/routing design itself (`docs/plans/guardrails-plan.md`) — changing this changes routing/security behavior, not a sizing/cadence knob. A setting here needs guardrail-reliability re-measurement (`tools/measure_guardrails.py`) before it's safe, not just a config wire-up. |
+| `_NARROW_CHECK_CATEGORIES` | `guardrails.py` | Same reasoning as `ROUTE_B_CATEGORIES` — the two are each other's mirror across the router/output-check layers. |
+
+### Categorically not settings (derived, not independent)
+
+Not "maybe someday" — these are *computed from other data*, so making
+them independently settable wouldn't even be coherent:
+
+- `_TIMESTAMP_LEN = 21` (`message_archive.py`) — fixed width of a
+  `strftime` format string, a math fact about that format, not a
+  tunable.
+- `_SOURCE_CLASS`, `_TIME_FILTERABLE_CLASSES`, `_SERVER_SIDE_SINCE_SOURCES`
+  (`news_ingest.py`) — derived from `news_sources.SOURCE_REGISTRY`
+  itself; they change when the registry changes, not independently.
+
 ## Migration order and reasoning
 
 1. ~~**Storage paths**~~ — **done** 2026-09-01. No secrets, lowest
