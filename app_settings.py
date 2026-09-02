@@ -8,10 +8,13 @@ originally designed as part of this project's own settings work).
 The settings file's own path is the one config value that can never live
 inside the settings file itself -- `SETTINGS_FILE` env var, defaulting to
 `settings.yml` in the working directory. If neither resolves to a real
-file, this falls back to an empty `Settings({})`: every migrated call
-site still works via its own `default=` argument, so a deployment or a
-test with no settings.yml at all doesn't break -- it just gets 100%
-defaults, same behavior as before this migration started.
+file, this falls back to an empty `Settings({})` -- what that means
+depends on the call site: one written with `default=<value>` still
+works (an intentionally optional setting, e.g. news_cache.ARCHIVE_DIR);
+one written with `required=True` raises `SettingsError` instead, on
+purpose (see docs/standaloneplan/01-settings-migration.md's "Migration
+methodology" -- a value the service always needs a real one for should
+fail loudly on a missing settings.yml, not silently guess).
 """
 
 import os

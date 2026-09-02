@@ -1,7 +1,14 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import app_settings
 from trailsign import Settings
+
+_REPO_ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -40,3 +47,28 @@ def test_reset_settings_for_tests_can_inject_a_fake():
     app_settings.reset_settings_for_tests(fake)
     assert app_settings.get_settings() is fake
     assert app_settings.get_settings().resolved("storage.news_cache_dir") == "injected"
+
+
+def test_required_true_call_site_raises_when_settings_missing(monkeypatch, tmp_path):
+    """End-to-end check of the actual fail-loud contract (not just
+    app_settings.py in isolation): a required=True call site
+    (news_cache.CACHE_DIR) must raise SettingsError at import time when
+    no settings.yml is present, not silently fall back to anything. Run
+    in a fresh subprocess since the constant is computed once at first
+    import, which has already happened by the time any test in this
+    process runs -- see docs/standaloneplan/01-settings-migration.md's
+    "Migration methodology" rule 1."""
+    monkeypatch.delenv("SETTINGS_FILE", raising=False)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_REPO_ROOT)
+    result = subprocess.run(
+        [sys.executable, "-c", "import news_cache"],
+        cwd=str(tmp_path),  # no settings.yml here
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "SettingsError" in result.stderr
+    assert "storage.news_cache_dir" in result.stderr
