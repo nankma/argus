@@ -459,8 +459,17 @@ rejected on a docs page's word alone.
 
 ## How to add a new source
 
-1. Write a function matching the shape `fetch_x(query: str, max_results: int = 5) -> list[dict]`, returning a list of `{"title", "link", "source", "summary", "published"}` dicts (any field can be `None` if the source doesn't provide it). If it's a plain RSS/Atom feed, just call `_fetch_rss(url, "Source Name", max_results)` — see the existing sources for the pattern.
-2. Add `("name", fetch_x, required_env_or_None, "class")` to `SOURCE_REGISTRY` in `news_sources.py`, where `class` is `"forum"`, `"api"`, or `"rss"` per the table above.
+**A plain RSS/Atom feed (query-less, no API key)** — no code change:
+
+1. Add an entry to `settings.yml`'s `news_source.rss` list: `{key: your_key, display_name: "Source Name", url: "https://.../feed.xml"}`. `news_sources._rss_sources_from_settings()` picks it up automatically as `enabled_sources()`'s next call.
+2. **Also add the exact same entry to `settings.oracle.yml` and `settings.int.yml`** — production and INT each read their own file, never `settings.yml`; an edit only there is invisible to a deployed instance (see `docs/standaloneplan/01-settings-migration.md`'s "Migration methodology" for why this atomicity matters, and `settings.yml`'s own `news_source.rss` comment).
+3. Add a row to the appropriate table above.
+4. **Test it live before trusting it** — several entries in this doc exist because a docs page or search summary turned out to be wrong (see `CLAUDE.md` for the DeepSeek-model-retirement false alarm and the OK Surf News API response-shape mismatch from earlier in this project's history). Check the HTTP status, the actual item count via `feedparser` (not a raw string search — see the Nikkei Asia note above), and how stale `lastBuildDate` is before adding it. `news_sources._make_rss_fetcher(url, "Source Name")()` in a throwaway Python shell is the quickest way to check.
+
+**A source with real per-source logic** (a query parameter, a date-range filter, an API key, pagination — anything `_fetch_rss(url, name, max_results)` alone can't express) — this still needs code, same as before:
+
+1. Write a function matching the shape `fetch_x(query: str, max_results: int = 5) -> list[dict]`, returning a list of `{"title", "link", "source", "summary", "published"}` dicts (any field can be `None` if the source doesn't provide it).
+2. Add `("name", fetch_x, required_env_or_None, "class")` to `_NON_RSS_SOURCES` in `news_sources.py`, where `class` is `"forum"` or `"api"` per the table above.
 3. If it needs an API key, read it inside the function via `os.environ["YOUR_KEY_NAME"]` — `enabled_sources()` will skip it automatically until that env var is set.
 4. Add a row to the appropriate table above.
-5. **Test it live before trusting it** — several entries in this doc exist because a docs page or search summary turned out to be wrong (see `CLAUDE.md` for the DeepSeek-model-retirement false alarm and the OK Surf News API response-shape mismatch from earlier in this project's history). Check the HTTP status, the actual item count via `feedparser` (not a raw string search — see the Nikkei Asia note above), and how stale `lastBuildDate` is before adding it.
+5. Test it live before trusting it, same as step 4 above.

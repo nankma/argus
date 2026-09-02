@@ -16,6 +16,11 @@ SOURCE_REGISTRY lists sources with the env var (if any) required to enable
 them; enabled_sources() skips key-gated sources whose key isn't set, so the
 tool degrades gracefully instead of erroring. See docs/current/ai-news-sources.md
 for what each source is and how to add a new one.
+
+RSS sources are configured via Settings (news_source.rss in settings.yml),
+not hardcoded here -- see _rss_sources_from_settings. Only the sources with
+real per-source logic beyond "a URL and a display name" (hackernews, arxiv,
+and the three API-key-gated sources) are still plain Python functions.
 """
 
 import calendar
@@ -26,6 +31,8 @@ from datetime import datetime, timezone
 import feedparser
 import requests
 from opentelemetry import trace
+
+from app_settings import get_settings
 
 # Self-identifying, not a fake browser -- some feeds (TechRadar, confirmed
 # live) return 403 to the bare `python-requests/x.x` default User-Agent but
@@ -227,127 +234,44 @@ def _fetch_rss(url: str, source_name: str, max_results: int = 5) -> list[dict]:
     ]
 
 
-def fetch_openai_blog(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://openai.com/news/rss.xml", "OpenAI Blog", max_results)
+# RSS sources are pure data (a URL and a display name -- see _fetch_rss
+# above, every one of them is query-less and returns the same latest-N
+# regardless of what was asked), so they live in Settings
+# (news_source.rss, a list of {key, display_name, url}) instead of one
+# hardcoded function per feed. A deployer adds/removes/edits feeds by
+# editing their own settings.yml, no code change -- see settings.yml's
+# own news_source.rss section for the current list, grouped the same way
+# this file used to group the individual fetch_ functions (AI/ML
+# publications, mainstream press business/technology, enterprise IT
+# trade press, consumer/gadget press). See docs/current/ai-news-sources.md for
+# sources tested and rejected (CNN's feeds are abandoned -- lastBuildDate
+# over a year stale; Fortune blocks with 403; Reuters discontinued public
+# RSS in 2020).
 
 
-def fetch_huggingface_blog(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://huggingface.co/blog/feed.xml", "Hugging Face Blog", max_results)
+def _make_rss_fetcher(url: str, display_name: str) -> callable:
+    """One closure per configured feed, matching the (query, max_results)
+    -> list[dict] shape every other source's fetch function has -- `query`
+    is accepted and ignored, same as the old hardcoded fetch_ functions
+    (RSS has no query parameter to filter by, see _fetch_rss)."""
+    def fetch(query: str = None, max_results: int = 5) -> list[dict]:
+        return _fetch_rss(url, display_name, max_results)
+    return fetch
 
 
-def fetch_techcrunch_ai(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://techcrunch.com/category/artificial-intelligence/feed/", "TechCrunch AI", max_results)
-
-
-def fetch_venturebeat_ai(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://venturebeat.com/category/ai/feed/", "VentureBeat AI", max_results)
-
-
-def fetch_mit_tech_review(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.technologyreview.com/feed/", "MIT Technology Review", max_results)
-
-
-# --- Mainstream press: Business/Finance sections -------------------------
-# All query-less (see _fetch_rss note above) -- added 2026-08-13 per a real
-# gap: a subscriber asked about a specific company (AAOI) and no source in
-# the registry covered anything outside AI-industry press. See
-# docs/current/ai-news-sources.md for the sources tested and rejected (CNN's feeds
-# are abandoned -- lastBuildDate over a year stale; CNBC and Fortune block
-# with 403; Reuters discontinued public RSS in 2020).
-
-
-def fetch_bbc_business(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("http://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", max_results)
-
-
-def fetch_guardian_business(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.theguardian.com/business/rss", "The Guardian Business", max_results)
-
-
-def fetch_marketwatch(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss(
-        "https://feeds.content.dowjones.io/public/rss/mw_topstories", "MarketWatch", max_results
-    )
-
-
-def fetch_economist_business(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.economist.com/business/rss.xml", "The Economist (Business)", max_results)
-
-
-def fetch_nikkei_asia(query: str = None, max_results: int = 5) -> list[dict]:
-    """RDF/RSS1.0, not RSS2.0 -- feedparser normalizes it the same way, but
-    worth noting since a naive '<item>' string search (rather than
-    feedparser) would wrongly read this feed as empty."""
-    return _fetch_rss("https://asia.nikkei.com/rss/feed/nar", "Nikkei Asia", max_results)
-
-
-# --- Mainstream press: Technology sections --------------------------------
-
-
-def fetch_bbc_technology(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("http://feeds.bbci.co.uk/news/technology/rss.xml", "BBC Technology", max_results)
-
-
-def fetch_guardian_technology(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.theguardian.com/technology/rss", "The Guardian Technology", max_results)
-
-
-def fetch_economist_tech(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss(
-        "https://www.economist.com/science-and-technology/rss.xml",
-        "The Economist (Science & Technology)",
-        max_results,
-    )
-
-
-def fetch_wired_business(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.wired.com/feed/category/business/latest/rss", "Wired Business", max_results)
-
-
-# --- Enterprise/industry IT trade press -----------------------------------
-
-
-def fetch_the_register(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.theregister.com/headlines.atom", "The Register", max_results)
-
-
-def fetch_ars_technica(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica", max_results)
-
-
-def fetch_techcrunch(query: str = None, max_results: int = 5) -> list[dict]:
-    """TechCrunch's main feed, distinct from fetch_techcrunch_ai's AI-only
-    one. The registry was heavily weighted toward AI-only publications --
-    measured at 28.6% of the cache from feeds that structurally cannot
-    produce anything else (see docs/analysis/cluster-measurements.md) --
-    so the general feed is the one that widens it."""
-    return _fetch_rss("https://techcrunch.com/feed/", "TechCrunch", max_results)
-
-
-def fetch_cnbc(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss(
-        "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
-        "CNBC", max_results,
-    )
-
-
-def fetch_computerworld(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.computerworld.com/index.rss", "Computerworld", max_results)
-
-
-# --- Consumer/gadget tech press -------------------------------------------
-
-
-def fetch_zdnet(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.zdnet.com/news/rss.xml", "ZDNet", max_results)
-
-
-def fetch_engadget(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.engadget.com/rss.xml", "Engadget", max_results)
-
-
-def fetch_techradar(query: str = None, max_results: int = 5) -> list[dict]:
-    return _fetch_rss("https://www.techradar.com/rss", "TechRadar", max_results)
+def _rss_sources_from_settings() -> list[tuple[str, callable, None, str]]:
+    """Builds the RSS portion of SOURCE_REGISTRY from news_source.rss --
+    default=[] rather than required=True, since a deployer running with
+    zero configured RSS feeds is a legitimate (if sparse) state, not a
+    misconfiguration -- same "fails open, doesn't crash" shape as every
+    other optional subsystem in this project (e.g. news_embed's embedder).
+    Each entry becomes a 4-tuple matching every other SOURCE_REGISTRY row:
+    (key, fetch_fn, required_env=None -- RSS never needs a key, source_class="rss")."""
+    entries = get_settings().resolved("news_source.rss", default=[])
+    return [
+        (entry["key"], _make_rss_fetcher(entry["url"], entry["display_name"]), None, "rss")
+        for entry in entries
+    ]
 
 
 # --- Key-gated sources (skipped unless the env var below is set) --------
@@ -525,44 +449,30 @@ SOURCE_SECTIONS: dict[str, list[str]] = {
 # it today. It exists because the registry stopped being uniform once
 # mainstream press was added: most sources here are "forum" (community
 # board) or "api" (real query-based search) are the exception, not the
-# rule -- of 21 sources below, only hackernews/arxiv/newsapi/gnews/perigon
-# actually filter by `query`; every "rss" source below returns its latest
-# N items regardless of what was asked (see _fetch_rss). That distinction
-# matters for anything downstream that assumes a nonzero result means a
-# real topic match -- see docs/plans/local-news-cache-plan.md.
+# rule -- only hackernews/arxiv/newsapi/gnews/perigon actually filter by
+# `query`; every "rss" source (news_source.rss in Settings, see
+# _rss_sources_from_settings above) returns its latest N items regardless
+# of what was asked (see _fetch_rss). That distinction matters for
+# anything downstream that assumes a nonzero result means a real topic
+# match -- see docs/plans/local-news-cache-plan.md.
 #
 #   forum -- community-curated discussion board, not edited articles
 #   api   -- real query-based search, JSON REST
 #   rss   -- standard RSS/Atom feed, query-less (latest N regardless)
-SOURCE_REGISTRY = [
+#
+# Only the non-RSS sources are hardcoded here -- they have real per-source
+# logic (hackernews's numeric-id filter, arxiv's date-range param, the
+# three api-class sources' auth/query shapes) that doesn't reduce to
+# "a URL and a display name" the way every RSS source does.
+_NON_RSS_SOURCES = [
     ("hackernews", fetch_hackernews, None, "forum"),
     ("arxiv", fetch_arxiv, None, "api"),
-    ("openai_blog", fetch_openai_blog, None, "rss"),
-    ("huggingface_blog", fetch_huggingface_blog, None, "rss"),
-    ("techcrunch_ai", fetch_techcrunch_ai, None, "rss"),
-    ("venturebeat_ai", fetch_venturebeat_ai, None, "rss"),
-    ("mit_tech_review", fetch_mit_tech_review, None, "rss"),
-    ("bbc_business", fetch_bbc_business, None, "rss"),
-    ("bbc_technology", fetch_bbc_technology, None, "rss"),
-    ("guardian_business", fetch_guardian_business, None, "rss"),
-    ("guardian_technology", fetch_guardian_technology, None, "rss"),
-    ("marketwatch", fetch_marketwatch, None, "rss"),
-    ("economist_business", fetch_economist_business, None, "rss"),
-    ("economist_tech", fetch_economist_tech, None, "rss"),
-    ("nikkei_asia", fetch_nikkei_asia, None, "rss"),
-    ("wired_business", fetch_wired_business, None, "rss"),
-    ("the_register", fetch_the_register, None, "rss"),
-    ("ars_technica", fetch_ars_technica, None, "rss"),
-    ("techcrunch", fetch_techcrunch, None, "rss"),
-    ("cnbc", fetch_cnbc, None, "rss"),
-    ("computerworld", fetch_computerworld, None, "rss"),
-    ("zdnet", fetch_zdnet, None, "rss"),
-    ("engadget", fetch_engadget, None, "rss"),
-    ("techradar", fetch_techradar, None, "rss"),
     ("newsapi", fetch_newsapi, "NEWSAPI_API_KEY", "api"),
     ("gnews", fetch_gnews, "GNEWS_API_KEY", "api"),
     ("perigon", fetch_perigon, "PERIGON_API_KEY", "api"),
 ]
+
+SOURCE_REGISTRY = _NON_RSS_SOURCES + _rss_sources_from_settings()
 
 
 # Sources gated behind per-user access, on top of the env-var gate above --

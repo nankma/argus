@@ -98,3 +98,78 @@ models:
       trailsign-resolve: environment-variable
       name: TOGETHER_API_KEY
     request_timeout_seconds: 20
+
+# Byte-identical to settings.yml/settings.oracle.yml's news_source.rss --
+# without this, INT falls back to default=[] (news_sources.py) and loses
+# every RSS source (only hackernews/arxiv would remain, since
+# GNEWS_API_KEY/NEWSAPI_API_KEY/PERIGON_API_KEY aren't set on INT either,
+# see TODO.md), which would make INT nearly useless for testing the real
+# news pipeline. Keep in sync with the other two files' lists.
+news_source:
+  rss:
+    - key: openai_blog
+      display_name: OpenAI Blog
+      url: https://openai.com/news/rss.xml
+    - key: huggingface_blog
+      display_name: Hugging Face Blog
+      url: https://huggingface.co/blog/feed.xml
+    - key: techcrunch_ai
+      display_name: TechCrunch AI
+      url: https://techcrunch.com/category/artificial-intelligence/feed/
+    - key: venturebeat_ai
+      display_name: VentureBeat AI
+      url: https://venturebeat.com/category/ai/feed/
+    - key: mit_tech_review
+      display_name: MIT Technology Review
+      url: https://www.technologyreview.com/feed/
+    - key: bbc_business
+      display_name: BBC Business
+      url: http://feeds.bbci.co.uk/news/business/rss.xml
+    - key: guardian_business
+      display_name: The Guardian Business
+      url: https://www.theguardian.com/business/rss
+    - key: marketwatch
+      display_name: MarketWatch
+      url: https://feeds.content.dowjones.io/public/rss/mw_topstories
+    - key: economist_business
+      display_name: The Economist (Business)
+      url: https://www.economist.com/business/rss.xml
+    - key: nikkei_asia
+      display_name: Nikkei Asia
+      url: https://asia.nikkei.com/rss/feed/nar
+    - key: bbc_technology
+      display_name: BBC Technology
+      url: http://feeds.bbci.co.uk/news/technology/rss.xml
+    - key: guardian_technology
+      display_name: The Guardian Technology
+      url: https://www.theguardian.com/technology/rss
+    - key: economist_tech
+      display_name: The Economist (Science & Technology)
+      url: https://www.economist.com/science-and-technology/rss.xml
+    - key: wired_business
+      display_name: Wired Business
+      url: https://www.wired.com/feed/category/business/latest/rss
+    - key: the_register
+      display_name: The Register
+      url: https://www.theregister.com/headlines.atom
+    - key: ars_technica
+      display_name: Ars Technica
+      url: https://feeds.arstechnica.com/arstechnica/index
+    - key: techcrunch
+      display_name: TechCrunch
+      url: https://techcrunch.com/feed/
+    - key: cnbc
+      display_name: CNBC
+      url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114
+    - key: computerworld
+      display_name: Computerworld
+      url: https://www.computerworld.com/index.rss
+    - key: zdnet
+      display_name: ZDNet
+      url: https://www.zdnet.com/news/rss.xml
+    - key: engadget
+      display_name: Engadget
+      url: https://www.engadget.com/rss.xml
+    - key: techradar
+      display_name: TechRadar
+      url: https://www.techradar.com/rss

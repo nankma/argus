@@ -55,8 +55,101 @@ models:
     # not a background batch job (agent.build_model_from_config's docstring).
     request_timeout_seconds: 20
 
+# RSS news sources -- free, no API key, query-less (each returns its
+# latest N items regardless of what's asked, see news_sources._fetch_rss).
+# Add/remove/edit a feed by editing this list, no code change --
+# news_sources._rss_sources_from_settings reads it. default=[] in code:
+# an empty list here is a legitimate (if sparse) state, not an error.
+# hackernews/arxiv (real query/date-range logic) and newsapi/gnews/perigon
+# (API-key-gated) are NOT here -- still hardcoded in news_sources.py, see
+# its own module docstring for why.
+#
+# THIS SAME LIST MUST BE KEPT IN settings.oracle.yml TOO (byte-identical,
+# no secrets involved either way) -- production reads settings.oracle.yml
+# only, never this file. An edit here alone silently drops production to
+# zero RSS sources on the next deploy, no crash, no error (default=[]
+# fails open by design) -- see docs/standaloneplan/01-settings-migration.md's
+# "Migration methodology" for why this atomicity matters.
+news_source:
+  rss:
+    # --- AI/ML publications ---------------------------------------------
+    - key: openai_blog
+      display_name: OpenAI Blog
+      url: https://openai.com/news/rss.xml
+    - key: huggingface_blog
+      display_name: Hugging Face Blog
+      url: https://huggingface.co/blog/feed.xml
+    - key: techcrunch_ai
+      display_name: TechCrunch AI
+      url: https://techcrunch.com/category/artificial-intelligence/feed/
+    - key: venturebeat_ai
+      display_name: VentureBeat AI
+      url: https://venturebeat.com/category/ai/feed/
+    - key: mit_tech_review
+      display_name: MIT Technology Review
+      url: https://www.technologyreview.com/feed/
+
+    # --- Mainstream press: Business/Finance sections ---------------------
+    - key: bbc_business
+      display_name: BBC Business
+      url: http://feeds.bbci.co.uk/news/business/rss.xml
+    - key: guardian_business
+      display_name: The Guardian Business
+      url: https://www.theguardian.com/business/rss
+    - key: marketwatch
+      display_name: MarketWatch
+      url: https://feeds.content.dowjones.io/public/rss/mw_topstories
+    - key: economist_business
+      display_name: The Economist (Business)
+      url: https://www.economist.com/business/rss.xml
+    - key: nikkei_asia
+      display_name: Nikkei Asia
+      url: https://asia.nikkei.com/rss/feed/nar
+
+    # --- Mainstream press: Technology sections ----------------------------
+    - key: bbc_technology
+      display_name: BBC Technology
+      url: http://feeds.bbci.co.uk/news/technology/rss.xml
+    - key: guardian_technology
+      display_name: The Guardian Technology
+      url: https://www.theguardian.com/technology/rss
+    - key: economist_tech
+      display_name: The Economist (Science & Technology)
+      url: https://www.economist.com/science-and-technology/rss.xml
+    - key: wired_business
+      display_name: Wired Business
+      url: https://www.wired.com/feed/category/business/latest/rss
+
+    # --- Enterprise/industry IT trade press -------------------------------
+    - key: the_register
+      display_name: The Register
+      url: https://www.theregister.com/headlines.atom
+    - key: ars_technica
+      display_name: Ars Technica
+      url: https://feeds.arstechnica.com/arstechnica/index
+    - key: techcrunch
+      display_name: TechCrunch
+      url: https://techcrunch.com/feed/
+    - key: cnbc
+      display_name: CNBC
+      url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114
+    - key: computerworld
+      display_name: Computerworld
+      url: https://www.computerworld.com/index.rss
+
+    # --- Consumer/gadget tech press ----------------------------------------
+    - key: zdnet
+      display_name: ZDNet
+      url: https://www.zdnet.com/news/rss.xml
+    - key: engadget
+      display_name: Engadget
+      url: https://www.engadget.com/rss.xml
+    - key: techradar
+      display_name: TechRadar
+      url: https://www.techradar.com/rss
+
 # Not yet migrated onto Settings -- still raw os.environ reads as of
-# 2026-09-02 (delivery.*, telemetry.*, news_source.*). See
+# 2026-09-02 (delivery.*, telemetry.*, news_source.<api-key sources>). See
 # docs/standaloneplan/01-settings-migration.md for current status. This
 # section is a preview of the eventual shape, not live yet -- and per the
 # criterion above, TELEGRAM_BOT_TOKEN below is an env-var *name*, not a
