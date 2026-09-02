@@ -225,30 +225,30 @@ All are `default=<literal>` candidates matching their current value
 working default; the point is letting it be *overridden*, not demanding
 it be set).
 
-| Constant | File | Controls |
-|---|---|---|
-| `PUSH_TICK_SECONDS = 900` | `bot.py` | Push heartbeat cadence |
-| `INGEST_TICK_SECONDS = 900` | `bot.py` | Ingest periodic-check cadence |
-| `DEFAULT_INTERVAL_HOURS = 4` | `news_ingest.py` | Default per-source pull interval |
-| `_SOURCE_INTERVAL_HOURS` | `news_ingest.py` | Per-source interval overrides (dict) |
-| `_DAILY_CAPS` | `news_ingest.py` | Per-source daily API-call budget (dict) |
-| `REQUEST_DELAY_SECONDS = 1.1` | `news_ingest.py` | Rate-limit delay between source requests |
-| `DEFAULT_TTL_HOURS = 48` | `news_cache.py` | Article cache retention |
-| `DEFAULT_TTL_DAYS = 7` | `message_archive.py` | Message archive retention |
-| `DEFAULT_PUSH_INTERVAL_HOURS = 24` / `MIN_PUSH_INTERVAL_HOURS = 1` | `users_db.py` | Subscriber push-frequency default/floor |
-| `PUSHED_LINK_RETENTION_HOURS = 72` | `users_db.py` | How long "already seen" dedup memory lasts |
-| `CATEGORY_PROPOSAL_THRESHOLD = 5` | `users_db.py` | Sightings needed before proposing a new category |
-| `MAX_INTERESTS = 10` | `users_db.py` | Per-subscriber interest cap |
-| `MAX_HTML_ATTEMPTS = 3` | `news_push.py` | HTML-validation retry budget |
-| `NEAR_DUPLICATE_SIMILARITY = 0.95` | `news_push.py` | Near-dup collapse threshold |
-| `MAX_ARTICLE_AGE_HOURS = 168` | `news_push.py` | How stale an article can be and still get pushed |
-| `UNREACHABLE_STRIKES = 3` | `news_push.py` | Retries before giving up on a subscriber |
-| `CALL_TIMEOUT_SECONDS = 60` | `test_api.py` | Dev-tool only, low priority, same reasoning as the others |
-| **`MAX_ARTICLES_PER_TOPIC = 5`** | `news_push.py` | **Tied to this deployment's own cloud sizing** — see below |
-| **`MAX_INTERESTS_PER_PUSH = 5`** | `news_push.py` | same |
-| **`RELEVANCE_KEEP_FRACTION/MIN/MAX`, `NOVELTY_RELEVANCE_KEEP_FRACTION/MIN/MAX`** | `news_push.py` | same |
-| **`CATEGORY_SIGHTING_RETENTION_DAYS = 30`** | `users_db.py` | same |
-| **`PUSH_OUTCOME_RETENTION_DAYS = 90`** | `users_db.py` | same |
+| Constant | File | Controls | Status |
+|---|---|---|---|
+| ~~`PUSH_TICK_SECONDS = 900`~~ | `bot.py` | Push heartbeat cadence | **Not started** — deliberately separate from the ingest batch below (push scheduling, not news-source fetching); destined for its own `push.*` section alongside `news_push.py`'s batch, not `news_source.*` |
+| ~~`INGEST_TICK_SECONDS = 900`~~ | `bot.py` | Ingest periodic-check cadence | **Migrated** 2026-09-03 → `news_source.tick_seconds` |
+| ~~`DEFAULT_INTERVAL_HOURS = 4`~~ | `news_ingest.py` | Default per-source pull interval | **Migrated** → `news_source.default_interval_hours` |
+| ~~`_SOURCE_INTERVAL_HOURS`~~ | `news_ingest.py` | Per-source interval overrides (dict) | **Migrated, redesigned** — no longer a dict; each source's override is `news_source.<name>.interval_hours`, nested in that source's own block (alongside its `api-key`), not a separate global mapping. `_interval_hours()` does a live per-source lookup. |
+| ~~`_DAILY_CAPS`~~ | `news_ingest.py` | Per-source daily API-call budget (dict) | **Migrated, same redesign** → `news_source.<name>.daily_cap` |
+| ~~`REQUEST_DELAY_SECONDS = 1.1`~~ | `news_ingest.py` | Rate-limit delay between source requests | **Migrated** → `news_source.request_delay_seconds` |
+| `DEFAULT_TTL_HOURS = 48` | `news_cache.py` | Article cache retention | Not started (next batch — `storage.news_cache_ttl_hours`) |
+| `DEFAULT_TTL_DAYS = 7` | `message_archive.py` | Message archive retention | Not started (next batch — `storage.message_archive_ttl_days`) |
+| ~~`DEFAULT_PUSH_INTERVAL_HOURS = 24` / `MIN_PUSH_INTERVAL_HOURS = 1`~~ | `users_db.py` | Subscriber push-frequency default/floor | **Migrated** → `subscription.default_interval_hours` / `subscription.min_interval_hours` — a subscriber-preference concern, not push mechanics, hence `subscription.*` not `push.*` |
+| ~~`PUSHED_LINK_RETENTION_HOURS = 72`~~ | `users_db.py` | How long "already seen" dedup memory lasts | **Migrated** → `subscription.pushed_link_retention_hours` |
+| ~~`CATEGORY_PROPOSAL_THRESHOLD = 5`~~ | `users_db.py` | Sightings needed before proposing a new category | **Migrated** → `categories.proposal_threshold` — the category-taxonomy-proposal feature got its own top-level section, kept isolated from `subscription.*` |
+| ~~`MAX_INTERESTS = 10`~~ | `users_db.py` | Per-subscriber interest cap | **Migrated** → `subscription.max_interests` |
+| `MAX_HTML_ATTEMPTS = 3` | `news_push.py` | HTML-validation retry budget | Not started |
+| `NEAR_DUPLICATE_SIMILARITY = 0.95` | `news_push.py` | Near-dup collapse threshold | Not started |
+| `MAX_ARTICLE_AGE_HOURS = 168` | `news_push.py` | How stale an article can be and still get pushed | Not started |
+| `UNREACHABLE_STRIKES = 3` | `news_push.py` | Retries before giving up on a subscriber | Not started |
+| `CALL_TIMEOUT_SECONDS = 60` | `test_api.py` | Dev-tool only, low priority, same reasoning as the others | Not started |
+| **`MAX_ARTICLES_PER_TOPIC = 5`** | `news_push.py` | **Tied to this deployment's own cloud sizing** — see below | Not started |
+| **`MAX_INTERESTS_PER_PUSH = 5`** | `news_push.py` | same | Not started |
+| **`RELEVANCE_KEEP_FRACTION/MIN/MAX`, `NOVELTY_RELEVANCE_KEEP_FRACTION/MIN/MAX`** | `news_push.py` | same | Not started |
+| ~~`CATEGORY_SIGHTING_RETENTION_DAYS = 30`~~ | `users_db.py` | same | **Migrated** → `categories.sighting_retention_days` (moved out of the "tied to cloud sizing" framing -- it's the category-proposal feature's own retention window, not a sizing knob) |
+| ~~`PUSH_OUTCOME_RETENTION_DAYS = 90`~~ | `users_db.py` | same | **Migrated, redesigned** → `storage.push_outcomes_ttl_days` — reframed as a storage/retention concern (alongside `news_cache_dir` etc.), not a push-behavior or subscription setting, and renamed to match the `_ttl_` convention planned for `news_cache.py`/`message_archive.py`'s retention values above |
 
 **Why the bolded five aren't just "borderline"** (corrected 2026-09-01
 — originally filed as "nobody's ever asked to change these"): their

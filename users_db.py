@@ -29,8 +29,8 @@ PENDING = "pending"
 APPROVED = "approved"
 DENIED = "denied"
 
-DEFAULT_PUSH_INTERVAL_HOURS = 24
-MIN_PUSH_INTERVAL_HOURS = 1
+DEFAULT_PUSH_INTERVAL_HOURS = get_settings().resolved("subscription.default_interval_hours", default=24)
+MIN_PUSH_INTERVAL_HOURS = get_settings().resolved("subscription.min_interval_hours", default=1)
 # How long a sent article's link is remembered per subscriber. This is the
 # ONLY thing that decides whether they have already seen an article -- see
 # news_push.select_candidate_articles, which as of 2026-08-19 filters on
@@ -47,7 +47,7 @@ MIN_PUSH_INTERVAL_HOURS = 1
 # Deliberately longer than news_cache.DEFAULT_TTL_HOURS (48h): once an
 # article ages out of the cache it can never be a candidate again, so this
 # only needs to cover that window, and the margin costs a few rows.
-PUSHED_LINK_RETENTION_HOURS = 72
+PUSHED_LINK_RETENTION_HOURS = get_settings().resolved("subscription.pushed_link_retention_hours", default=72)
 
 
 @contextmanager
@@ -359,7 +359,7 @@ def init_db() -> None:
 # Set generously: the failure this guards against is a runaway list, not a
 # subscriber with varied tastes. MAX_INTERESTS_PER_PUSH in news_push.py is
 # what actually bounds the noise, and rotation covers the rest.
-MAX_INTERESTS = 10
+MAX_INTERESTS = get_settings().resolved("subscription.max_interests", default=10)
 
 
 SEED_CATEGORIES: list[tuple[str, str]] = [
@@ -404,7 +404,7 @@ SEED_CATEGORIES: list[tuple[str, str]] = [
                   "mergers under review, breakup remedies"),
 ]
 
-CATEGORY_SIGHTING_RETENTION_DAYS = 30
+CATEGORY_SIGHTING_RETENTION_DAYS = get_settings().resolved("categories.sighting_retention_days", default=30)
 
 # The outcome of one subscriber's turn in one push cycle, as recorded in
 # push_outcomes. Exhaustive by intent: every branch of news_push's
@@ -447,7 +447,7 @@ PUSH_GENERATED_OUTCOMES = frozenset({
 # Longer than the 30-day sightings window: the ratio alarm reads 24 hours,
 # but answering "was this normal?" after an incident means comparing
 # against the weeks before it, and these rows are tiny.
-PUSH_OUTCOME_RETENTION_DAYS = 90
+PUSH_OUTCOME_RETENTION_DAYS = get_settings().resolved("storage.push_outcomes_ttl_days", default=90)
 
 # How many sightings inside the retention window before an admin is asked.
 #
@@ -457,7 +457,7 @@ PUSH_OUTCOME_RETENTION_DAYS = 90
 # distinguish a real gap from a model slip -- that takes seeing the same
 # label recur across separate cycles. Revisit once the sightings table has
 # a distribution worth reading.
-CATEGORY_PROPOSAL_THRESHOLD = 5
+CATEGORY_PROPOSAL_THRESHOLD = get_settings().resolved("categories.proposal_threshold", default=5)
 
 # Written by the code, never chosen by the model. It marks "the classifier
 # looked and nothing applied", which needs to be distinguishable from "the
