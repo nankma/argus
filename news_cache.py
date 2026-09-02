@@ -8,10 +8,11 @@ means re-fetching the same article in a later ingestion cycle produces the
 same filename and just overwrites harmlessly -- free deduplication, no
 separate tracking state needed.
 
-CACHE_DIR is configurable via NEWS_CACHE_DIR, same reasoning as
-users_db.py's SUBSCRIBERS_DB_FILE -- local dev and the deployed container
-need different paths, and a container restart shouldn't lose the cache if
-NEWS_CACHE_DIR points at the same mounted volume as subscribers.db.
+CACHE_DIR is configurable via storage.news_cache_dir (settings.yml, see
+app_settings.py), same reasoning as users_db.py's storage.subscribers_db_file
+-- local dev and the deployed container need different paths, and a
+container restart shouldn't lose the cache if news_cache_dir points at
+the same mounted volume as subscribers.db.
 
 Retention is judged by `fetched_at` (when THIS system pulled the article),
 not `published_dt` (the source's own claimed publish time) -- some
@@ -21,13 +22,19 @@ always trust it.
 """
 
 import hashlib
-import os
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-CACHE_DIR = os.environ.get("NEWS_CACHE_DIR", "news_cache")
+from app_settings import get_settings
+
+# required=True, no default -- this is a value the service always needs
+# a real one for; settings.yml not having it is a deployment mistake and
+# should fail loudly at startup, not silently fall back to anything
+# (including the old NEWS_CACHE_DIR env var). See
+# docs/standaloneplan/01-settings-migration.md's "Migration methodology".
+CACHE_DIR = get_settings().resolved("storage.news_cache_dir", required=True)
 DEFAULT_TTL_HOURS = 48
 
 # Where expired articles go instead of being deleted. Unset (the default)
@@ -42,13 +49,16 @@ DEFAULT_TTL_HOURS = 48
 # articles at the current rate -- about 130 MB, against 33 GB free on the
 # VM, so disk is not a consideration.
 #
-# IMPORTANT: both this and NEWS_CACHE_DIR must point INSIDE the mounted
+# IMPORTANT: both this and news_cache_dir must point INSIDE the mounted
 # volume (/data on the deployed container). They don't by default, and
 # that is not a theoretical risk: as of 2026-08-19 the live cache sat at
 # /app/news_cache, on the container filesystem, so every redeploy silently
 # destroyed it. 2,202 articles existed only because the container happened
 # not to have restarted in three days.
-ARCHIVE_DIR = os.environ.get("NEWS_ARCHIVE_DIR")
+# default=None here is a real, intentional value (archiving off), not a
+# stand-in for "figure this out" -- unlike CACHE_DIR above, an absent
+# key here is a legitimate, expected state, so this one stays optional.
+ARCHIVE_DIR = get_settings().resolved("storage.news_archive_dir", default=None)
 
 
 def _cache_dir() -> Path:

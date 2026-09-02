@@ -2,30 +2,33 @@
 Archives every message actually sent to a subscriber -- timestamp,
 recipient, kind, topic, and the text delivered -- for after-the-fact
 inspection (a real user requirement, not an enhancement). Mirrors
-news_cache.py's NEWS_ARCHIVE_DIR pattern (env var, one file per item,
-pruned by age) but always-on rather than optional: NEWS_ARCHIVE_DIR
-defaults to unset (archiving off), MESSAGE_ARCHIVE_DIR defaults to a
-local relative directory (archiving on), same convention as
-NEWS_CACHE_DIR -- this is meant to always be recording, not to degrade
-gracefully to "off" when unconfigured.
+news_cache.py's storage.news_archive_dir pattern (settings.yml, one file
+per item, pruned by age) but always-on rather than optional:
+news_archive_dir defaults to unset (archiving off), message_archive_dir
+defaults to a local relative directory (archiving on), same convention
+as news_cache_dir -- this is meant to always be recording, not to
+degrade gracefully to "off" when unconfigured.
 
-In production, MESSAGE_ARCHIVE_DIR points inside the same persistent
-named Docker volume (myfirstagent-data:/data, see
+In production, storage.message_archive_dir points inside the same
+persistent named Docker volume (myfirstagent-data:/data, see
 local-infra/infrastructure.yaml) that already holds subscribers.db and
 news_cache -- survives a redeploy, unlike docker logs.
 """
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import users_db
+from app_settings import get_settings
 from logfire_logger import Level, Logger, LogfireLogger
 
 _events: Logger = LogfireLogger("argus.message_archive")
 
-ARCHIVE_DIR = os.environ.get("MESSAGE_ARCHIVE_DIR", "message_archive")
+# required=True, no default -- archiving is always on, so an absent
+# key here is a deployment mistake, not a legitimate "unset" state. See
+# docs/standaloneplan/01-settings-migration.md's "Migration methodology".
+ARCHIVE_DIR = get_settings().resolved("storage.message_archive_dir", required=True)
 
 DEFAULT_TTL_DAYS = 7
 

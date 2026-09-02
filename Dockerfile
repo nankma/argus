@@ -35,7 +35,15 @@ RUN micromamba run -n base python -c \
     "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('punkt_tab')"
 
 WORKDIR /app
-COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py news_sources.py news_cache.py news_classify.py news_embed.py news_keyness.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py logfire_logger.py guardrails.py users_db.py test_api.py telegram_html.py message_archive.py docker-entrypoint.sh ./
+# settings.yml (the local-dev file, relative paths like "news_cache")
+# is deliberately NOT copied in -- if it were, it would sit at the
+# exact default path SETTINGS_FILE looks for (app_settings.py), and the
+# container would silently pick up wrong, non-persistent relative
+# paths instead of the required=True check failing loudly the way it's
+# supposed to when SETTINGS_FILE isn't explicitly configured for
+# production (see docs/standaloneplan/01-settings-migration.md). Don't
+# add it back without re-reading that reasoning first.
+COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py app_settings.py news_sources.py news_cache.py news_classify.py news_embed.py news_keyness.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py logfire_logger.py guardrails.py users_db.py test_api.py telegram_html.py message_archive.py settings.oracle.yml docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
 # Real incident, 2026-08-09: `docker logs` returned zero lines for this

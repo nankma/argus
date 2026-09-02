@@ -27,6 +27,33 @@ their cost at current scale.
 | 3 | Provider failover | Not built — deferred until availability is a real requirement |
 | 4 | Dedicated AI gateway (LiteLLM / OpenRouter / Cloudflare) | **Evaluated, not recommended at current scale** |
 | 5 | Re-validating guardrail reliability after any model change | **Blocking prerequisite** for 1–3 — see "The behavioral caveat". A fresh baseline was measured 2026-08-16 against the newly-wired config, see below |
+| 6 | A real second provider actually wired up (e.g. Together.ai) | **Not built — real gap found 2026-09-01, not just "set `LLM_MODEL`".** See below |
+
+### Item 6: "config-driven model selection" (item 1) covers the mechanism, not every provider
+
+Found while trying to point the INT deployment at a Together.ai key
+instead of DeepSeek: `LLM_MODEL="together:<model-id>"` would not
+actually work today. `init_chat_model()` needs the matching integration
+package installed to construct that provider's client class —
+`environment.yml` only has `langchain-deepseek`, no `langchain-together`.
+Item 1 above being "built" means the *mechanism* (env-var-driven
+provider string, dependency-injected into every consumer) is real and
+working — it doesn't mean every provider is already usable, and this
+doc's earlier framing (elsewhere referenced as "AI provider swapping is
+already built") overstated that. To actually add Together.ai:
+
+1. Add `langchain-together` to `environment.yml`
+2. Pick a specific Together-hosted model and confirm it supports **tool
+   calling** — `search_news`/`save_note`, the guardrail router (layer 2),
+   and the output check (layer 4) all depend on it (see this file's own
+   CLAUDE.md-documented landmine); not every model Together hosts
+   supports this reliably, don't assume
+3. Re-run `tools/measure_guardrails.py` against it before trusting it in
+   anything beyond isolated testing — same "behavioral caveat" this doc
+   already requires for any model change
+
+Not started. INT deployment fell back to a real DeepSeek key for now
+(2026-09-01) rather than blocking on this.
 
 ## Where things stand today
 

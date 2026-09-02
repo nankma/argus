@@ -76,7 +76,7 @@ verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("="
 challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
 
 r = requests.post(B + "/oauth/register", json={
-    "client_name": "argus-alert-setup",
+    "client_name": "auguring-alert-setup",
     "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
     "token_endpoint_auth_method": "none",
     "application_type": "native",   # NOT "web" -- matters, confirmed 2026-08-28

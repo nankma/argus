@@ -58,3 +58,8 @@ dependencies:
   - pip
   - pip:
       - model2vec
+      # Settings resolution -- extracted from this project's own settings
+      # work into a standalone, language-independent library (2026-09-01,
+      # see docs/README.md's pointer for the extraction history).
+      # PyPI-only, no conda-forge recipe.
+      - trailsign

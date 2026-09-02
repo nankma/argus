@@ -1,0 +1,42 @@
+# Production-target settings.yml TEMPLATE (Oracle VM) -- committed,
+# generic, safe forever, as long as it stays this way. See the rule
+# below before adding anything to this file.
+#
+# CRITERION FOR WHAT MAY LIVE HERE (also in CLAUDE.md's Landmines):
+# only env-var names, placeholder/example resource identifiers, relative
+# paths, and structure -- never a real, this-deployment-specific value
+# (a real OCID, IP, hostname, or literal secret). The moment Phase 2+
+# needs THIS project's actual vault/secret/compartment OCIDs, those go
+# into a new gitignored file under local-infra/ instead (matching
+# local-infra/infrastructure.yaml's existing real-values convention) --
+# this file keeps a placeholder version, not the real one.
+#
+# Bridges to the exact same env vars docker_run.command already sets
+# (local-infra/infrastructure.yaml) -- zero behavior change is the
+# point of this specific file. This IS load-bearing once deployed: the
+# migrated code uses required=True for these keys (see
+# docs/standaloneplan/01-settings-migration.md's "Migration
+# methodology"), so a settings.yml with these values present is a hard
+# prerequisite for the container to start at all, not an optional
+# nicety.
+#
+# To actually deploy: add
+#   -e SETTINGS_FILE=/config/settings.yml -v <path-on-vm>/settings.yml:/config/settings.yml:ro
+# to docker_run.command, scp this file (or the local-infra/ real-values
+# version, once one exists) to the VM, then verify with
+# tools/check_data_persistence.py afterward -- don't just trust the
+# deploy succeeded.
+
+storage:
+  news_cache_dir:
+    trailsign-resolve: environment-variable
+    name: NEWS_CACHE_DIR
+  news_archive_dir:
+    trailsign-resolve: environment-variable
+    name: NEWS_ARCHIVE_DIR
+  message_archive_dir:
+    trailsign-resolve: environment-variable
+    name: MESSAGE_ARCHIVE_DIR
+  subscribers_db_file:
+    trailsign-resolve: environment-variable
+    name: SUBSCRIBERS_DB_FILE

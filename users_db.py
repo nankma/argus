@@ -4,21 +4,26 @@ admin_bot.py (the approval bot). Both processes need to see the same
 approval state, so this can't live in either bot's in-memory dict — see
 docs/plans/bot-features-plan.md item 1.
 
-DB_FILE is configurable via SUBSCRIBERS_DB_FILE so a containerized
-deployment can point both bots at the same file on a shared volume (see
-docs/plans/deployment-plan.md).
+DB_FILE is configurable via storage.subscribers_db_file (settings.yml,
+see app_settings.py) so a containerized deployment can point both bots
+at the same file on a shared volume (see docs/plans/deployment-plan.md).
 """
 
 import hashlib
 import json
-import os
 import secrets
 import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-DB_FILE = os.environ.get("SUBSCRIBERS_DB_FILE", "subscribers.db")
+from app_settings import get_settings
+
+# required=True, no default -- both bots need a real, shared db path;
+# settings.yml not having it is a deployment mistake, not something to
+# paper over. See
+# docs/standaloneplan/01-settings-migration.md's "Migration methodology".
+DB_FILE = get_settings().resolved("storage.subscribers_db_file", required=True)
 
 PENDING = "pending"
 APPROVED = "approved"

@@ -18,6 +18,13 @@ showcase.html
 # and the rules around it.
 local-infra/
 
+# settings.yml / settings.oracle.yml (repo root) are committed on
+# purpose -- see their own header comments and CLAUDE.md's Landmines.
+# They must never gain a real, this-deployment-specific value (a real
+# OCID, IP, hostname, secret). The moment Phase 2+ needs one, it goes
+# into a NEW file under local-infra/ (already gitignored above), not
+# into either of these.
+
 # docs/analysis/ build artifacts -- regenerate with docs/analysis/tools/
 # (see docs/analysis/README.md).
 # The report is a ~700KB generated file; the snapshot is a point-in-time pull
