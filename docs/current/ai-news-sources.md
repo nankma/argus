@@ -235,7 +235,7 @@ posture, recurring cost) than anything on this page.
 
 | Source | Class | Endpoint | Notes |
 |---|---|---|---|
-| **ZDNet** | rss | `https://www.zdnet.com/news/rss.xml` | Consumer reviews/how-tos, not industry news — different flavor from the rest of the registry. |
+| **ZDNet** | rss | `https://www.zdnet.com/rss/all/` | Consumer reviews/how-tos, not industry news — different flavor from the rest of the registry. URL updated 2026-09-03: the old `/news/rss.xml` path is gone entirely — ZDNet moved to a `/rss/<section>/` scheme (confirmed via `https://www.zdnet.com/rssfeeds/`, `/all/` is the general-news one), not a transient outage. Atom, not RSS2.0 — feedparser handles both transparently. |
 | **Engadget** | rss | `https://www.engadget.com/rss.xml` | Consumer gadgets/entertainment tech. |
 | **TechRadar** | rss | `https://www.techradar.com/rss` (redirects to `/feeds.xml`) | **Blocks the default `python-requests` User-Agent with `403`** — confirmed live. Fixed by sending a self-identifying User-Agent (`_REQUEST_HEADERS` in `news_sources.py`), applied to every source for consistency rather than as a TechRadar-only special case. |
 
