@@ -189,9 +189,9 @@ Re-grepped 2026-09-01, not carried over from memory:
 | `NEWS_ARCHIVE_DIR` | ~~`news_cache.py`~~ | plain `os.environ` | no | `storage.news_archive_dir` | **Migrated** 2026-09-01, `default=None` (intentional "off" state) |
 | `MESSAGE_ARCHIVE_DIR` | ~~`message_archive.py`~~ | plain `os.environ` | no | `storage.message_archive_dir` | **Migrated** 2026-09-01, `required=True` |
 | `SUBSCRIBERS_DB_FILE` | ~~`users_db.py`~~ | plain `os.environ` | no | `storage.subscribers_db_file` | **Migrated** 2026-09-01, `required=True` |
-| `DEEPSEEK_API_KEY` | `tools/measure_guardrails.py`, `tools/run_eval.py` (`agent.py` reads it implicitly via `ChatDeepSeek`) | **`docker-entrypoint.sh` vault-fetch** (via `DEEPSEEK_API_KEY_SECRET_OCID`) | **yes** | `models.main.api-key` | Not started — see methodology rule 3, this is the worked example |
-| `LLM_MODEL` / `LLM_MODEL_CLASSIFIER` | `agent.py` (`build_model`) | plain `os.environ` | no | `models.main.model` / `models.guardrail.model` | Not started — feeds the already-built `model-portability-plan.md` mechanism, no new design |
-| `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | `agent.py` | plain `os.environ` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` | Not started — legitimate `default=<literal>` candidates, not `required=True` |
+| `DEEPSEEK_API_KEY` | ~~`tools/measure_guardrails.py`, `tools/run_eval.py`, `agent.py` (implicitly via `ChatDeepSeek`)~~ | **`docker-entrypoint.sh` vault-fetch** (via `DEEPSEEK_API_KEY_SECRET_OCID`, unchanged) | **yes** | `models.main.api-key` / `models.guardrail.api-key` | **Migrated** 2026-09-02 — see methodology rule 3, this was the worked example |
+| `LLM_MODEL` / `LLM_MODEL_CLASSIFIER` | ~~`agent.py` (`build_model`)~~ | plain `os.environ` | no | `models.main.model` / `models.guardrail.model` | **Migrated** 2026-09-02 — `build_model`/`init_chat_model` removed outright, not kept alongside; the new `agent.build_model_from_config` is provider-generic (any OpenAI-wire-compatible endpoint via `ChatOpenAI`), superseding the LangChain-provider-registry approach `model-portability-plan.md` originally described, not just feeding it |
+| `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | ~~`agent.py`~~ | plain `os.environ` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` (and the `models.guardrail.*` mirrors) | **Migrated** 2026-09-02, `default=<literal>` in `build_model_from_config` (reasoning_effort defaults to absent, not `"none"` — that's DeepSeek-specific, set explicitly in settings.yml's own `models.main`/`models.guardrail`, not code) |
 | `LOGFIRE_ENABLED` | `agent.py` | plain `os.environ` | no | `telemetry.tracing.*` (folds into the seam-4 split, see `docs/standaloneplan/README.md` Phase 3) | Not started |
 | `LOGFIRE_API_KEY` | `agent.py`, `tools/check_logfire.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `telemetry.tracing.*` | Not started |
 | `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | `news_sources.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `news_source.<name>.api-key` | Not started |
@@ -306,11 +306,19 @@ them independently settable wouldn't even be coherent:
    `required=True`/"code and both settings.yml files move together"
    discipline before touching anything with real secrets or the
    entrypoint-fetch shape.
-2. **Models** (`DEEPSEEK_API_KEY`, `LLM_MODEL`, `LLM_MODEL_CLASSIFIER`,
-   `LLM_REASONING_EFFORT`, `LLM_REQUEST_TIMEOUT_SECONDS`) — next up.
-   First real secret migrated, but low-traffic-surface (one construction
-   point, `agent.build_model()`), and directly feeds the already-built
-   `model-portability-plan.md` mechanism rather than needing new design.
+2. ~~**Models**~~ — **done** 2026-09-02. First real secret migrated. Scope
+   grew beyond the original "feeds `model-portability-plan.md`, no new
+   design" plan: the provider-string `build_model()`/`init_chat_model`
+   construction path was removed outright (not kept alongside), replaced
+   by `agent.build_model_from_config`/`build_model_from_settings` --
+   generic across any OpenAI-wire-compatible provider via `ChatOpenAI`,
+   so a deployment points at a different AI provider by editing its own
+   settings.yml alone, no code change and no new LangChain provider
+   package needed. `tools/measure_guardrails.py`'s hardcoded
+   `deepseek-chat` baseline was folded in too -- it now reads
+   `models.guardrail` the same way, so measuring a candidate model/
+   provider's baseline is "point `SETTINGS_FILE` at a settings.yml naming
+   it, re-run, compare reports" rather than editing the harness itself.
 3. **News sources** (`NEWSAPI_API_KEY`, `GNEWS_API_KEY`,
    `PERIGON_API_KEY`) — pairs naturally with moving `news_sources.py`
    onto the factory pattern described in Trailsign's own design doc

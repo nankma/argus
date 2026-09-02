@@ -19,21 +19,49 @@ storage:
   # pre-migration default (unset NEWS_ARCHIVE_DIR). default=None in code
   # (news_cache.py), a legitimate state, not a required key.
 
-# Not yet migrated onto Settings -- still raw os.environ reads as of
-# 2026-09-01 (models.*, delivery.*, telemetry.*, news_source.*). See
-# docs/standaloneplan/01-settings-migration.md for current status. These
-# sections are a preview of the eventual shape, not live yet -- and per
-# the criterion above, DEEPSEEK_API_KEY/TELEGRAM_BOT_TOKEN etc. below are
-# env-var *names*, not real values, safe to leave uncommented as-is when
-# these sections do go live:
+# The AI connector -- generic across any provider speaking the OpenAI
+# /chat/completions wire format (agent.build_model_from_config's own
+# docstring). To point this deployment at a different provider/model
+# (Together.ai, Groq, Fireworks, a self-hosted vLLM server, ...), change
+# url/model/api-key below -- no code change, no new dependency. `main` is
+# the agent's own model; `guardrail` backs guardrails.py's layer 2 router
+# and layer 4 output check (docs/plans/model-portability-plan.md's Level
+# 2 per-stage routing) -- both point at the same model below by default,
+# since no second provider is configured in this example, but they're
+# independently swappable.
 #
-# models:
-#   main:
-#     api-key:
-#       trailsign-resolve: environment-variable
-#       name: DEEPSEEK_API_KEY
-#     url: https://api.deepseek.com
-#     model: deepseek-v4-flash
+# reasoning_effort: "none" is a DeepSeek-specific workaround (thinking
+# mode rejects the forced tool_choice with_structured_output relies on --
+# see agent.build_model_from_config's docstring for the 2026-08-21
+# incident this fixes). Omit this key entirely for a provider that
+# doesn't need or doesn't accept it.
+models:
+  main:
+    url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    api-key:
+      trailsign-resolve: environment-variable
+      name: DEEPSEEK_API_KEY
+    reasoning_effort: none
+    request_timeout_seconds: 60
+  guardrail:
+    url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    api-key:
+      trailsign-resolve: environment-variable
+      name: DEEPSEEK_API_KEY
+    reasoning_effort: none
+    # Shorter than main's -- backs a live Telegram user's own message,
+    # not a background batch job (agent.build_model_from_config's docstring).
+    request_timeout_seconds: 20
+
+# Not yet migrated onto Settings -- still raw os.environ reads as of
+# 2026-09-02 (delivery.*, telemetry.*, news_source.*). See
+# docs/standaloneplan/01-settings-migration.md for current status. This
+# section is a preview of the eventual shape, not live yet -- and per the
+# criterion above, TELEGRAM_BOT_TOKEN below is an env-var *name*, not a
+# real value, safe to leave uncommented as-is when this section does go
+# live:
 #
 # delivery:
 #   telegram:

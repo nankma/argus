@@ -18,7 +18,11 @@ app_settings.reset_settings_for_tests(Settings({
         "news_cache_dir": "news_cache",
         "message_archive_dir": "message_archive",
         "subscribers_db_file": "subscribers.db",
-    }
+    },
+    "models": {
+        "main": {"url": "https://example.invalid", "model": "fake-main", "api-key": "fake-key"},
+        "guardrail": {"url": "https://example.invalid", "model": "fake-guardrail", "api-key": "fake-key"},
+    },
 }))
 
 import agent

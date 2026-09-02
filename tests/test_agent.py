@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 import agent
@@ -19,42 +20,85 @@ def _fake_request(context):
     return SimpleNamespace(runtime=SimpleNamespace(context=context))
 
 
-def _record_init_chat_model(monkeypatch):
-    """build_model calls the module-level init_chat_model name, so
-    monkeypatching it on the agent module (not the real langchain function)
-    lets these tests assert what string was requested without constructing
-    a real chat model or making any network call.
-
-    Records kwargs too, not just the model string: the parameters passed
-    alongside it are load-bearing (see build_model's reasoning_effort), and
-    a stub that silently dropped them is how a real outage went untested.
-    """
+def _record_chat_openai(monkeypatch):
+    """build_model_from_config calls the module-level ChatOpenAI name, so
+    monkeypatching it on the agent module (not the real langchain_openai
+    class) lets these tests assert what was requested without constructing
+    a real client or making any network call."""
     calls = []
-    monkeypatch.setattr(agent, "init_chat_model",
-                        lambda s, **kw: calls.append((s, kw)) or "fake-model")
+    monkeypatch.setattr(agent, "ChatOpenAI", lambda **kw: calls.append(kw) or "fake-model")
     return calls
 
 
-def test_build_model_reads_env_var(monkeypatch):
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.setenv("LLM_MODEL_TEST", "deepseek:deepseek-chat")
-    result = agent.build_model("LLM_MODEL_TEST")
-    assert [c[0] for c in calls] == ["deepseek:deepseek-chat"]
+def test_build_model_from_config_reads_url_model_key(monkeypatch):
+    calls = _record_chat_openai(monkeypatch)
+    cfg = {"url": "https://api.together.xyz/v1", "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "api-key": "tgp_test"}
+    result = agent.build_model_from_config(cfg)
+    assert calls[0]["base_url"] == cfg["url"]
+    assert calls[0]["model"] == cfg["model"]
+    assert calls[0]["api_key"] == cfg["api-key"]
     assert result == "fake-model"
 
 
-def test_build_model_falls_back_to_default_when_env_unset(monkeypatch):
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.delenv("LLM_MODEL_TEST_UNSET", raising=False)
-    agent.build_model("LLM_MODEL_TEST_UNSET")
-    assert [c[0] for c in calls] == [agent.DEFAULT_MODEL]
+def test_build_model_from_config_omits_reasoning_effort_by_default(monkeypatch):
+    """Unlike the old env-var-based build_model, this does NOT default to
+    "none" -- that value is a DeepSeek-specific workaround (see the
+    docstring), and a deployment on a different provider sets it in its
+    own settings.yml only if it's actually needed."""
+    calls = _record_chat_openai(monkeypatch)
+    agent.build_model_from_config({"url": "u", "model": "m", "api-key": "k"})
+    assert "reasoning_effort" not in calls[0]
 
 
-def test_build_model_honors_a_custom_default(monkeypatch):
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.delenv("LLM_MODEL_TEST_CUSTOM_DEFAULT", raising=False)
-    agent.build_model("LLM_MODEL_TEST_CUSTOM_DEFAULT", default="openai:gpt-4o-mini")
-    assert [c[0] for c in calls] == ["openai:gpt-4o-mini"]
+def test_build_model_from_config_passes_reasoning_effort_when_given(monkeypatch):
+    calls = _record_chat_openai(monkeypatch)
+    agent.build_model_from_config({"url": "u", "model": "m", "api-key": "k", "reasoning_effort": "high"})
+    assert calls[0]["reasoning_effort"] == "high"
+
+
+def test_build_model_from_config_uses_default_timeout_when_not_in_cfg(monkeypatch):
+    calls = _record_chat_openai(monkeypatch)
+    agent.build_model_from_config({"url": "u", "model": "m", "api-key": "k"}, default_timeout=42.0)
+    assert calls[0]["request_timeout"] == 42.0
+
+
+def test_build_model_from_config_cfg_timeout_overrides_default(monkeypatch):
+    calls = _record_chat_openai(monkeypatch)
+    agent.build_model_from_config(
+        {"url": "u", "model": "m", "api-key": "k", "request_timeout_seconds": 5.0}, default_timeout=42.0
+    )
+    assert calls[0]["request_timeout"] == 5.0
+
+
+def test_build_model_from_config_omits_timeout_when_falsy(monkeypatch):
+    calls = _record_chat_openai(monkeypatch)
+    agent.build_model_from_config({"url": "u", "model": "m", "api-key": "k", "request_timeout_seconds": 0})
+    assert "request_timeout" not in calls[0]
+
+
+def test_build_model_from_settings_resolves_the_given_path(monkeypatch):
+    """The usual entry point -- resolves a dotted Settings path (the shape
+    a deployment's settings.yml provides) into a cfg dict, then delegates
+    to build_model_from_config."""
+    from trailsign import Settings
+
+    calls = _record_chat_openai(monkeypatch)
+    settings = Settings({"models": {"main": {"url": "u", "model": "m", "api-key": "k"}}})
+    result = agent.build_model_from_settings(settings, "models.main")
+    assert calls[0]["base_url"] == "u"
+    assert calls[0]["model"] == "m"
+    assert result == "fake-model"
+
+
+def test_build_model_from_settings_raises_when_path_missing(monkeypatch):
+    """A deployment with no models.* in its settings.yml should fail loudly
+    at startup, not construct a half-built model."""
+    from trailsign import Settings, SettingsError
+
+    _record_chat_openai(monkeypatch)
+    settings = Settings({})
+    with pytest.raises(SettingsError):
+        agent.build_model_from_settings(settings, "models.main")
 
 
 def test_compose_prompt_defaults_to_news_query_when_no_category():
@@ -404,109 +448,6 @@ def test_duplicate_interest_message_also_names_the_stored_form(
 
     assert "Optical Communications" in reply
     assert "already have" in reply
-
-
-# --- reasoning_effort: the 2026-08-21 DeepSeek outage ----------------------
-
-
-def test_build_model_disables_thinking_mode_by_default(monkeypatch):
-    """The fix for a live outage. DeepSeek turned thinking mode on by default
-    for deepseek-v4-flash, and thinking mode rejects the forced `tool_choice`
-    that with_structured_output relies on -- so every guardrail routing call
-    and every article classification started returning
-    `400 Thinking mode does not support this tool_choice`.
-
-    The model name never changed; its behaviour did. Passing the parameter
-    explicitly is what stops a provider's default from silently redefining
-    what our pinned model does."""
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.delenv("LLM_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("LLM_MODEL_TEST_EFFORT", raising=False)
-
-    agent.build_model("LLM_MODEL_TEST_EFFORT")
-
-    assert calls[0][1]["reasoning_effort"] == "none"
-
-
-def test_build_model_reasoning_effort_is_overridable(monkeypatch):
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
-    agent.build_model("LLM_MODEL_TEST_EFFORT")
-
-    assert calls[0][1]["reasoning_effort"] == "high"
-
-
-def test_build_model_omits_reasoning_effort_when_set_empty(monkeypatch):
-    """An escape hatch for a provider that rejects the parameter outright --
-    passing an unsupported kwarg is its own kind of outage."""
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.setenv("LLM_REASONING_EFFORT", "")
-    agent.build_model("LLM_MODEL_TEST_EFFORT")
-
-    assert "reasoning_effort" not in calls[0][1]
-
-
-# --- request_timeout: the 2026-08-27 stuck-ingest incident ------------------
-
-
-def test_build_model_sets_a_default_request_timeout(monkeypatch):
-    """The fix for a live incident: ChatDeepSeek's own default timeout is
-    None (no timeout at all), which is what let a single stuck DeepSeek
-    call wedge the ingest job's thread forever -- see build_model's own
-    docstring for the full incident. 60s, matched against
-    MAX_ARTICLES_PER_CALL=50 (news_classify.py)."""
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.delenv("LLM_REQUEST_TIMEOUT_SECONDS", raising=False)
-    monkeypatch.delenv("LLM_MODEL_TEST_TIMEOUT", raising=False)
-
-    agent.build_model("LLM_MODEL_TEST_TIMEOUT")
-
-    assert calls[0][1]["request_timeout"] == 60.0
-
-
-def test_build_model_honors_a_custom_default_timeout(monkeypatch):
-    """bot.py/combined_bot.py pass a shorter default_timeout for the
-    guardrail classifier model -- a live Telegram user is waiting on that
-    call, unlike news_ingest's background batch job."""
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.delenv("LLM_REQUEST_TIMEOUT_SECONDS", raising=False)
-
-    agent.build_model("LLM_MODEL_TEST_TIMEOUT", default_timeout=20.0)
-
-    assert calls[0][1]["request_timeout"] == 20.0
-
-
-def test_build_model_request_timeout_env_var_overrides_a_custom_default(monkeypatch):
-    """LLM_REQUEST_TIMEOUT_SECONDS is a shared escape hatch -- it wins over
-    ANY caller's default_timeout, intentionally (see build_model's own
-    docstring: one emergency global override, not independently-tunable
-    per-caller values without a code change)."""
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "5")
-
-    agent.build_model("LLM_MODEL_TEST_TIMEOUT", default_timeout=20.0)
-
-    assert calls[0][1]["request_timeout"] == 5.0
-
-
-def test_build_model_request_timeout_is_overridable(monkeypatch):
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "120")
-
-    agent.build_model("LLM_MODEL_TEST_TIMEOUT")
-
-    assert calls[0][1]["request_timeout"] == 120.0
-
-
-def test_build_model_omits_request_timeout_when_set_empty(monkeypatch):
-    """Same escape hatch as reasoning_effort, for a provider client that
-    rejects the parameter outright."""
-    calls = _record_init_chat_model(monkeypatch)
-    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "")
-
-    agent.build_model("LLM_MODEL_TEST_TIMEOUT")
-
-    assert "request_timeout" not in calls[0][1]
 
 
 # --- breadth hint and the interest cap ----------------------------------
