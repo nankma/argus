@@ -66,16 +66,55 @@ models:
     reasoning_effort: none
     request_timeout_seconds: 20
 
-# RSS news sources -- free, no API key, query-less. Byte-identical to
-# settings.yml's news_source.rss -- MUST be kept in sync with it; this is
-# the file production actually reads (SETTINGS_FILE=/app/settings.oracle.yml),
-# so an edit only on the settings.yml side silently drops production to
-# zero RSS sources on the next deploy (default=[] fails open, no crash --
-# see docs/standaloneplan/01-settings-migration.md's "Migration methodology").
-# See settings.yml's own news_source.rss comment for the full reasoning;
-# not repeated here to avoid the two copies drifting in what they say
-# even if this drifts in what it lists.
+# The news-fetching pipeline. ONE news_source: key for the whole file --
+# a second top-level `news_source:` mapping is a real bug this file had
+# 2026-09-02 to 2026-09-03: YAML duplicate-key handling silently kept
+# only the LAST one, which meant production would have deployed with
+# ZERO RSS sources (the newsapi/gnews/perigon block below shadowed the
+# entire rss list above it) -- caught before it ever reached a real
+# deploy, but confirmed live via `yaml.safe_load` showing only
+# {newsapi, gnews, perigon} as keys, `rss` silently gone. Don't
+# reintroduce this -- everything below is one single mapping.
+#
+# tick_seconds/default_interval_hours/request_delay_seconds apply
+# globally, regardless of which sources are configured below -- see
+# settings.yml's own comment on these three for what each one does.
+# Bridges to the same NEWSAPI_API_KEY/GNEWS_API_KEY/PERIGON_API_KEY env
+# vars docker-entrypoint.sh already vault-fetches (via
+# NEWSAPI_API_KEY_SECRET_OCID etc.) -- same worked-example pattern as
+# models.*'s DEEPSEEK_API_KEY. All three genuinely optional -- see
+# news_sources._news_source_api_key -- but production has real keys for
+# all three, so all three are live here (with their interval_hours/
+# daily_cap overrides), unlike settings.yml's commented preview.
+#
+# RSS list byte-identical to settings.yml's news_source.rss -- MUST be
+# kept in sync with it; this is the file production actually reads
+# (SETTINGS_FILE=/app/settings.oracle.yml), so an edit only on the
+# settings.yml side silently drops production to zero RSS sources on the
+# next deploy (default=[] fails open, no crash -- see
+# docs/standaloneplan/01-settings-migration.md's "Migration methodology").
 news_source:
+  tick_seconds: 900
+  default_interval_hours: 4
+  request_delay_seconds: 1.1
+
+  newsapi:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: NEWSAPI_API_KEY
+    interval_hours: 24
+    daily_cap: 1
+  gnews:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: GNEWS_API_KEY
+  perigon:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: PERIGON_API_KEY
+    interval_hours: 8
+    daily_cap: 3
+
   rss:
     - key: openai_blog
       display_name: OpenAI Blog
@@ -143,26 +182,3 @@ news_source:
     - key: techradar
       display_name: TechRadar
       url: https://www.techradar.com/rss
-
-# Bridges to the same NEWSAPI_API_KEY/GNEWS_API_KEY/PERIGON_API_KEY env
-# vars docker-entrypoint.sh already vault-fetches (via
-# NEWSAPI_API_KEY_SECRET_OCID etc.) -- same worked-example pattern as
-# models.*'s DEEPSEEK_API_KEY. See settings.yml's own news_source
-# comment for what each source is and why (newsapi/perigon restricted
-# from live search, gnews isn't). All three genuinely optional -- see
-# news_sources._news_source_api_key -- but production has real keys for
-# all three, so all three are live here, unlike settings.yml's commented
-# preview.
-news_source:
-  newsapi:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: NEWSAPI_API_KEY
-  gnews:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: GNEWS_API_KEY
-  perigon:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: PERIGON_API_KEY

@@ -99,13 +99,55 @@ models:
       name: TOGETHER_API_KEY
     request_timeout_seconds: 20
 
-# Byte-identical to settings.yml/settings.oracle.yml's news_source.rss --
-# without this, INT falls back to default=[] (news_sources.py) and loses
-# every RSS source (only hackernews/arxiv would remain, since
-# GNEWS_API_KEY/NEWSAPI_API_KEY/PERIGON_API_KEY aren't set on INT either,
-# see TODO.md), which would make INT nearly useless for testing the real
-# news pipeline. Keep in sync with the other two files' lists.
+# The news-fetching pipeline. ONE news_source: key for the whole file --
+# this file had a real bug 2026-09-02 to 2026-09-03 where a second
+# top-level `news_source:` mapping (the newsapi/gnews/perigon block that
+# used to be further down) silently shadowed this entire rss list --
+# YAML duplicate-key handling keeps only the LAST mapping. Confirmed live
+# via yaml.safe_load showing only {newsapi, gnews, perigon} as keys, rss
+# silently gone -- meaning the INT container deployed with that bug had
+# NO RSS sources despite this list being right here in the file. Fixed
+# by merging everything into one mapping; don't reintroduce a second
+# `news_source:` key.
+#
+# RSS list byte-identical to settings.yml/settings.oracle.yml's
+# news_source.rss -- without it, INT falls back to default=[]
+# (news_sources.py) and loses every RSS source, which would make INT
+# nearly useless for testing the real news pipeline. Keep in sync with
+# the other two files' lists.
 news_source:
+  tick_seconds: 900
+  default_interval_hours: 4
+  request_delay_seconds: 1.1
+
+  # TEMPORARY, added 2026-09-03: a deliberate one-day live test of the
+  # news_source.<name>.api-key Settings migration, using the same real
+  # keys PROD has (see local-infra/infrastructure.yaml's own TEMPORARY
+  # comment on where these came from and why). REMOVE this whole
+  # newsapi/gnews/perigon sub-block once INT is stopped at the end of
+  # the test window -- this was never meant to be a standing INT config,
+  # matching how INT never had these three sources before this test.
+  # Perigon is expected to return 403 -- it's already out of quota on
+  # the real account -- which is itself a useful result here (confirms
+  # the connector reaches Perigon and authenticates, not that it returns
+  # data).
+  newsapi:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: NEWSAPI_API_KEY
+    interval_hours: 24
+    daily_cap: 1
+  gnews:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: GNEWS_API_KEY
+  perigon:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: PERIGON_API_KEY
+    interval_hours: 8
+    daily_cap: 3
+
   rss:
     - key: openai_blog
       display_name: OpenAI Blog
@@ -173,27 +215,3 @@ news_source:
     - key: techradar
       display_name: TechRadar
       url: https://www.techradar.com/rss
-
-# TEMPORARY, added 2026-09-03: a deliberate one-day live test of the
-# news_source.<name>.api-key Settings migration, using the same real
-# keys PROD has (see local-infra/infrastructure.yaml's own TEMPORARY
-# comment on where these came from and why). REMOVE this whole block
-# once INT is stopped at the end of the test window -- this was never
-# meant to be a standing INT config, matching how INT never had these
-# three sources before this test. Perigon is expected to return 403 --
-# it's already out of quota on the real account -- which is itself a
-# useful result here (confirms the connector reaches Perigon and
-# authenticates, not that it returns data).
-news_source:
-  newsapi:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: NEWSAPI_API_KEY
-  gnews:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: GNEWS_API_KEY
-  perigon:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: PERIGON_API_KEY

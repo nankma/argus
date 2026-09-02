@@ -77,6 +77,7 @@ import time
 import unicodedata
 from datetime import datetime, timezone
 
+from app_settings import get_settings
 import news_cache
 import news_classify
 import news_embed
@@ -106,12 +107,14 @@ MAX_RESULTS_PER_SOURCE_RSS = 200
 # 2026-08-16); sources with their own lower hard cap (e.g. GNews's
 # 10/request free-tier limit) just clamp silently, no error.
 MAX_RESULTS_PER_SOURCE_SINCE_LAST_PULL = 50
-DEFAULT_INTERVAL_HOURS = 4
+# The fallback used by _interval_hours() when a source has no
+# news_source.<name>.interval_hours override in Settings.
+DEFAULT_INTERVAL_HOURS = get_settings().resolved("news_source.default_interval_hours", default=4)
 # 1 req/sec is GNews's own documented free-tier limit (docs/current/ai-news-sources.md);
 # used as the general delay between consecutive same-source calls since
 # other sources' limits aren't always documented, and this is cheap
 # regardless (cycles run every 4h+).
-REQUEST_DELAY_SECONDS = 1.1
+REQUEST_DELAY_SECONDS = get_settings().resolved("news_source.request_delay_seconds", default=1.1)
 
 # Above this share of non-Latin letters, an article is dropped at ingestion
 # and never cached. Measured on the 2026-08-21 snapshot: 66 of 2,706 titles
@@ -163,22 +166,6 @@ def is_latin_script(text: str) -> bool:
 
 _DEFAULT_QUERY = "technology"
 
-# Per-source pull interval, in hours -- docs/plans/local-news-cache-plan.md's
-# resolved "pull interval" question. Sources absent here use
-# DEFAULT_INTERVAL_HOURS (unrestricted sources, and GNews -- its 100/day
-# budget comfortably covers 6 pulls/day at the default interval).
-_SOURCE_INTERVAL_HOURS = {
-    "perigon": 8,  # 3x/day, matching its 150/month budget
-    "newsapi": 24,  # 1x/day, matching the individual-use judgment recorded in the plan doc
-}
-
-# Daily call caps for budget-tracked sources -- docs/plans/local-news-cache-plan.md's
-# Perigon/NewsAPI worked examples. Absent = no cap.
-_DAILY_CAPS = {
-    "perigon": 3,
-    "newsapi": 1,
-}
-
 _SOURCE_CLASS = {name: source_class for name, _fn, _env, source_class in news_sources.SOURCE_REGISTRY}
 
 # "forum"/"api" classes are the query-capable sources per news_sources.py's
@@ -198,7 +185,20 @@ _SERVER_SIDE_SINCE_SOURCES = {"hackernews", "arxiv", "gnews"}
 
 
 def _interval_hours(source_key: str) -> int:
-    return _SOURCE_INTERVAL_HOURS.get(source_key, DEFAULT_INTERVAL_HOURS)
+    """news_source.<source_key>.interval_hours -- docs/plans/local-news-cache-plan.md's
+    resolved "pull interval" question. Sources with no override in
+    Settings use DEFAULT_INTERVAL_HOURS (unrestricted sources, and GNews
+    -- its 100/day budget comfortably covers 6 pulls/day at the default
+    interval). Live lookup (not cached), same reasoning as
+    news_sources._news_source_api_key -- a deployer can add or change an
+    override in settings.yml without a code change or a restart mid-test."""
+    return get_settings().resolved(f"news_source.{source_key}.interval_hours", default=DEFAULT_INTERVAL_HOURS)
+
+
+def _daily_cap(source_key: str) -> int | None:
+    """news_source.<source_key>.daily_cap -- docs/plans/local-news-cache-plan.md's
+    Perigon/NewsAPI worked examples. None (the default) means no cap."""
+    return get_settings().resolved(f"news_source.{source_key}.daily_cap", default=None)
 
 
 def _is_source_due(source_key: str, last_pulled_at: datetime | None, now: datetime) -> bool:
@@ -267,7 +267,7 @@ def _sections_for_source(source_key: str, now: datetime) -> list[str | None]:
         # is ever brought back.
         return [None]
 
-    if source_key in _DAILY_CAPS:
+    if _daily_cap(source_key) is not None:
         interval_seconds = _interval_hours(source_key) * 3600
         tick_number = int(now.timestamp() // interval_seconds)
         return [sections[tick_number % len(sections)]]
@@ -354,7 +354,7 @@ def _pull_source(
             print(f"[news_ingest] {source_key}: not due yet")
             return [], 0, 0
 
-        daily_cap = _DAILY_CAPS.get(source_key)
+        daily_cap = _daily_cap(source_key)
         if daily_cap is not None and not users_db.try_consume_api_budget(
             source_key, daily_cap, now.date().isoformat()
         ):

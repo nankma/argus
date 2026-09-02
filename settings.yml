@@ -55,22 +55,42 @@ models:
     # not a background batch job (agent.build_model_from_config's docstring).
     request_timeout_seconds: 20
 
-# RSS news sources -- free, no API key, query-less (each returns its
-# latest N items regardless of what's asked, see news_sources._fetch_rss).
-# Add/remove/edit a feed by editing this list, no code change --
-# news_sources._rss_sources_from_settings reads it. default=[] in code:
-# an empty list here is a legitimate (if sparse) state, not an error.
-# hackernews/arxiv (real query/date-range logic) and newsapi/gnews/perigon
-# (API-key-gated) are NOT here -- still hardcoded in news_sources.py, see
-# its own module docstring for why.
+# The news-fetching pipeline. ONE news_source: key for the whole file --
+# see the newsapi/gnews/perigon comment further down before adding
+# anything here; a second top-level `news_source:` mapping would silently
+# shadow this entire block (YAML duplicate-key behavior keeps only the
+# last one), not merge with it.
 #
-# THIS SAME LIST MUST BE KEPT IN settings.oracle.yml TOO (byte-identical,
-# no secrets involved either way) -- production reads settings.oracle.yml
-# only, never this file. An edit here alone silently drops production to
-# zero RSS sources on the next deploy, no crash, no error (default=[]
-# fails open by design) -- see docs/standaloneplan/01-settings-migration.md's
-# "Migration methodology" for why this atomicity matters.
+# tick_seconds/default_interval_hours/request_delay_seconds apply
+# globally, regardless of which sources are configured below --
+# tick_seconds is bot.py's INGEST_TICK_SECONDS (how often the scheduler
+# even checks whether anything's due, not how often a source actually
+# gets pulled); default_interval_hours is news_ingest.py's fallback pull
+# interval for any source with no per-source interval_hours override
+# (see newsapi/perigon below for what an override looks like);
+# request_delay_seconds is the delay between consecutive same-source
+# requests (GNews's own documented 1 req/sec free-tier limit, applied
+# generally since other sources' limits aren't always documented).
 news_source:
+  tick_seconds: 900
+  default_interval_hours: 4
+  request_delay_seconds: 1.1
+
+  # RSS news sources -- free, no API key, query-less (each returns its
+  # latest N items regardless of what's asked, see news_sources._fetch_rss).
+  # Add/remove/edit a feed by editing this list, no code change --
+  # news_sources._rss_sources_from_settings reads it. default=[] in code:
+  # an empty list here is a legitimate (if sparse) state, not an error.
+  # hackernews/arxiv (real query/date-range logic) and newsapi/gnews/perigon
+  # (API-key-gated) are NOT here -- still hardcoded in news_sources.py, see
+  # its own module docstring for why.
+  #
+  # THIS SAME LIST MUST BE KEPT IN settings.oracle.yml TOO (byte-identical,
+  # no secrets involved either way) -- production reads settings.oracle.yml
+  # only, never this file. An edit here alone silently drops production to
+  # zero RSS sources on the next deploy, no crash, no error (default=[]
+  # fails open by design) -- see docs/standaloneplan/01-settings-migration.md's
+  # "Migration methodology" for why this atomicity matters.
   rss:
     # --- AI/ML publications ---------------------------------------------
     - key: openai_blog
@@ -148,40 +168,54 @@ news_source:
       display_name: TechRadar
       url: https://www.techradar.com/rss
 
-# newsapi/gnews/perigon -- unlike everything above, these three are
-# genuinely OPTIONAL, gated sources (news_sources.enabled_sources() skips
-# any of them whose api-key isn't configured, same as an unset env var
-# always did -- see news_sources._news_source_api_key). Uncomment only
-# the ones you actually have a key for; DO NOT uncomment one with a
-# placeholder/missing env var "just to have it visible" -- unlike
-# storage.*/models.* (required=True, must always resolve), a
-# trailsign-resolve node that's PRESENT but points at an unset env var
-# raises SettingsError the moment it's checked, even though the check
-# itself uses default=None. Omitted entirely is the only way to express
-# "I don't have this one" -- confirmed directly against trailsign, not
-# assumed.
-#
-# newsapi's free tier is documented as development/testing only, not
-# production (docs/current/ai-news-sources.md) -- also restricted from
-# agent.py's live search_news regardless (RESTRICTED_SOURCES), only used
-# by the scheduled ingest job. perigon's budget is small (150/month) and
-# already spoken for by news_ingest.py's own capped pulls (news_ingest.py's
-# _DAILY_CAPS) -- also RESTRICTED_SOURCES. gnews is the one with real
-# headroom (100/day) and isn't restricted from live search either.
-#
-# news_source:
-#   newsapi:
-#     api-key:
-#       trailsign-resolve: environment-variable
-#       name: NEWSAPI_API_KEY
-#   gnews:
-#     api-key:
-#       trailsign-resolve: environment-variable
-#       name: GNEWS_API_KEY
-#   perigon:
-#     api-key:
-#       trailsign-resolve: environment-variable
-#       name: PERIGON_API_KEY
+  # newsapi/gnews/perigon -- unlike everything above, these three are
+  # genuinely OPTIONAL, gated sources (news_sources.enabled_sources()
+  # skips any of them whose api-key isn't configured, same as an unset
+  # env var always did -- see news_sources._news_source_api_key).
+  # Uncomment only the ones you actually have a key for; DO NOT uncomment
+  # one with a placeholder/missing env var "just to have it visible" --
+  # unlike storage.*/models.* (required=True, must always resolve), a
+  # trailsign-resolve node that's PRESENT but points at an unset env var
+  # raises SettingsError the moment it's checked, even though the check
+  # itself uses default=None. Omitted entirely is the only way to express
+  # "I don't have this one" -- confirmed directly against trailsign, not
+  # assumed.
+  #
+  # These stay nested under the SAME news_source: key as tick_seconds/
+  # rss above (this indentation is exactly where they'd paste in) --
+  # never add a second top-level `news_source:` mapping, YAML would keep
+  # only the last one and silently drop everything above it.
+  #
+  # interval_hours/daily_cap override news_source.default_interval_hours
+  # (above) per source -- e.g. perigon's 8h/3-per-day matches its
+  # 150/month budget, newsapi's 24h/1-per-day matches the individual-use
+  # judgment recorded in docs/plans/local-news-cache-plan.md. Omit either
+  # field on a source to just use the global default / no cap.
+  #
+  # newsapi's free tier is documented as development/testing only, not
+  # production (docs/current/ai-news-sources.md) -- also restricted from
+  # agent.py's live search_news regardless (RESTRICTED_SOURCES), only used
+  # by the scheduled ingest job. perigon's budget is small (150/month) and
+  # already spoken for by news_ingest.py's own capped pulls -- also
+  # RESTRICTED_SOURCES. gnews is the one with real headroom (100/day) and
+  # isn't restricted from live search either.
+  #
+  # newsapi:
+  #   api-key:
+  #     trailsign-resolve: environment-variable
+  #     name: NEWSAPI_API_KEY
+  #   interval_hours: 24
+  #   daily_cap: 1
+  # gnews:
+  #   api-key:
+  #     trailsign-resolve: environment-variable
+  #     name: GNEWS_API_KEY
+  # perigon:
+  #   api-key:
+  #     trailsign-resolve: environment-variable
+  #     name: PERIGON_API_KEY
+  #   interval_hours: 8
+  #   daily_cap: 3
 
 # Not yet migrated onto Settings -- still raw os.environ reads as of
 # 2026-09-03 (delivery.*, telemetry.*). See
