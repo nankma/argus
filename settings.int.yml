@@ -30,6 +30,7 @@ storage:
   subscribers_db_file:
     trailsign-resolve: environment-variable
     name: SUBSCRIBERS_DB_FILE
+  push_outcomes_ttl_days: 90
 
 # main: same DeepSeek config as settings.oracle.yml -- unchanged, this is
 # the model that matters for actual reply quality, kept identical to
@@ -215,3 +216,14 @@ news_source:
     - key: techradar
       display_name: TechRadar
       url: https://www.techradar.com/rss
+
+# See settings.yml's own comments for what each of these controls.
+subscription:
+  default_interval_hours: 24
+  min_interval_hours: 1
+  pushed_link_retention_hours: 72
+  max_interests: 10
+
+categories:
+  proposal_threshold: 5
+  sighting_retention_days: 30

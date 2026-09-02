@@ -19,6 +19,16 @@ storage:
   # pre-migration default (unset NEWS_ARCHIVE_DIR). default=None in code
   # (news_cache.py), a legitimate state, not a required key.
 
+  # How long the push_outcomes table (delivered/not_relevant/blocked/etc.,
+  # used for anomaly detection) keeps its rows -- a storage/retention
+  # concern like news_cache_dir above, not push behavior itself, which is
+  # why this lives here rather than under subscription.*/push.*. Longer
+  # than the 30-day category-sightings window (categories.
+  # sighting_retention_days below): answering "was this normal?" after an
+  # incident means comparing against the weeks before it, and these rows
+  # are tiny (users_db.py's own comment).
+  push_outcomes_ttl_days: 90
+
 # The AI connector -- generic across any provider speaking the OpenAI
 # /chat/completions wire format (agent.build_model_from_config's own
 # docstring). To point this deployment at a different provider/model
@@ -216,6 +226,33 @@ news_source:
   #     name: PERIGON_API_KEY
   #   interval_hours: 8
   #   daily_cap: 3
+
+# Per-subscriber account/subscription settings (users_db.py).
+# default_interval_hours/min_interval_hours are the subscriber-facing
+# push-frequency default and floor -- a subscription-level preference,
+# not push mechanics (that's push.* -- reserved, not used yet; see
+# docs/standaloneplan/01-settings-migration.md's batching plan for
+# news_push.py's own content-selection tuning). pushed_link_retention_hours
+# is how long the "already sent this link" dedup memory lasts per
+# subscriber (see users_db.py's own comment -- deliberately longer than
+# news_cache.py's own cache TTL, since the dedup memory only needs to
+# outlast whatever the cache TTL already bounds).
+subscription:
+  default_interval_hours: 24
+  min_interval_hours: 1
+  pushed_link_retention_hours: 72
+  max_interests: 10
+
+# The category-taxonomy-proposal feature specifically (users_db.py's
+# categories/category_sightings tables) -- an isolated feature, kept
+# separate from subscription.*/push.* above rather than folded into
+# either. proposal_threshold is how many sightings of an out-of-taxonomy
+# label inside the retention window before an admin is asked to
+# activate/merge/reject it (see users_db.py's own comment: a placeholder,
+# not a measured value, revisit once there's a real distribution to read).
+categories:
+  proposal_threshold: 5
+  sighting_retention_days: 30
 
 # Not yet migrated onto Settings -- still raw os.environ reads as of
 # 2026-09-03 (delivery.*, telemetry.*). See
