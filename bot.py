@@ -58,10 +58,13 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 PUSH_TICK_SECONDS = 900
 
 # Same tick shape as PUSH_TICK_SECONDS -- check frequently, let each
-# source's own interval (news_ingest._SOURCE_INTERVAL_HOURS, 4h default,
-# longer for budget-capped sources) decide whether this tick actually does
-# anything. See docs/plans/local-news-cache-plan.md.
-INGEST_TICK_SECONDS = 900
+# source's own interval (news_source.<name>.interval_hours in Settings,
+# news_ingest._interval_hours -- 4h default, longer for budget-capped
+# sources) decide whether this tick actually does anything. See
+# docs/plans/local-news-cache-plan.md. Lives under news_source.* (not
+# push.*) since this is about the news-fetching pipeline's own cadence,
+# not push delivery.
+INGEST_TICK_SECONDS = get_settings().resolved("news_source.tick_seconds", default=900)
 
 # Per-chat conversation history. In-memory only — lost on restart, same as
 # the CLI's messages list. Not persisted; fine for now, revisit if needed.

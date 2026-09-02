@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+from trailsign import Settings
+
 import news_cache
 import news_embed
 import news_ingest
@@ -28,6 +30,18 @@ def _fake_classifying_model(categories_by_index=None):
     return model
 
 
+def _set_source_overrides(monkeypatch, **overrides):
+    """news_ingest._interval_hours/_daily_cap now read
+    news_source.<name>.interval_hours/.daily_cap via Settings, not a
+    hardcoded dict -- injects the per-source override a test needs, e.g.
+    _set_source_overrides(monkeypatch, perigon={"interval_hours": 8}).
+    perigon/newsapi are still real sources with real code elsewhere
+    (query-capable class, section vocab) -- only their interval/cap
+    values are settings data now."""
+    fake_settings = Settings({"news_source": overrides})
+    monkeypatch.setattr(news_ingest, "get_settings", lambda: fake_settings)
+
+
 def test_is_source_due_when_never_pulled():
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     assert news_ingest._is_source_due("bbc_business", None, now) is True
@@ -39,13 +53,15 @@ def test_is_source_due_respects_default_interval():
     assert news_ingest._is_source_due("bbc_business", now - timedelta(hours=4), now) is True
 
 
-def test_is_source_due_respects_perigon_8h_interval():
+def test_is_source_due_respects_perigon_8h_interval(monkeypatch):
+    _set_source_overrides(monkeypatch, perigon={"interval_hours": 8})
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     assert news_ingest._is_source_due("perigon", now - timedelta(hours=7), now) is False
     assert news_ingest._is_source_due("perigon", now - timedelta(hours=8), now) is True
 
 
-def test_is_source_due_respects_newsapi_24h_interval():
+def test_is_source_due_respects_newsapi_24h_interval(monkeypatch):
+    _set_source_overrides(monkeypatch, newsapi={"interval_hours": 24})
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     assert news_ingest._is_source_due("newsapi", now - timedelta(hours=23), now) is False
     assert news_ingest._is_source_due("newsapi", now - timedelta(hours=24), now) is True
@@ -65,8 +81,9 @@ def test_sections_for_source_uncapped_takes_every_section():
     assert "quant-ph" in sections and "physics.optics" in sections
 
 
-def test_sections_for_source_capped_takes_exactly_one():
+def test_sections_for_source_capped_takes_exactly_one(monkeypatch):
     """A scarce daily budget buys one section per pull."""
+    _set_source_overrides(monkeypatch, newsapi={"daily_cap": 1, "interval_hours": 24})
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     sections = news_ingest._sections_for_source("newsapi", now)
     assert len(sections) == 1
@@ -119,6 +136,7 @@ def test_run_ingestion_cycle_skips_sources_not_yet_due(monkeypatch, isolated_sub
 
 
 def test_run_ingestion_cycle_respects_daily_cap(monkeypatch, isolated_subscribers_db, isolated_news_cache):
+    _set_source_overrides(monkeypatch, perigon={"daily_cap": 3})
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     fetch = MagicMock(return_value=[_article("https://example.com/1")])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("perigon", fetch)])
@@ -230,6 +248,7 @@ def test_pull_source_not_due_sets_outcome_and_skips_fetch(monkeypatch, isolated_
 
 
 def test_pull_source_budget_exhausted_sets_outcome(monkeypatch, isolated_subscribers_db):
+    _set_source_overrides(monkeypatch, perigon={"daily_cap": 3})
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     for _ in range(3):
         users_db.try_consume_api_budget("perigon", 3, now.date().isoformat())
@@ -296,6 +315,7 @@ def test_pull_source_success_when_only_some_sections_of_a_multi_section_source_f
 
 
 def test_pull_source_carries_the_source_own_expected_interval(monkeypatch, isolated_subscribers_db):
+    _set_source_overrides(monkeypatch, perigon={"interval_hours": 8}, newsapi={"interval_hours": 24})
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
 
     span = _patch_pull_span(monkeypatch)
