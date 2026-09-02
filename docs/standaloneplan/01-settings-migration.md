@@ -89,14 +89,19 @@ that seem relevant.
    tests with fakes aren't sufficient on their own for this class of
    change — the risk is specifically in the wiring between settings.yml,
    the real filesystem, and (for entrypoint-fetched secrets) the real
-   OCI Vault, none of which a mocked `Settings` exercises. **There is no
-   dedicated INT environment yet** — building one is literally one of
-   this whole plan's own goals (see `docs/standaloneplan/README.md`'s
-   "Why" #1), still not done. Until it exists, "test to INT" means
-   testing against the real Oracle instance this project already has
-   SSH access to (`instance-mnk-phoenix-20260808-1012` — the same one
-   Trailsign's own `OracleKeyVaultResolver` was verified against), not
-   just a local Windows simulation of the same values.
+   OCI Vault, none of which a mocked `Settings` exercises. **A real INT
+   environment now exists** (built and verified 2026-09-01 —
+   `local-infra/infrastructure.yaml`'s `local-int-machine`, own Docker
+   host on the local network, own isolated Telegram bot identity, own
+   `/data` volume, `LOGFIRE_ENABLED` deliberately unset) — future phases
+   should deploy and smoke-test there before touching production, the
+   same way Phase 1 (storage) and this session's `models.main.api-key`
+   groundwork already did. The real Oracle instance
+   (`instance-mnk-phoenix-20260808-1012`) remains the right target
+   specifically for verifying `oracleKeyVault`/instance-principal secret
+   resolution, since that auth shape only works from inside an actual
+   OCI compute instance — the local INT machine can't stand in for that
+   one case.
 6. **The discipline doesn't relax as stakes go up.** If anything it
    matters more once real secrets (models, Telegram tokens) are
    involved, not less.

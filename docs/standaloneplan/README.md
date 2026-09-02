@@ -17,7 +17,14 @@ Logfire project, deployed to one Oracle VM, config read via scattered
 `os.environ[...]` calls. That blocks:
 
 1. **A local INT environment** — a pre-prod copy runnable on a dev
-   machine, verified before a change reaches PROD.
+   machine, verified before a change reaches PROD. **Built and verified
+   2026-09-01** — a real machine on the local network (`local-infra/infrastructure.yaml`'s
+   `local-int-machine`), running the actual image with its own isolated
+   Telegram bot identity (avoids the getUpdates polling conflict a
+   shared token would cause with production), own `/data` volume, own
+   SQLite — Logfire deliberately off to avoid commingling with
+   production's telemetry/alerts. Confirmed working end to end: clean
+   startup, real DeepSeek-backed ingest, live Telegram smoke test.
 2. **Download-and-run** — someone who wants this bot but not this
    project's own cloud account should be able to clone it and run it
    with nothing but their own keys.
@@ -167,11 +174,17 @@ seam 1.
 
 ## Explicitly not re-deciding
 
-**AI provider swapping is already built.** `docs/plans/model-portability-plan.md`
-shipped config-driven model selection (`LLM_MODEL`/`LLM_MODEL_CLASSIFIER`,
-`agent.build_model()`) 2026-08-16. This plan's only job there is to have
-those two env vars come from `app_settings.get_settings()` instead of
-raw `os.environ.get(...)` once Phase 2 of `01-settings-migration.md`
+**AI provider swapping is already built — as a mechanism, not for every
+provider.** `docs/plans/model-portability-plan.md` shipped config-driven
+model selection (`LLM_MODEL`/`LLM_MODEL_CLASSIFIER`, `agent.build_model()`)
+2026-08-16, and switching to a second real provider is genuinely a
+config change, not new plumbing — but it does need that provider's own
+LangChain integration package installed and its chosen model verified
+for tool-calling first (found for real 2026-09-01 trying Together.ai for
+the INT deployment — see that doc's item 6). This plan's own job here is
+to have `LLM_MODEL`/`LLM_MODEL_CLASSIFIER` come from
+`app_settings.get_settings()` instead of raw `os.environ.get(...)` once
+Phase 2 of `01-settings-migration.md`
 reaches the models subsystem — no new design needed.
 
 **`news_sources.py`'s registry is the existing precedent.** It already
