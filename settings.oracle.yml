@@ -136,7 +136,7 @@ news_source:
       url: https://www.computerworld.com/index.rss
     - key: zdnet
       display_name: ZDNet
-      url: https://www.zdnet.com/news/rss.xml
+      url: https://www.zdnet.com/rss/all/
     - key: engadget
       display_name: Engadget
       url: https://www.engadget.com/rss.xml
