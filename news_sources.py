@@ -24,7 +24,6 @@ and the three API-key-gated sources) are still plain Python functions.
 """
 
 import calendar
-import os
 import re
 from datetime import datetime, timezone
 
@@ -33,6 +32,7 @@ import requests
 from opentelemetry import trace
 
 from app_settings import get_settings
+from trailsign import SettingsError
 
 # Self-identifying, not a fake browser -- some feeds (TechRadar, confirmed
 # live) return 403 to the bare `python-requests/x.x` default User-Agent but
@@ -217,6 +217,38 @@ def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5, since: datetime 
     ]
 
 
+def _news_source_api_key(name: str, required: bool = False) -> str | None:
+    """Resolves news_source.<name>.api-key. Two call shapes:
+
+    required=False (the gating check in enabled_sources()) -- None
+    whether the block is omitted entirely from settings.yml OR present
+    with an unresolvable credential (e.g. its env var unset). Both mean
+    "this optional source isn't configured right now," never a crash --
+    unlike models.*/storage.*'s required=True keys, os.environ.get()
+    never raised for these three either, and that's a real behavior this
+    migration keeps: a deployer without a NewsAPI/GNews/Perigon key gets
+    that source silently skipped, not a startup failure.
+
+    required=True (inside each fetch function, e.g. fetch_perigon) --
+    raises SettingsError if actually called without a configured key.
+    enabled_sources() should have already gated this out; if it's called
+    anyway, that's a real bug worth failing loudly on, matching the old
+    os.environ["KEY"] bracket-access behavior (KeyError, not a silent
+    None passed to the request).
+
+    Resolved fresh on every call, not cached at import time -- same
+    "live" semantics os.environ.get()/os.environ[...] always had, and
+    what lets tests swap Settings without needing to know this module
+    imported at some point in the past."""
+    path = f"news_source.{name}.api-key"
+    if required:
+        return get_settings().resolved(path, required=True)
+    try:
+        return get_settings().resolved(path, default=None)
+    except SettingsError:
+        return None
+
+
 def _fetch_rss(url: str, source_name: str, max_results: int = 5) -> list[dict]:
     resp = requests.get(url, timeout=10, headers=_REQUEST_HEADERS)
     resp.raise_for_status()
@@ -325,7 +357,7 @@ def fetch_newsapi(query: str, max_results: int = 5, section: str | None = None) 
             "category": section,
             "language": "en",
             "pageSize": max_results,
-            "apiKey": os.environ["NEWSAPI_API_KEY"],
+            "apiKey": _news_source_api_key("newsapi", required=True),
         }
         resp = requests.get("https://newsapi.org/v2/top-headlines",
                             params=params, timeout=10)
@@ -353,7 +385,7 @@ def fetch_newsapi(query: str, max_results: int = 5, section: str | None = None) 
             "language": "en",
             "sortBy": "publishedAt",
             "pageSize": max_results,
-            "apiKey": os.environ["NEWSAPI_API_KEY"],
+            "apiKey": _news_source_api_key("newsapi", required=True),
         },
         timeout=10,
     )
@@ -369,7 +401,7 @@ def fetch_gnews(query: str, max_results: int = 5, since: datetime | None = None,
     own free tier regardless of what's asked (docs/current/ai-news-sources.md), so
     news_ingest.py's generous safety cap for time-filterable sources just
     gets silently clamped here, not an error."""
-    params = {"lang": "en", "max": max_results, "apikey": os.environ["GNEWS_API_KEY"]}
+    params = {"lang": "en", "max": max_results, "apikey": _news_source_api_key("gnews", required=True)}
     if section:
         params["topic"] = section
     else:
@@ -398,7 +430,7 @@ def fetch_gnews(query: str, max_results: int = 5, since: datetime | None = None,
 def fetch_perigon(query: str, max_results: int = 5) -> list[dict]:
     resp = requests.get(
         "https://api.perigon.io/v1/all",
-        params={"q": query, "size": max_results, "apiKey": os.environ["PERIGON_API_KEY"]},
+        params={"q": query, "size": max_results, "apiKey": _news_source_api_key("perigon", required=True)},
         timeout=10,
     )
     _raise_for_status(resp)
@@ -443,7 +475,7 @@ SOURCE_SECTIONS: dict[str, list[str]] = {
 
 # --- Registry -------------------------------------------------------------
 
-# (name, fetch_fn, required_env_var_or_None, source_class)
+# (name, fetch_fn, gate_or_None, source_class)
 #
 # source_class is descriptive, not behavioral -- enabled_sources() ignores
 # it today. It exists because the registry stopped being uniform once
@@ -463,13 +495,19 @@ SOURCE_SECTIONS: dict[str, list[str]] = {
 # Only the non-RSS sources are hardcoded here -- they have real per-source
 # logic (hackernews's numeric-id filter, arxiv's date-range param, the
 # three api-class sources' auth/query shapes) that doesn't reduce to
-# "a URL and a display name" the way every RSS source does.
+# "a URL and a display name" the way every RSS source does. `gate` for
+# the three api-key sources is the news_source.<name> key used to build
+# the settings path (see _news_source_api_key) -- NOT a resolved value.
+# Resolving eagerly and baking the result into this tuple would freeze it
+# at import time; keeping the bare name here means enabled_sources()
+# re-checks Settings fresh on every call, same "live" semantics
+# os.environ.get() always had.
 _NON_RSS_SOURCES = [
     ("hackernews", fetch_hackernews, None, "forum"),
     ("arxiv", fetch_arxiv, None, "api"),
-    ("newsapi", fetch_newsapi, "NEWSAPI_API_KEY", "api"),
-    ("gnews", fetch_gnews, "GNEWS_API_KEY", "api"),
-    ("perigon", fetch_perigon, "PERIGON_API_KEY", "api"),
+    ("newsapi", fetch_newsapi, "newsapi", "api"),
+    ("gnews", fetch_gnews, "gnews", "api"),
+    ("perigon", fetch_perigon, "perigon", "api"),
 ]
 
 SOURCE_REGISTRY = _NON_RSS_SOURCES + _rss_sources_from_settings()
@@ -491,16 +529,17 @@ RESTRICTED_SOURCES = {"newsapi", "perigon"}
 
 def enabled_sources(include_restricted: bool = True) -> list[tuple[str, callable]]:
     """(name, fetch_fn) pairs usable right now: always-on free sources, plus
-    key-gated ones whose required env var is set. `include_restricted`
-    additionally excludes RESTRICTED_SOURCES when False -- see
-    agent.py's search_news, the only caller that ever passes False; every
-    other caller (news_ingest.py) keeps the default so it's unaffected.
-    Same 2-tuple shape as before source_class was added -- callers and
-    tests all unpack exactly (name, fn)."""
+    key-gated ones whose news_source.<name>.api-key is configured (see
+    _news_source_api_key). `include_restricted` additionally excludes
+    RESTRICTED_SOURCES when False -- see agent.py's search_news, the only
+    caller that ever passes False; every other caller (news_ingest.py)
+    keeps the default so it's unaffected. Same 2-tuple shape as before
+    source_class was added -- callers and tests all unpack exactly
+    (name, fn)."""
     return [
         (name, fn)
-        for name, fn, required_env, _source_class in SOURCE_REGISTRY
-        if (required_env is None or os.environ.get(required_env))
+        for name, fn, gate, _source_class in SOURCE_REGISTRY
+        if (gate is None or _news_source_api_key(gate))
         and (include_restricted or name not in RESTRICTED_SOURCES)
     ]
 

@@ -469,7 +469,7 @@ rejected on a docs page's word alone.
 **A source with real per-source logic** (a query parameter, a date-range filter, an API key, pagination — anything `_fetch_rss(url, name, max_results)` alone can't express) — this still needs code, same as before:
 
 1. Write a function matching the shape `fetch_x(query: str, max_results: int = 5) -> list[dict]`, returning a list of `{"title", "link", "source", "summary", "published"}` dicts (any field can be `None` if the source doesn't provide it).
-2. Add `("name", fetch_x, required_env_or_None, "class")` to `_NON_RSS_SOURCES` in `news_sources.py`, where `class` is `"forum"` or `"api"` per the table above.
-3. If it needs an API key, read it inside the function via `os.environ["YOUR_KEY_NAME"]` — `enabled_sources()` will skip it automatically until that env var is set.
+2. Add `("name", fetch_x, gate_or_None, "class")` to `_NON_RSS_SOURCES` in `news_sources.py`, where `class` is `"forum"` or `"api"` per the table above. `gate` is `"name"` if it needs an API key (matching `news_source.<name>.api-key` in Settings — see step 3), or `None` if it doesn't (like hackernews/arxiv).
+3. If it needs an API key, read it inside the function via `_news_source_api_key("name", required=True)` (see `fetch_newsapi`/`fetch_gnews`/`fetch_perigon` for the pattern) — `enabled_sources()` will skip it automatically until `news_source.<name>.api-key` is configured in settings.yml. Add the same `news_source.<name>.api-key: {trailsign-resolve: environment-variable, name: YOUR_ENV_VAR_NAME}` block to `settings.oracle.yml` (live) if production has the key, and to `settings.yml` (commented, as a preview) otherwise — **never include the block in a file where the underlying env var genuinely won't be set**, that raises `SettingsError` rather than gracefully skipping (see `news_sources._news_source_api_key`'s own docstring).
 4. Add a row to the appropriate table above.
 5. Test it live before trusting it, same as step 4 above.

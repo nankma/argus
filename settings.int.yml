@@ -173,3 +173,27 @@ news_source:
     - key: techradar
       display_name: TechRadar
       url: https://www.techradar.com/rss
+
+# TEMPORARY, added 2026-09-03: a deliberate one-day live test of the
+# news_source.<name>.api-key Settings migration, using the same real
+# keys PROD has (see local-infra/infrastructure.yaml's own TEMPORARY
+# comment on where these came from and why). REMOVE this whole block
+# once INT is stopped at the end of the test window -- this was never
+# meant to be a standing INT config, matching how INT never had these
+# three sources before this test. Perigon is expected to return 403 --
+# it's already out of quota on the real account -- which is itself a
+# useful result here (confirms the connector reaches Perigon and
+# authenticates, not that it returns data).
+news_source:
+  newsapi:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: NEWSAPI_API_KEY
+  gnews:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: GNEWS_API_KEY
+  perigon:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: PERIGON_API_KEY

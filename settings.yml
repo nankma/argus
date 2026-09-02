@@ -148,8 +148,43 @@ news_source:
       display_name: TechRadar
       url: https://www.techradar.com/rss
 
+# newsapi/gnews/perigon -- unlike everything above, these three are
+# genuinely OPTIONAL, gated sources (news_sources.enabled_sources() skips
+# any of them whose api-key isn't configured, same as an unset env var
+# always did -- see news_sources._news_source_api_key). Uncomment only
+# the ones you actually have a key for; DO NOT uncomment one with a
+# placeholder/missing env var "just to have it visible" -- unlike
+# storage.*/models.* (required=True, must always resolve), a
+# trailsign-resolve node that's PRESENT but points at an unset env var
+# raises SettingsError the moment it's checked, even though the check
+# itself uses default=None. Omitted entirely is the only way to express
+# "I don't have this one" -- confirmed directly against trailsign, not
+# assumed.
+#
+# newsapi's free tier is documented as development/testing only, not
+# production (docs/current/ai-news-sources.md) -- also restricted from
+# agent.py's live search_news regardless (RESTRICTED_SOURCES), only used
+# by the scheduled ingest job. perigon's budget is small (150/month) and
+# already spoken for by news_ingest.py's own capped pulls (news_ingest.py's
+# _DAILY_CAPS) -- also RESTRICTED_SOURCES. gnews is the one with real
+# headroom (100/day) and isn't restricted from live search either.
+#
+# news_source:
+#   newsapi:
+#     api-key:
+#       trailsign-resolve: environment-variable
+#       name: NEWSAPI_API_KEY
+#   gnews:
+#     api-key:
+#       trailsign-resolve: environment-variable
+#       name: GNEWS_API_KEY
+#   perigon:
+#     api-key:
+#       trailsign-resolve: environment-variable
+#       name: PERIGON_API_KEY
+
 # Not yet migrated onto Settings -- still raw os.environ reads as of
-# 2026-09-02 (delivery.*, telemetry.*, news_source.<api-key sources>). See
+# 2026-09-03 (delivery.*, telemetry.*). See
 # docs/standaloneplan/01-settings-migration.md for current status. This
 # section is a preview of the eventual shape, not live yet -- and per the
 # criterion above, TELEGRAM_BOT_TOKEN below is an env-var *name*, not a
