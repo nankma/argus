@@ -5,6 +5,14 @@ dependencies:
   - python=3.11
   - langchain
   - langchain-deepseek
+  # Generic adapter for ANY OpenAI-wire-compatible provider (same
+  # /chat/completions request/response shape as DeepSeek's own API) --
+  # Together.ai, Groq, Fireworks, a self-hosted vLLM server, etc. --
+  # via ChatOpenAI(base_url=..., api_key=..., model=...). Not
+  # OpenAI-specific despite the package name; Anthropic/Claude is NOT
+  # wire-compatible (different headers, different JSON shape) and would
+  # need langchain-anthropic separately if ever added.
+  - langchain-openai
   - requests
   - feedparser
   - pyyaml

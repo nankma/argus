@@ -4,27 +4,29 @@ docs/plans/telemetry-and-testing-plan.md item 6 for why this exists and
 what it's for.
 
 Runs a fixed set of representative questions through the REAL pipeline
-(bot.process_message, real ChatDeepSeek models built the same way
-production does via agent.build_model -- so this automatically evaluates
-whatever LLM_MODEL/LLM_MODEL_CLASSIFIER are currently configured to, real
-tools, real news sources), not the fakes tests/ uses. Two layers of
-checking, cheapest first:
+(bot.process_message, real models built the same way production does via
+agent.build_model_from_settings -- so this automatically evaluates
+whatever this environment's settings.yml points models.main/
+models.guardrail at, real tools, real news sources), not the fakes
+tests/ uses. Two layers of checking, cheapest first:
 
 1. Deterministic sub-checks (no model call) -- source links present, HTML
    balanced, no stray Markdown, news_query replies start with the report
    marker. Reuses bot.py's own safety-net helpers rather than
    reimplementing them.
-2. An LLM judge (DeepSeek, reusing the classifier-tier model -- same
-   reasoning as guardrails.py's layers 2/4 reusing whatever model is
+2. An LLM judge (reusing the classifier-tier model, models.guardrail --
+   same reasoning as guardrails.py's layers 2/4 reusing whatever model is
    passed in rather than standing up a separate one) scoring whether the
    reply reasonably satisfies agent.py's own stated rules
    (LAYER1_IDENTITY, TREND_REPORT_STRUCTURE) -- the rubric is derived
    from those, not a generic "is this good" prompt.
 
 Not part of the test suite (tests/) -- this makes real, paid API calls
-(DeepSeek) and real network calls (news sources) by design, same
-"manually-triggered, not on every commit" convention as
-tools/measure_guardrails.py. Run manually:
+(whatever provider settings.yml's models.* point at) and real network
+calls (news sources) by design, same "manually-triggered, not on every
+commit" convention as tools/measure_guardrails.py. Run manually (against
+the checked-in settings.yml's DeepSeek default -- point SETTINGS_FILE at
+a different settings.yml to evaluate a different provider):
 
     conda activate myfirstagent
     export DEEPSEEK_API_KEY=<your-key>
@@ -44,6 +46,8 @@ import re
 import sys
 import tempfile
 
+import yaml
+
 # Needed to import project modules from repo root regardless of cwd --
 # same pattern as tools/measure_guardrails.py.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,14 +56,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # text (Chinese cases, emoji) -- same fix as tools/measure_guardrails.py.
 sys.stdout.reconfigure(encoding="utf-8")
 
+import app_settings
+from trailsign import Settings, SettingsError
+
 # Isolate from the real subscribers.db -- this script writes real
 # interests/push/language state (set_interest/start_push/set_language
 # cases below) as a side effect of exercising the real pipeline, and must
 # not touch production data. Must happen before users_db (imported by
-# agent/bot) reads SUBSCRIBERS_DB_FILE at module load time.
-os.environ.setdefault(
-    "SUBSCRIBERS_DB_FILE", os.path.join(tempfile.mkdtemp(prefix="myfirstagent_eval_"), "subscribers.db")
+# agent/bot) reads storage.subscribers_db_file via Settings at module
+# load time.
+#
+# This used to be a plain SUBSCRIBERS_DB_FILE env var setdefault, but
+# that stopped having any effect once the Phase 1 storage migration moved
+# users_db.py onto Settings -- settings.yml resolves
+# storage.subscribers_db_file to a literal value, not an
+# environment-variable node (see
+# docs/standaloneplan/01-settings-migration.md), so the env var was
+# silently ignored and this harness was writing into the real
+# subscribers.db. Loading the same settings.yml the real run would use
+# and overriding just this one key -- rather than injecting a bare
+# {"storage": {...}} Settings -- keeps models.main/models.guardrail (and
+# everything else) intact, since this harness needs real model config,
+# not just isolated storage.
+_settings_path = os.environ.get("SETTINGS_FILE", "settings.yml")
+_raw_settings = (yaml.safe_load(open(_settings_path, encoding="utf-8")) or {}) if os.path.exists(_settings_path) else {}
+_raw_settings.setdefault("storage", {})["subscribers_db_file"] = os.path.join(
+    tempfile.mkdtemp(prefix="myfirstagent_eval_"), "subscribers.db"
 )
+app_settings.reset_settings_for_tests(Settings(_raw_settings))
 
 import asyncio
 from collections import defaultdict
@@ -255,8 +279,12 @@ def main():
     parser.add_argument("--category", choices=["news_query", "settings", "multi"], default=None)
     args = parser.parse_args()
 
-    if not os.environ.get("DEEPSEEK_API_KEY"):
-        print("DEEPSEEK_API_KEY not set -- this harness needs a real model call.", file=sys.stderr)
+    settings = app_settings.get_settings()
+    try:
+        model = agent.build_model_from_settings(settings, "models.main")
+        guard_model = agent.build_model_from_settings(settings, "models.guardrail")
+    except SettingsError as exc:
+        print(f"models.* not configured -- this harness needs a real model call: {exc}", file=sys.stderr)
         sys.exit(1)
 
     agent.setup_telemetry()
@@ -264,8 +292,6 @@ def main():
 
     cases = [c for c in EVAL_CASES if args.category is None or c["category"] == args.category]
 
-    model = agent.build_model("LLM_MODEL")
-    guard_model = agent.build_model("LLM_MODEL_CLASSIFIER")
     agent_obj = agent.build_agent(model)
 
     results = [asyncio.run(run_case(agent_obj, guard_model, case)) for case in cases]

@@ -1,0 +1,100 @@
+# Local INT-environment settings.yml TEMPLATE -- committed, generic, safe
+# forever, as long as it stays this way. Same criterion as settings.yml/
+# settings.oracle.yml (also in CLAUDE.md's Landmines): only env-var
+# names, placeholder/example identifiers, relative paths, and structure --
+# never a real, this-deployment-specific value. Real values (the local
+# INT machine's IP, the INT-only Telegram bot tokens, the real
+# TOGETHER_API_KEY) live in local-infra/infrastructure.yaml (gitignored).
+#
+# What this file is for: INT shares the SAME baked-in image as
+# production, but must NOT share production's settings.oracle.yml --
+# editing that file's models.* would repoint production at whatever INT
+# is testing. This is a separate file, baked into the image alongside
+# settings.oracle.yml (see Dockerfile's COPY list), selected via
+# -e SETTINGS_FILE=/app/settings.int.yml on the INT container only.
+#
+# storage.* mirrors settings.oracle.yml's shape exactly (same env-var
+# names, since INT's docker_run.command already sets them the same way
+# prod's does) -- only models.* differs.
+
+storage:
+  news_cache_dir:
+    trailsign-resolve: environment-variable
+    name: NEWS_CACHE_DIR
+  news_archive_dir:
+    trailsign-resolve: environment-variable
+    name: NEWS_ARCHIVE_DIR
+  message_archive_dir:
+    trailsign-resolve: environment-variable
+    name: MESSAGE_ARCHIVE_DIR
+  subscribers_db_file:
+    trailsign-resolve: environment-variable
+    name: SUBSCRIBERS_DB_FILE
+
+# main: same DeepSeek config as settings.oracle.yml -- unchanged, this is
+# the model that matters for actual reply quality, kept identical to
+# production on purpose. Guardrail must never cost more than this per
+# token -- that ruled out several candidates below on price alone.
+#
+# guardrail: deepseek-ai/DeepSeek-V4-Flash-0731, but via Together.ai
+# rather than DeepSeek's own API -- same model as main, tied on price
+# ($0.14/$0.28, combined $0.42, identical to DeepSeek's own pricing for
+# this model), not actually cheaper. The real point: guardrail is where
+# INT's call volume lives (layer 2/4 + ingest classification, see
+# agent.build_model_from_settings's docstring -- far more calls than the
+# main model ever makes), and routing that volume through a SEPARATE
+# Together account/budget means it can't drain or rate-limit-starve the
+# main DeepSeek API key. Chosen after two genuinely cheaper Together
+# candidates both failed real verification (below) -- this is the
+# fallback that's actually reliable, not the first choice on price.
+#
+# TWO CHEAPER CANDIDATES TRIED AND REJECTED, 2026-09-02 -- don't re-try
+# either without addressing what broke them:
+#
+# - openai/gpt-oss-20b ($0.25 combined): passed a single-trial
+#   tools/measure_guardrails.py sanity check (layer2 18/21, multi-intent
+#   6/6, layer4 8/8) but failed hard under real INT load once deployed --
+#   sustained OpenAITimeoutError on both ingest classify_articles batches
+#   and live test_api messages (well past the initial restart-ingest-
+#   burst window, not explained by it), plus one live call that extracted
+#   the wrong interest text entirely ("robotics" -> "final"). Read as a
+#   reasoning-style model generating more than a router call needs,
+#   showing up as both timeouts and occasional garbled structured output
+#   -- a single-trial pass was not enough signal; real load caught what
+#   it didn't.
+# - arize-ai/qwen-2-1.5b-instruct ($0.20 combined): failed the isolated
+#   sanity check outright -- layer2 2/21 (10%), multi-intent 1/6 (17%).
+#   1.5B is too small for this task's nuance (bilingual, multi-field
+#   extraction).
+#
+# Also confirmed: Together's /v1/models listing has NO reliable field for
+# "actually callable serverless, not dedicated-endpoint-only" -- nonzero
+# pricing does NOT mean available. meta-llama/Meta-Llama-3.1-8B-Instruct-
+# Turbo and 7 other cheap/"Turbo"-branded candidates all returned "Unable
+# to access non-serverless model ... create a dedicated endpoint" on a
+# real call (Qwen2.5-7B/72B-Turbo, Mistral-Small-24B, Llama-3.2-3B,
+# Llama-3-8b-chat-hf, Meta-Llama-3-8B-Instruct, Ministral-3-14B,
+# arcee-ai/trinity-mini). Two more ARE callable but weren't viable
+# either: Llama-3.3-70B-Instruct-Turbo works but costs $2.08 combined (5x
+# main); Qwen/Qwen3.5-9B is callable and ties main's price, but its reply
+# leaked a raw "</think>" tag into content -- a reasoning-model tell,
+# same risk class as gpt-oss-20b's failure, not tested further. A single
+# ChatOpenAI(...).invoke() probe call is enough to rule a candidate in/
+# out on availability before spending on the full measure_guardrails.py
+# suite -- do that first for any future candidate.
+models:
+  main:
+    url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    api-key:
+      trailsign-resolve: environment-variable
+      name: DEEPSEEK_API_KEY
+    reasoning_effort: none
+    request_timeout_seconds: 60
+  guardrail:
+    url: https://api.together.xyz/v1
+    model: deepseek-ai/DeepSeek-V4-Flash-0731
+    api-key:
+      trailsign-resolve: environment-variable
+      name: TOGETHER_API_KEY
+    request_timeout_seconds: 20

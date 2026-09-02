@@ -16,16 +16,37 @@ Telegram bot (`bot.py`/`admin_bot.py`/`combined_bot.py`) with per-user
 interests, reply-language, and scheduled push digests — not one shared
 scope, since different subscribers care about different topics.
 
+## Design before code
+
+For anything beyond a trivial, obviously-scoped fix: design first —
+schema/config shape, function/class signatures and responsibilities, the
+data flow, and the test plan — state it, then **stop and wait for an
+explicit go-ahead** before writing any implementation code. Stating a
+plan and immediately acting on it in the same turn does not count as
+checking in — only an explicit reply does. Skip the pause only when the
+user has already specified the exact mechanical change, or has said to
+just implement it directly. See the `designing-before-coding` skill.
+
 ## Landmines — small, real, worth knowing before you touch nearby code
 
-- **The model is pinned to `deepseek-v4-flash`, not an alias.** DeepSeek's
-  catalogue is now `deepseek-v4-pro` / `deepseek-v4-flash` /
-  `deepseek-v4-flash-vision-exp`; the old `deepseek-chat` alias still
-  resolves but is no longer listed, so it could be repointed at pro (≈3x
-  the price, visible only on the invoice) or dropped (bot down). Whatever
-  replaces it must support **tool calling** — `search_news`/`save_note`,
-  the router and the output check all depend on it, which is why the old
-  `deepseek-reasoner` was never an option.
+- **The model is pinned in `settings.yml`, not code — and pinned to
+  `deepseek-v4-flash`, not an alias.** `agent.build_model_from_config`
+  is provider-generic (any OpenAI-wire-compatible endpoint via
+  `ChatOpenAI`); which model actually runs is entirely a `models.main`/
+  `models.guardrail` setting, not a Python default. The checked-in
+  `settings.yml`/`settings.oracle.yml` point at `deepseek-v4-flash`
+  specifically, not the old `deepseek-chat` alias — DeepSeek's catalogue
+  is now `deepseek-v4-pro` / `deepseek-v4-flash` /
+  `deepseek-v4-flash-vision-exp`; the alias still resolves but is no
+  longer listed, so it could be repointed at pro (≈3x the price, visible
+  only on the invoice) or dropped (bot down). Whatever a deployment's
+  settings.yml points at must support **tool calling** — `search_news`/
+  `save_note`, the router and the output check all depend on it, which is
+  why the old `deepseek-reasoner` was never an option. Before pointing
+  either `models.main` or `models.guardrail` at a new model/provider,
+  re-run `tools/measure_guardrails.py` against it first (it reads
+  `models.guardrail` too, per the same settings.yml) — see
+  `agent.build_model_from_config`'s own docstring.
 - **Replies are Telegram HTML, not Markdown.** `SYSTEM_PROMPT` asks for
   `<b>`/`<a href="">`; `bot.py` sends with `parse_mode=ParseMode.HTML`.
   See the `telegram-message-formatting` skill before touching either.

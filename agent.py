@@ -31,105 +31,91 @@ from datetime import datetime, timezone
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 from langchain.agents.middleware import dynamic_prompt
-from langchain.chat_models import init_chat_model
 from langchain.tools import ToolRuntime
+from langchain_openai import ChatOpenAI
+from app_settings import get_settings
 from logfire_logger import LogfireLogger
 import news_classify
 import news_sources
 import users_db
 
-# Default provider:model string for init_chat_model. See
-# docs/plans/model-portability-plan.md Level 1/2.
-#
-# Pinned to a real model name rather than the `deepseek-chat` alias this
-# used to carry. DeepSeek's catalogue moved to v4 and the API no longer
-# lists that alias at all -- an unknown model name is answered with "the
-# supported API model names are deepseek-v4-pro, deepseek-v4-flash, and
-# deepseek-v4-flash-vision-exp". The alias still resolves, and as of
-# 2026-08-21 it resolves to v4-flash (checked by reading the `model` field
-# the API returns, not assumed), so this change is behaviour-neutral today.
-#
-# It removes two silent failure modes. DeepSeek could repoint the alias at
-# v4-pro, which is roughly 3x the price and would show up only on the
-# invoice; or drop it, which takes the whole bot down at once.
-#
-# Flash rather than pro deliberately: this workload is routing, tagging and
-# short-report writing, and pro's premium is for reasoning depth this
-# doesn't need.
-DEFAULT_MODEL = "deepseek:deepseek-v4-flash"
 NOTES_FILE = "notes.jsonl"
 
 
-def build_model(env_var: str, default: str = DEFAULT_MODEL, default_timeout: float = 60.0):
-    """Constructs a chat model from a "provider:model" string read from
-    `env_var` (falling back to `default`) via LangChain's init_chat_model --
-    see docs/plans/model-portability-plan.md Level 1. Swapping providers or
-    models is then an env-var change plus a restart, not a code change.
-    Callers pass a different env_var for the agent's own model (LLM_MODEL)
-    vs. the guardrails.py classifier calls (LLM_MODEL_CLASSIFIER -- layer 2
-    classify_message and layer 4 is_output_on_topic, model-portability-plan.md's
-    Level 2 per-stage routing) -- both default to the same model today, since no
-    second provider is configured yet, so behavior is unchanged until one
-    of these env vars is actually set. Before pointing either at a
-    different model, re-run tools/measure_guardrails.py and compare against
-    the recorded baseline -- see that doc's "The behavioral caveat".
+def build_model_from_config(cfg: dict, default_timeout: float = 60.0):
+    """Constructs a chat model from a resolved {url, model, api-key, ...}
+    config dict -- the shape docs/standaloneplan/01-settings-migration.md's
+    `models.*` settings sections resolve to (see build_model_from_settings
+    below for the usual way to get `cfg`; this function itself stays
+    settings-agnostic so it's also directly unit-testable with a plain
+    dict). Generic across any provider speaking the OpenAI
+    /chat/completions wire format (DeepSeek, Together.ai, Groq, Fireworks,
+    a self-hosted vLLM server, ...) via ChatOpenAI(base_url=...,
+    api_key=..., model=...) -- verified against ChatOpenAI's real pydantic
+    field aliases (openai_api_base/openai_api_key/model_name/timeout), not
+    just assumed. NOT for Anthropic/Claude -- that's a different wire
+    format entirely (distinct headers, distinct JSON shape), would need
+    langchain-anthropic and a separate adapter if ever added.
 
-    `reasoning_effort` is passed explicitly because DeepSeek changed the
-    default under us. On 2026-08-21 every with_structured_output call began
-    failing with `400 Thinking mode does not support this tool_choice`:
-    DeepSeek had turned thinking mode on by default for deepseek-v4-flash,
-    and thinking mode rejects the forced `tool_choice` that structured
-    output relies on. The model name never changed -- its behaviour did.
+    This is the ONLY model construction path in this codebase (the old
+    provider-string `build_model()`/`init_chat_model` path was removed --
+    it depended on LangChain knowing about the provider by name, which is
+    exactly the constraint this function exists to remove). A deployment
+    connects to a different AI provider by editing its own settings.yml
+    (a different `url`/`model`/`api-key`), never by changing this code --
+    see docs/standaloneplan/01-settings-migration.md's Models section.
 
-    The damage was invisible, which is the part worth remembering.
-    guardrails.classify_message fails open to `news_query` on any exception
-    and logs nothing, so every settings command (add an interest, start or
-    stop push, set a language) was silently misrouted as a news query for
-    real users, and article classification stopped, with no error anywhere.
+    Deliberately does NOT default-inject `reasoning_effort` -- DeepSeek
+    needs `"none"` (thinking mode rejects the forced `tool_choice`
+    with_structured_output relies on -- see the 2026-08-21 incident: every
+    settings command was silently misrouted as a news query for hours,
+    guardrails.classify_message fails open to `news_query` on any
+    exception and logs nothing), but that's a DeepSeek-specific workaround,
+    not something every provider's endpoint needs or even accepts. It's
+    set per-deployment in settings.yml's `reasoning_effort` key, not
+    hardcoded here.
 
-    Overridable via LLM_REASONING_EFFORT for a provider that rejects the
-    parameter or a model where thinking is wanted; empty string omits it.
+    `request_timeout_seconds` similarly comes from `cfg`, not a hardcoded
+    default alone -- ChatDeepSeek's own client default is `None` (no
+    timeout at all), which is what let a single stuck DeepSeek call wedge
+    a background job's thread forever for over an hour on 2026-08-27
+    before a health-check alert caught it (confirmed via the container's
+    own /proc/net/tcp showing a CLOSE_WAIT connection nothing was reading
+    from). `default_timeout` is this function's own fallback when a
+    deployment's settings.yml doesn't set `request_timeout_seconds` at
+    all; callers pass a shorter one for a call backing a live Telegram
+    user's own message (bot.py/combined_bot.py's guardrail model) than for
+    a background batch job (news_ingest's classification calls).
 
-    `request_timeout` is set explicitly because ChatDeepSeek's own default
-    is `None` -- no timeout at all. Found live, 2026-08-27: a DeepSeek call
-    from inside news_ingest.run_ingestion_cycle (itself run via
-    asyncio.to_thread, see bot.py's _ingest_job) got stuck -- confirmed via
-    the container's own /proc/net/tcp showing two CLOSE_WAIT connections to
-    api.deepseek.com's IP, i.e. the remote side had already closed and the
-    client was still waiting to read a response that was never coming --
-    and with nothing to raise, the thread it occupied was gone for good.
-    Every later scheduled ingest tick was silently skipped (APScheduler
-    won't overlap two runs of the same job), for over an hour before a
-    health-check alert caught it. Restarting the container "fixed" it
-    exactly the way it did on 2026-08-25's earlier occurrence of this same
-    symptom -- but this time recurred within minutes of the restart, still
-    with no timeout in place, which is what pinned this down as the actual
-    cause rather than a one-off network blip. `default_timeout` is a
-    per-caller first-cut, not one number for every use: news_ingest's
-    classify_articles processes up to MAX_ARTICLES_PER_CALL=50 articles per
-    call in a background job nobody is watching live, so the default 60s
-    here is generous but bounded. guardrails.py's LLM_MODEL_CLASSIFIER
-    calls (layer 2 classify_message, layer 4 is_output_on_topic) are a
-    single small structured-output call on a live Telegram user's own
-    message -- bot.py/combined_bot.py pass a shorter default_timeout for
-    that build_model call specifically, since 60s of silence on a chat a
-    real person is actively watching is a materially worse experience than
-    the same 60s in a background job. LLM_REQUEST_TIMEOUT_SECONDS still
-    overrides EITHER call site the same way (a deliberate escape hatch for
-    an emergency global change, not a way to give them independently
-    tunable values without a code change -- add a second env var if that's
-    ever needed). Empty string omits the timeout entirely (same escape
-    hatch as reasoning_effort, for a provider whose client rejects the
-    parameter).
+    Before trusting ANY new provider/model combination for anything beyond
+    isolated testing, re-run tools/measure_guardrails.py against it and
+    compare against the recorded baseline -- see
+    docs/plans/model-portability-plan.md's "The behavioral caveat".
     """
-    effort = os.environ.get("LLM_REASONING_EFFORT", "none")
-    request_timeout = os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", str(default_timeout))
     kwargs = {}
-    if effort:
-        kwargs["reasoning_effort"] = effort
-    if request_timeout:
-        kwargs["request_timeout"] = float(request_timeout)
-    return init_chat_model(os.environ.get(env_var, default), **kwargs)
+    if cfg.get("reasoning_effort"):
+        kwargs["reasoning_effort"] = cfg["reasoning_effort"]
+    timeout = cfg.get("request_timeout_seconds", default_timeout)
+    if timeout:
+        kwargs["request_timeout"] = float(timeout)
+    return ChatOpenAI(base_url=cfg["url"], api_key=cfg["api-key"], model=cfg["model"], **kwargs)
+
+
+def build_model_from_settings(settings, path: str, default_timeout: float = 60.0):
+    """Resolves `path` (e.g. "models.main", "models.guardrail") from
+    `settings` and builds a model from it -- the usual entry point; see
+    build_model_from_config for the construction itself and the reasoning
+    behind its parameters. `settings` is taken as a parameter rather than
+    read via app_settings.get_settings() internally, matching this
+    project's existing testability convention (build_agent/run_agent take
+    the model/telemetry as parameters too) -- callers pass a fake Settings
+    in tests, a real one at every real call site.
+
+    `required=True`: a deployment with no `models.main`/`models.guardrail`
+    in its settings.yml should fail loudly at startup, not construct a
+    model with missing pieces and fail confusingly on first use.
+    """
+    return build_model_from_config(settings.resolved(path, required=True), default_timeout=default_timeout)
 
 # --- Layer 1: tight, always-present identity ----------------------------
 
@@ -589,7 +575,7 @@ def setup_telemetry():
 
 def main():
     setup_telemetry()
-    model = build_model("LLM_MODEL")
+    model = build_model_from_settings(get_settings(), "models.main")
     agent = build_agent(model)
 
     print("Agent ready. Type 'exit' to quit.\n")

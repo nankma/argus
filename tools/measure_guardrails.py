@@ -51,6 +51,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # edge case to work around elsewhere. Force UTF-8 stdout unconditionally.
 sys.stdout.reconfigure(encoding="utf-8")
 
+import agent
+from app_settings import get_settings
+from trailsign import SettingsError
 import guardrails
 
 # --- Layer 1 test cases (deterministic -- expects a specific True/False) --
@@ -540,14 +543,18 @@ def main():
 
             model = ClaudeCLIModel(model=args.via_claude)
             print(f"\nlayers 2/4 via the claude CLI ({args.via_claude}) -- "
-                  f"not comparable to the deepseek-chat baseline.", file=sys.stderr)
-        elif not os.environ.get("DEEPSEEK_API_KEY"):
-            print("\nDEEPSEEK_API_KEY not set -- skipping layers 2/4 (need a real model call).", file=sys.stderr)
-            return
+                  f"not comparable to a models.guardrail baseline.", file=sys.stderr)
         else:
-            from langchain_deepseek import ChatDeepSeek
-
-            model = ChatDeepSeek(model="deepseek-chat")
+            # Whatever this environment's settings.yml points models.guardrail
+            # at -- to get a baseline for a candidate model/provider, point
+            # SETTINGS_FILE at a settings.yml whose models.guardrail names
+            # it, then re-run and compare the report against a prior run's.
+            try:
+                model = agent.build_model_from_settings(get_settings(), "models.guardrail")
+            except SettingsError as exc:
+                print(f"\nmodels.guardrail not configured -- skipping layers 2/4 (need a real model call): {exc}",
+                      file=sys.stderr)
+                return
         if args.layer in ("2", "all"):
             print_layer2_report(measure_layer2(model, filtered(LAYER2_CASES), args.trials))
             print_layer2_multi_intent_report(

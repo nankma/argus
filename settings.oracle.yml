@@ -40,3 +40,28 @@ storage:
   subscribers_db_file:
     trailsign-resolve: environment-variable
     name: SUBSCRIBERS_DB_FILE
+
+# Bridges to the same DEEPSEEK_API_KEY env var docker-entrypoint.sh
+# already vault-fetches (via DEEPSEEK_API_KEY_SECRET_OCID) -- see
+# docs/standaloneplan/01-settings-migration.md's "Models" section, this
+# is that phase's worked example. Zero behavior change is the point: the
+# entrypoint's vault-fetch mechanism doesn't change, only how the running
+# process reads the resulting env var (Settings instead of implicitly via
+# ChatDeepSeek). See settings.yml's models section for what each key means.
+models:
+  main:
+    url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    api-key:
+      trailsign-resolve: environment-variable
+      name: DEEPSEEK_API_KEY
+    reasoning_effort: none
+    request_timeout_seconds: 60
+  guardrail:
+    url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    api-key:
+      trailsign-resolve: environment-variable
+      name: DEEPSEEK_API_KEY
+    reasoning_effort: none
+    request_timeout_seconds: 20

@@ -32,7 +32,8 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from agent import ROUTE_B_CATEGORIES, build_agent, build_model, dispatch_settings, run_agent, setup_telemetry
+from agent import ROUTE_B_CATEGORIES, build_agent, build_model_from_settings, dispatch_settings, run_agent, setup_telemetry
+from app_settings import get_settings
 import admin_bot
 import guardrails
 import message_archive
@@ -756,14 +757,18 @@ def main():
     users_db.init_db()
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     # Two independently-configured models -- see docs/plans/model-portability-plan.md
-    # Level 2. Both default to the same underlying model today (no second
-    # provider is set up yet), so this is plumbing, not a behavior change,
-    # until LLM_MODEL/LLM_MODEL_CLASSIFIER are actually set to different values.
-    model = build_model("LLM_MODEL")
-    # A short default_timeout here, not build_model's usual 60s -- this
-    # model backs layer 2/4 guardrail calls on a live Telegram user's own
-    # message, not a background batch job. See build_model's own docstring.
-    guard_model = build_model("LLM_MODEL_CLASSIFIER", default_timeout=20.0)
+    # Level 2. `models.main`/`models.guardrail` in settings.yml both point
+    # at the same underlying model by default (no second provider is set
+    # up in the checked-in example), so this is plumbing, not a behavior
+    # change, until a deployment's own settings.yml actually points them
+    # at different providers/models.
+    settings = get_settings()
+    model = build_model_from_settings(settings, "models.main")
+    # A short default_timeout here, not build_model_from_settings' usual
+    # 60s -- this model backs layer 2/4 guardrail calls on a live Telegram
+    # user's own message, not a background batch job. See
+    # build_model_from_config's own docstring.
+    guard_model = build_model_from_settings(settings, "models.guardrail", default_timeout=20.0)
     agent = build_agent(model)
     # None on any failure (missing package, missing model files, out of
     # memory) rather than raising -- an embedder is an enhancement to
