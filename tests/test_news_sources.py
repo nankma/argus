@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+from trailsign import Settings
+
 import news_sources
 from tests.fixtures import (
     ARXIV_RESPONSE,
@@ -112,13 +114,61 @@ def test_fetch_rss_generic_respects_max_results(requests_mock):
     assert len(articles) == 1
 
 
-def test_fetch_openai_blog_uses_correct_url_and_source_name(requests_mock):
-    requests_mock.get("https://openai.com/news/rss.xml", text=RSS_RESPONSE)
+def test_make_rss_fetcher_uses_the_given_url_and_display_name(requests_mock):
+    requests_mock.get("https://example.com/feed.xml", text=RSS_RESPONSE)
 
-    articles = news_sources.fetch_openai_blog()
+    fetch = news_sources._make_rss_fetcher("https://example.com/feed.xml", "Fake Blog")
+    articles = fetch()
 
     assert len(articles) == 2
-    assert articles[0]["source"] == "OpenAI Blog"
+    assert articles[0]["source"] == "Fake Blog"
+
+
+def test_make_rss_fetcher_ignores_query_and_respects_max_results(requests_mock):
+    requests_mock.get("https://example.com/feed.xml", text=RSS_RESPONSE)
+
+    fetch = news_sources._make_rss_fetcher("https://example.com/feed.xml", "Fake Blog")
+    articles = fetch("this query is ignored, RSS has no query parameter", max_results=1)
+
+    assert len(articles) == 1
+
+
+def test_rss_sources_from_settings_builds_one_entry_per_config_row(monkeypatch):
+    """The mechanism, not any specific real feed -- what's actually in
+    news_source.rss is settings data now (see settings.yml), not a code
+    invariant to lock in a unit test."""
+    fake_settings = Settings({"news_source": {"rss": [
+        {"key": "fake_a", "display_name": "Fake A", "url": "https://a.example.com/feed.xml"},
+        {"key": "fake_b", "display_name": "Fake B", "url": "https://b.example.com/feed.xml"},
+    ]}})
+    monkeypatch.setattr(news_sources, "get_settings", lambda: fake_settings)
+
+    entries = news_sources._rss_sources_from_settings()
+
+    assert [key for key, *_ in entries] == ["fake_a", "fake_b"]
+    assert all(required_env is None for _key, _fn, required_env, _cls in entries)
+    assert all(source_class == "rss" for *_rest, source_class in entries)
+
+
+def test_rss_sources_from_settings_entries_are_independently_callable(requests_mock, monkeypatch):
+    requests_mock.get("https://a.example.com/feed.xml", text=RSS_RESPONSE)
+    fake_settings = Settings({"news_source": {"rss": [
+        {"key": "fake_a", "display_name": "Fake A", "url": "https://a.example.com/feed.xml"},
+    ]}})
+    monkeypatch.setattr(news_sources, "get_settings", lambda: fake_settings)
+
+    [(_key, fetch, _required_env, _source_class)] = news_sources._rss_sources_from_settings()
+    articles = fetch()
+
+    assert articles[0]["source"] == "Fake A"
+
+
+def test_rss_sources_from_settings_defaults_to_empty_list(monkeypatch):
+    """A deployer with zero configured RSS feeds is a legitimate, sparse
+    state -- fails open, doesn't raise."""
+    monkeypatch.setattr(news_sources, "get_settings", lambda: Settings({}))
+
+    assert news_sources._rss_sources_from_settings() == []
 
 
 def test_fetch_newsapi(requests_mock, monkeypatch):
@@ -195,34 +245,16 @@ def test_fetch_perigon(requests_mock, monkeypatch):
 
 
 def test_enabled_sources_always_includes_free_sources(monkeypatch):
+    """hackernews/arxiv are the two hardcoded free sources; fake_rss_source
+    is conftest.py's injected news_source.rss entry, standing in for
+    whatever a deployment's own RSS list actually contains -- that list is
+    settings data now, not a code invariant this test should hardcode."""
     for var in ("NEWSAPI_API_KEY", "GNEWS_API_KEY", "PERIGON_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
     names = [name for name, _ in news_sources.enabled_sources()]
 
-    for free_source in (
-        "hackernews",
-        "arxiv",
-        "openai_blog",
-        "huggingface_blog",
-        "techcrunch_ai",
-        "venturebeat_ai",
-        "mit_tech_review",
-        "bbc_business",
-        "bbc_technology",
-        "guardian_business",
-        "guardian_technology",
-        "marketwatch",
-        "economist_business",
-        "economist_tech",
-        "nikkei_asia",
-        "wired_business",
-        "the_register",
-        "computerworld",
-        "zdnet",
-        "engadget",
-        "techradar",
-    ):
+    for free_source in ("hackernews", "arxiv", "fake_rss_source"):
         assert free_source in names
     for gated_source in ("newsapi", "gnews", "perigon"):
         assert gated_source not in names
@@ -258,7 +290,7 @@ def test_enabled_sources_excludes_restricted_when_false(monkeypatch):
     assert "gnews" in names
     # unrestricted, always-on sources are unaffected
     assert "hackernews" in names
-    assert "bbc_business" in names
+    assert "fake_rss_source" in names
 
 
 def test_traced_fetch_returns_the_underlying_fetch_result():
@@ -350,42 +382,34 @@ def test_traced_fetch_redacts_the_key_before_it_reaches_telemetry(monkeypatch):
 
 
 # --- registry breadth -----------------------------------------------------
+#
+# What USED to be registered here (widening the registry past AI-only
+# feeds, 2026-08-20, see docs/analysis/cluster-measurements.md) is now
+# settings data, not a code invariant -- see settings.yml's news_source.rss
+# for the actual list and its own comment for the "don't let the cache go
+# AI-only again" reasoning. The tests below cover the MECHANISM breadth
+# depends on: distinct config entries never collapse into the same
+# fetcher, and every RSS entry is unconditionally unrestricted/keyless by
+# construction (also asserted directly in
+# test_rss_sources_from_settings_builds_one_entry_per_config_row above).
 
 
-def test_general_tech_and_business_feeds_are_registered():
-    """Added 2026-08-20 to widen a registry that measured 28.6% of its cache
-    coming from feeds that structurally cannot produce anything but AI
-    content (openai_blog, huggingface_blog, arxiv, techcrunch_ai,
-    venturebeat_ai) -- see docs/analysis/cluster-measurements.md. RSS gives
-    no history, so breadth has to come from more sources rather than from
-    reaching further back."""
-    names = {name for name, *_ in news_sources.SOURCE_REGISTRY}
+def test_two_different_rss_config_entries_produce_two_different_fetchers(monkeypatch):
+    """The registry-breadth guarantee, generically: two distinct
+    news_source.rss rows never collapse into the same fetch function (e.g.
+    a general feed and its AI-only counterpart, techcrunch vs
+    techcrunch_ai in the current settings.yml, stay independently
+    callable)."""
+    fake_settings = Settings({"news_source": {"rss": [
+        {"key": "fake_general", "display_name": "Fake General", "url": "https://a.example.com/feed.xml"},
+        {"key": "fake_ai_only", "display_name": "Fake AI Only", "url": "https://b.example.com/feed.xml"},
+    ]}})
+    monkeypatch.setattr(news_sources, "get_settings", lambda: fake_settings)
 
-    assert {"ars_technica", "techcrunch", "cnbc"} <= names
+    entries = news_sources._rss_sources_from_settings()
+    fns = [fn for _key, fn, _env, _cls in entries]
 
-
-def test_techcrunch_general_feed_is_separate_from_the_ai_one():
-    """Two different feeds, not a rename. The AI-only one stays; the point
-    of the general one is that it isn't AI-only."""
-    assert news_sources.fetch_techcrunch is not news_sources.fetch_techcrunch_ai
-
-
-def test_new_sources_need_no_api_key():
-    """Plain RSS, so no key, no quota, no budget tracking -- unlike Perigon,
-    which is metered per request and burned a month's allowance in three
-    days (docs/plans/security-plan.md finding 21)."""
-    required = {name: env for name, _fn, env, _cls in news_sources.SOURCE_REGISTRY}
-
-    for name in ("ars_technica", "techcrunch", "cnbc"):
-        assert required[name] is None
-
-
-def test_new_sources_are_not_restricted():
-    """They go to subscribers, unlike newsapi/perigon. That's the whole
-    reason these three were picked over the general-news feeds: they sit
-    inside the product's stated technology-industry scope."""
-    for name in ("ars_technica", "techcrunch", "cnbc"):
-        assert name not in news_sources.RESTRICTED_SOURCES
+    assert fns[0] is not fns[1]
 
 
 def test_traced_fetch_records_the_section_rather_than_a_placeholder_query():

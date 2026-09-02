@@ -23,6 +23,11 @@ app_settings.reset_settings_for_tests(Settings({
         "main": {"url": "https://example.invalid", "model": "fake-main", "api-key": "fake-key"},
         "guardrail": {"url": "https://example.invalid", "model": "fake-guardrail", "api-key": "fake-key"},
     },
+    "news_source": {
+        "rss": [
+            {"key": "fake_rss_source", "display_name": "Fake RSS Source", "url": "https://fake.invalid/feed.xml"},
+        ],
+    },
 }))
 
 import agent

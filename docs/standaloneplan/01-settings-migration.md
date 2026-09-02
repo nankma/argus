@@ -319,11 +319,23 @@ them independently settable wouldn't even be coherent:
    `models.guardrail` the same way, so measuring a candidate model/
    provider's baseline is "point `SETTINGS_FILE` at a settings.yml naming
    it, re-run, compare reports" rather than editing the harness itself.
-3. **News sources** (`NEWSAPI_API_KEY`, `GNEWS_API_KEY`,
-   `PERIGON_API_KEY`) — pairs naturally with moving `news_sources.py`
-   onto the factory pattern described in Trailsign's own design doc
-   (`queryadoptor` dispatch), so this phase is really "adopt the factory
-   pattern *and* migrate its keys" together, not two separate passes.
+3. **News sources.** Split into two, done separately (turned out not to
+   need to be one pass):
+   - ~~**RSS sources**~~ — **done** 2026-09-03. All 22 query-less
+     `_fetch_rss`-wrapper sources moved to `news_source.rss` (a list of
+     `{key, display_name, url}`) in settings.yml/settings.oracle.yml/
+     settings.int.yml — `news_sources._rss_sources_from_settings()`
+     builds their `SOURCE_REGISTRY` entries at import time, same pattern
+     as `models.*`. No API keys involved (RSS needs none), so this
+     needed no factory-pattern/credential design at all — a deployer
+     adds/removes/edits a feed by editing their own settings.yml.
+     `hackernews`/`arxiv` (real query/date-range logic) stayed hardcoded
+     Python, alongside the three still-pending API-gated sources below.
+   - `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` — **not
+     started**. These DO need the factory pattern described in
+     Trailsign's own design doc (`queryadoptor` dispatch) plus real
+     credential-resolution design, since each has actual per-source
+     query/auth logic the RSS sources didn't.
 4. **Telegram / admin** (`TELEGRAM_BOT_TOKEN`, `ADMIN_BOT_TOKEN`,
    `ADMIN_CHAT_ID`) — deliberately last of the "current" set. Bot
    startup itself depends on these; get comfortable with the pattern on
