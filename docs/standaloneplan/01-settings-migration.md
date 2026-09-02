@@ -194,7 +194,7 @@ Re-grepped 2026-09-01, not carried over from memory:
 | `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | ~~`agent.py`~~ | plain `os.environ` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` (and the `models.guardrail.*` mirrors) | **Migrated** 2026-09-02, `default=<literal>` in `build_model_from_config` (reasoning_effort defaults to absent, not `"none"` — that's DeepSeek-specific, set explicitly in settings.yml's own `models.main`/`models.guardrail`, not code) |
 | `LOGFIRE_ENABLED` | `agent.py` | plain `os.environ` | no | `telemetry.tracing.*` (folds into the seam-4 split, see `docs/standaloneplan/README.md` Phase 3) | Not started |
 | `LOGFIRE_API_KEY` | `agent.py`, `tools/check_logfire.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `telemetry.tracing.*` | Not started |
-| `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | `news_sources.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `news_source.<name>.api-key` | Not started |
+| `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | ~~`news_sources.py`~~ | **`docker-entrypoint.sh` vault-fetch** (unchanged) | **yes** | `news_source.<name>.api-key` | **Migrated** 2026-09-03, `default=None` (a source with no key configured is skipped, same as an unset env var always was) -- see `news_sources._news_source_api_key`'s own docstring for a real trailsign gotcha this hit: a `trailsign-resolve` node that's *present* but points at an unset env var raises `SettingsError` even with `default=None` on the outer call -- `default=` only covers the path being absent entirely, not present-but-unresolvable. Handled by catching `SettingsError` in the gating check, not by assuming `default=` alone was enough. |
 | `TELEGRAM_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.bot-token` | Not started — highest blast radius of the "current" set, bot startup itself depends on it |
 | `ADMIN_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.admin_bot_token` | Not started |
 | `ADMIN_CHAT_ID` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | no (an id, not a credential — still fetched the same way) | `delivery.telegram.admin_chat_id` | Not started |
@@ -331,11 +331,16 @@ them independently settable wouldn't even be coherent:
      adds/removes/edits a feed by editing their own settings.yml.
      `hackernews`/`arxiv` (real query/date-range logic) stayed hardcoded
      Python, alongside the three still-pending API-gated sources below.
-   - `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` — **not
-     started**. These DO need the factory pattern described in
-     Trailsign's own design doc (`queryadoptor` dispatch) plus real
-     credential-resolution design, since each has actual per-source
-     query/auth logic the RSS sources didn't.
+   - ~~`NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY`~~ — **done**
+     2026-09-03. Turned out NOT to need the factory pattern after all --
+     each source's real per-source query/auth logic (URL, param shapes,
+     response parsing) stayed exactly where it was in `news_sources.py`;
+     only the credential (`os.environ["X_API_KEY"]` →
+     `news_source.<name>.api-key` via Settings) moved. `_NON_RSS_SOURCES`
+     now stores a settings-path fragment per gated source instead of a
+     raw env-var name, resolved fresh on every `enabled_sources()` call
+     (not cached at import) so the "unset key = source silently skipped"
+     behavior these three have always had stays exactly the same.
 4. **Telegram / admin** (`TELEGRAM_BOT_TOKEN`, `ADMIN_BOT_TOKEN`,
    `ADMIN_CHAT_ID`) — deliberately last of the "current" set. Bot
    startup itself depends on these; get comfortable with the pattern on

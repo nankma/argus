@@ -143,3 +143,26 @@ news_source:
     - key: techradar
       display_name: TechRadar
       url: https://www.techradar.com/rss
+
+# Bridges to the same NEWSAPI_API_KEY/GNEWS_API_KEY/PERIGON_API_KEY env
+# vars docker-entrypoint.sh already vault-fetches (via
+# NEWSAPI_API_KEY_SECRET_OCID etc.) -- same worked-example pattern as
+# models.*'s DEEPSEEK_API_KEY. See settings.yml's own news_source
+# comment for what each source is and why (newsapi/perigon restricted
+# from live search, gnews isn't). All three genuinely optional -- see
+# news_sources._news_source_api_key -- but production has real keys for
+# all three, so all three are live here, unlike settings.yml's commented
+# preview.
+news_source:
+  newsapi:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: NEWSAPI_API_KEY
+  gnews:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: GNEWS_API_KEY
+  perigon:
+    api-key:
+      trailsign-resolve: environment-variable
+      name: PERIGON_API_KEY

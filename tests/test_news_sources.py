@@ -13,6 +13,17 @@ from tests.fixtures import (
 )
 
 
+def _set_news_source_key(monkeypatch, **keys):
+    """Replaces monkeypatch.setenv("XXX_API_KEY", ...) now that
+    fetch_newsapi/fetch_gnews/fetch_perigon read news_source.<name>.api-key
+    via Settings, not a raw env var -- e.g.
+    _set_news_source_key(monkeypatch, newsapi="fake-key"). Omit a name
+    entirely to leave it unconfigured (the "not enabled" state)."""
+    news_source = {name: {"api-key": key} for name, key in keys.items()}
+    fake_settings = Settings({"news_source": news_source})
+    monkeypatch.setattr(news_sources, "get_settings", lambda: fake_settings)
+
+
 def test_fetch_hackernews(requests_mock):
     requests_mock.get("https://hn.algolia.com/api/v1/search_by_date", json=HACKERNEWS_RESPONSE)
 
@@ -172,7 +183,7 @@ def test_rss_sources_from_settings_defaults_to_empty_list(monkeypatch):
 
 
 def test_fetch_newsapi(requests_mock, monkeypatch):
-    monkeypatch.setenv("NEWSAPI_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, newsapi="fake-key")
     requests_mock.get("https://newsapi.org/v2/everything", json=NEWSAPI_RESPONSE)
 
     articles = news_sources.fetch_newsapi("AI", 5)
@@ -183,7 +194,7 @@ def test_fetch_newsapi(requests_mock, monkeypatch):
 
 
 def test_fetch_gnews(requests_mock, monkeypatch):
-    monkeypatch.setenv("GNEWS_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, gnews="fake-key")
     requests_mock.get("https://gnews.io/api/v4/search", json=GNEWS_RESPONSE)
 
     articles = news_sources.fetch_gnews("AI", 5)
@@ -194,7 +205,7 @@ def test_fetch_gnews(requests_mock, monkeypatch):
 
 
 def test_fetch_gnews_omits_from_when_since_not_given(requests_mock, monkeypatch):
-    monkeypatch.setenv("GNEWS_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, gnews="fake-key")
     requests_mock.get("https://gnews.io/api/v4/search", json=GNEWS_RESPONSE)
 
     news_sources.fetch_gnews("AI", 5)
@@ -203,7 +214,7 @@ def test_fetch_gnews_omits_from_when_since_not_given(requests_mock, monkeypatch)
 
 
 def test_fetch_gnews_adds_from_when_since_given(requests_mock, monkeypatch):
-    monkeypatch.setenv("GNEWS_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, gnews="fake-key")
     requests_mock.get("https://gnews.io/api/v4/search", json=GNEWS_RESPONSE)
     since = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -234,7 +245,7 @@ def test_fetch_perigon(requests_mock, monkeypatch):
     # to test against the live service — see docs/current/ai-news-sources.md). This
     # test only locks in that fetch_perigon parses the shape it's coded to
     # expect; it is not a guarantee that shape matches Perigon's actual API.
-    monkeypatch.setenv("PERIGON_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, perigon="fake-key")
     requests_mock.get("https://api.perigon.io/v1/all", json=PERIGON_RESPONSE)
 
     articles = news_sources.fetch_perigon("AI", 5)
@@ -261,27 +272,24 @@ def test_enabled_sources_always_includes_free_sources(monkeypatch):
 
 
 def test_enabled_sources_gates_on_env_var(monkeypatch):
-    monkeypatch.delenv("NEWSAPI_API_KEY", raising=False)
+    _set_news_source_key(monkeypatch)  # nothing configured
     names = [name for name, _ in news_sources.enabled_sources()]
     assert "newsapi" not in names
 
-    monkeypatch.setenv("NEWSAPI_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, newsapi="fake-key")
     names = [name for name, _ in news_sources.enabled_sources()]
     assert "newsapi" in names
 
 
 def test_enabled_sources_include_restricted_true_by_default(monkeypatch):
-    monkeypatch.setenv("NEWSAPI_API_KEY", "fake-key")
-    monkeypatch.setenv("PERIGON_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, newsapi="fake-key", perigon="fake-key")
     names = [name for name, _ in news_sources.enabled_sources()]
     assert "newsapi" in names
     assert "perigon" in names
 
 
 def test_enabled_sources_excludes_restricted_when_false(monkeypatch):
-    monkeypatch.setenv("NEWSAPI_API_KEY", "fake-key")
-    monkeypatch.setenv("PERIGON_API_KEY", "fake-key")
-    monkeypatch.setenv("GNEWS_API_KEY", "fake-key")
+    _set_news_source_key(monkeypatch, newsapi="fake-key", perigon="fake-key", gnews="fake-key")
     names = [name for name, _ in news_sources.enabled_sources(include_restricted=False)]
     assert "newsapi" not in names
     assert "perigon" not in names
@@ -344,7 +352,7 @@ def test_redact_strips_api_keys_from_error_text():
 
 
 def test_raise_for_status_redacts_the_key(requests_mock, monkeypatch):
-    monkeypatch.setenv("GNEWS_API_KEY", "SUPERSECRETKEY123")
+    _set_news_source_key(monkeypatch, gnews="SUPERSECRETKEY123")
     requests_mock.get("https://gnews.io/api/v4/search", status_code=403, json={})
 
     try:
@@ -514,7 +522,7 @@ def test_arxiv_query_mode_is_unchanged(requests_mock):
 
 
 def test_newsapi_section_uses_top_headlines(requests_mock, monkeypatch):
-    monkeypatch.setenv("NEWSAPI_API_KEY", "k")
+    _set_news_source_key(monkeypatch, newsapi="k")
     m = requests_mock.get("https://newsapi.org/v2/top-headlines", json=NEWSAPI_RESPONSE)
 
     news_sources.fetch_newsapi("IGNORED", 5, section="science")
@@ -527,7 +535,7 @@ def test_newsapi_section_uses_top_headlines(requests_mock, monkeypatch):
 def test_newsapi_query_mode_keeps_the_language_pin(requests_mock, monkeypatch):
     """The pin applies to search too -- an unconstrained query here returned
     65 of 65 Chinese articles."""
-    monkeypatch.setenv("NEWSAPI_API_KEY", "k")
+    _set_news_source_key(monkeypatch, newsapi="k")
     m = requests_mock.get("https://newsapi.org/v2/everything", json=NEWSAPI_RESPONSE)
 
     news_sources.fetch_newsapi("AOI", 5)
@@ -537,7 +545,7 @@ def test_newsapi_query_mode_keeps_the_language_pin(requests_mock, monkeypatch):
 
 
 def test_gnews_section_uses_top_headlines(requests_mock, monkeypatch):
-    monkeypatch.setenv("GNEWS_API_KEY", "k")
+    _set_news_source_key(monkeypatch, gnews="k")
     m = requests_mock.get("https://gnews.io/api/v4/top-headlines", json=GNEWS_RESPONSE)
 
     news_sources.fetch_gnews("IGNORED", 5, section="technology")
@@ -548,7 +556,7 @@ def test_gnews_section_uses_top_headlines(requests_mock, monkeypatch):
 
 
 def test_gnews_section_and_since_compose(requests_mock, monkeypatch):
-    monkeypatch.setenv("GNEWS_API_KEY", "k")
+    _set_news_source_key(monkeypatch, gnews="k")
     m = requests_mock.get("https://gnews.io/api/v4/top-headlines", json=GNEWS_RESPONSE)
     since = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
 
@@ -559,7 +567,7 @@ def test_gnews_section_and_since_compose(requests_mock, monkeypatch):
 
 
 def test_gnews_query_mode_is_unchanged(requests_mock, monkeypatch):
-    monkeypatch.setenv("GNEWS_API_KEY", "k")
+    _set_news_source_key(monkeypatch, gnews="k")
     m = requests_mock.get("https://gnews.io/api/v4/search", json=GNEWS_RESPONSE)
 
     news_sources.fetch_gnews("nvidia earnings", 5)
