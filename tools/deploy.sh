@@ -28,6 +28,20 @@
 #
 set -uo pipefail
 
+# On a Windows dev machine (Git Bash/MSYS), any argv token that looks like a
+# Unix absolute path -- including embedded after `KEY=`, e.g. `-e
+# SETTINGS_FILE=/app/settings.oracle.yml` -- gets silently rewritten to a
+# Windows path (e.g. `C:/Program Files/Git/app/settings.oracle.yml`) before
+# reaching a native .exe like docker.exe. Found 2026-09-01 deploying 21144dd:
+# the new import-check env vars (below) were passed straight through as
+# mangled paths, so trailsign resolved SETTINGS_FILE to a nonexistent file
+# and raised SettingsError -- indistinguishable at a glance from the image
+# genuinely being broken. Disabling MSYS's path conversion for this whole
+# script is safe: nothing here relies on it, and every other Windows path
+# (SSH_KEY, INFRA) is already converted explicitly instead. A no-op on
+# Linux/macOS, where this variable does nothing.
+export MSYS_NO_PATHCONV=1
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
@@ -216,7 +230,23 @@ ok "built ${LOCAL_ID:0:19}"
 # entrypoint one proves the container can actually START, which the import
 # does NOT -- it bypasses ENTRYPOINT entirely, and that is exactly how a
 # CRLF entrypoint reached production undetected.
-run import docker run --rm "$IMAGE" python -c "import combined_bot" || die "the image cannot import combined_bot"
+#
+# SETTINGS_ENV below is required since the settings-migration work
+# (docs/standaloneplan/01-settings-migration.md): users_db.py/news_cache.py/
+# message_archive.py now call trailsign's resolved(..., required=True) for
+# storage.subscribers_db_file/news_cache_dir/news_archive_dir/
+# message_archive_dir at IMPORT time, via settings.oracle.yml's
+# environment-variable bridge nodes. A bare `docker run --rm "$IMAGE" python
+# -c "import combined_bot"` with no env vars therefore always raises
+# SettingsError now, regardless of whether the image itself is fine -- found
+# 2026-09-01 deploying 21144dd, the first commit built with this check no
+# longer matching the code it's checking. The values here don't need to be
+# the real deployment's values (this container is never started for real),
+# just present and pointing at writable-looking paths so resolution succeeds.
+SETTINGS_ENV=(-e SETTINGS_FILE=/app/settings.oracle.yml -e NEWS_CACHE_DIR=/data/news_cache \
+    -e NEWS_ARCHIVE_DIR=/data/news_archive -e MESSAGE_ARCHIVE_DIR=/data/message_archive \
+    -e SUBSCRIBERS_DB_FILE=/data/subscribers.db)
+run import docker run --rm "${SETTINGS_ENV[@]}" "$IMAGE" python -c "import combined_bot" || die "the image cannot import combined_bot"
 ok "imports"
 run entrypoint docker run --rm --entrypoint ./docker-entrypoint.sh "$IMAGE" python -c "print('ok')" \
     || die "ENTRYPOINT is broken -- see $LOGDIR/entrypoint.log"
@@ -278,7 +308,23 @@ step "Restart"
 # command key's own level", which no *specific* character class can
 # reliably encode; broadening it removes the one dimension (which
 # characters appear in a sibling key's name) most likely to change.
-DOCKER_RUN=$(awk '/^    command: \|/{f=1;next} f&&/^    [A-Za-z0-9_]+:/{exit} f' "$INFRA" | sed 's/^      //')
+# `invm` scopes the search to the vm_bot: top-level section specifically.
+# Found 2026-09-01 deploying 21144dd: without this scoping, awk matched the
+# FIRST `command: |` anywhere in the file -- and local-int-machine's own
+# docker_run.command block (added earlier this session, for the local INT
+# environment) now sits above vm_bot's in the file, so this extracted and
+# ran the INT container's command (test Telegram tokens, no Vault secrets,
+# wrong data volume) against the PRODUCTION VM, after the real
+# myfirstagent-bot container had already been stopped/removed -- a real
+# outage, caught and fixed live, not by inspection. `/^vm_bot:/` anchors to
+# column 0, so it only matches the real top-level key, never an indented
+# occurrence.
+DOCKER_RUN=$(awk '
+    /^vm_bot:/{invm=1}
+    invm && /^    command: \|/{f=1;next}
+    f && /^    [A-Za-z0-9_]+:/{exit}
+    f
+' "$INFRA" | sed 's/^      //')
 [ -n "$DOCKER_RUN" ] || die "could not read docker_run.command from $INFRA"
 echo "$DOCKER_RUN" > "$LOGDIR/docker-run.txt"
 
