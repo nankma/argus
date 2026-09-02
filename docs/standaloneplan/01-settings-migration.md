@@ -162,9 +162,13 @@ plan's own "Why" goals). The boundary that makes this safe:
   sets, via `trailsign-resolve: environment-variable` nodes — genuinely
   deployable as-is today, not just illustrative. Once models/Telegram
   secrets are migrated (Phase 2+), *this file* gains the
-  `credential_sources.oci-vault-main` + `trailsign-resolve: oracleKeyVault`
-  shape using placeholder OCIDs, while the real deploy uses a sibling
-  file under `local-infra/` with this project's actual OCIDs filled in.
+  `trailsign-credential-sources.oci-vault-main` + `trailsign-resolve:
+  oracleKeyVault` shape using placeholder OCIDs (key renamed from the
+  bare `credential_sources` in Trailsign v0.2.0, 2026-09-02 -- same
+  collision-proofing reasoning as `trailsign-resolve` itself, applied to
+  the one remaining generic top-level word), while the real deploy uses
+  a sibling file under `local-infra/` with this project's actual OCIDs
+  filled in.
 - **The test environment** — not a yaml file at all. `tests/conftest.py`
   injects a `Settings({"storage": {...}})` dict directly (via
   `app_settings.reset_settings_for_tests(...)`) before importing any
@@ -365,9 +369,10 @@ Trailsign's own repo history for the fix that made this work (the
 resolver's original config-dict shape didn't match instance-principal
 auth's `signer=`-based construction). When Phase 2 (models) or Phase 4
 (Telegram/admin) needs a real vault-backed secret in PROD's
-`settings.yml`, the `credential_sources.oci-vault-main` +
+`settings.yml`, the `trailsign-credential-sources.oci-vault-main` +
 `trailsign-resolve: oracleKeyVault` shape from Trailsign's own design
-doc is ready to use, not speculative.
+doc is ready to use, not speculative (key namespaced to
+`trailsign-credential-sources` as of Trailsign v0.2.0).
 
 ## Testing
 
