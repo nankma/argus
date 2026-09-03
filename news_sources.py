@@ -18,96 +18,32 @@ tool degrades gracefully instead of erroring. See docs/current/ai-news-sources.m
 for what each source is and how to add a new one.
 
 RSS sources are configured via Settings (news_source.rss in settings.yml),
-not hardcoded here -- see _rss_sources_from_settings. Only the sources with
-real per-source logic beyond "a URL and a display name" (hackernews, arxiv,
-and the three API-key-gated sources) are still plain Python functions.
+not hardcoded here -- see _rss_sources_from_settings.
+
+The two free, always-on sources (hackernews, arxiv) and the three
+credential-gated sources (newsapi, gnews, perigon) are NewsSourceAdapter
+classes under news_adapters/ -- see that package's __init__.py for the
+interface (initialize()/pull()) and the discover_adapter_types()/
+validate_configured_types() mechanism that turns a news_source.api entry
+into a live adapter instance. hackernews/arxiv are wired in directly by
+_always_on_sources() below (always on, no credential, no settings entry
+needed); newsapi/gnews/perigon are read from news_source.api, one entry
+per source -- see _api_sources_from_settings.
 """
 
-import calendar
-import re
-from datetime import datetime, timezone
+from opentelemetry import trace
+from trailsign import Settings, SettingsError
 
 import feedparser
 import requests
-from opentelemetry import trace
 
 from app_settings import get_settings
-from trailsign import SettingsError
+from news_adapters import discover_adapter_types, validate_configured_types
+from news_adapters._util import _redact, _REQUEST_HEADERS, _parse_rss_published
+from news_adapters.arxiv import ArxivAdapter
+from news_adapters.hackernews import HackerNewsAdapter
 
-# Self-identifying, not a fake browser -- some feeds (TechRadar, confirmed
-# live) return 403 to the bare `python-requests/x.x` default User-Agent but
-# accept a real one; the honest fix is to say who we are, not to impersonate
-# a browser. Applied to every source for consistency, not just the one that
-# needed it -- a future source hitting the same block shouldn't need its own
-# special case.
-_USER_AGENT = "Mozilla/5.0 (compatible; ArgusNewsBot/1.0; +https://github.com/nankma/argus)"
-_REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
-
-
-# Query-string parameters whose value is a credential. requests puts the full
-# request URL into an HTTPError's message, and news_ingest.py logs that
-# exception straight to stdout -- i.e. into `docker logs`, unredacted, on
-# every failed fetch.
-#
-# Real incident, 2026-08-19: a routine check of the ingestion logs surfaced
-# GNews's and Perigon's live API keys in plaintext, from a 400 and a 403
-# respectively. Not a one-off mistake -- systematic, and it had been
-# happening on every error since these sources were added. Both keys were
-# rotated. traced_fetch's OpenTelemetry span carried the same value into
-# the telemetry backend (Phoenix at the time; Logfire now).
-_SECRET_QUERY_PARAM_RE = re.compile(r"((?:api[-_]?key|apikey|token)=)[^&\s]+", re.IGNORECASE)
-
-
-def _redact(text: object) -> str:
-    """Strips credential values out of anything about to be logged."""
-    return _SECRET_QUERY_PARAM_RE.sub(r"\1<redacted>", str(text))
-
-
-def _raise_for_status(resp: requests.Response) -> None:
-    """requests.raise_for_status() with the credential stripped from the
-    error message. Use this instead of resp.raise_for_status() for any
-    source whose auth travels in the query string."""
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError as exc:
-        raise requests.HTTPError(_redact(exc)) from None
-
-
-def _parse_iso_published(raw: str | None) -> datetime | None:
-    """For sources that give an ISO-8601-ish string (HN's created_at,
-    NewsAPI/GNews/Perigon's publishedAt/pubDate).
-
-    Real incident, 2026-08-14: a source returning a timestamp with no UTC
-    offset at all (e.g. "2026-08-13T22:00:00", no "Z", no "+00:00") made
-    `datetime.fromisoformat` return a naive datetime, silently breaking
-    this function's documented "always timezone-aware" contract. That
-    naive value then crashed every news_push.py cycle for two real
-    subscribers with `TypeError: can't compare offset-naive and
-    offset-aware datetimes` (published_dt <= since, where since is
-    always aware) -- not an occasional glitch, a deterministic failure on
-    every single tick once that source had a new article. Fixed by
-    assuming UTC for any parse that comes back naive, same as this
-    function already does explicitly for "Z"."""
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _parse_rss_published(entry) -> datetime | None:
-    """For feedparser entries (arXiv, RSS blogs) -- feedparser normalizes
-    whatever date format the feed uses into published_parsed (a UTC
-    struct_time), which is far more reliable than parsing the raw
-    "published" string ourselves."""
-    parsed = entry.get("published_parsed")
-    if not parsed:
-        return None
-    return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
+import re
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -127,126 +63,6 @@ def _clean_summary(raw: str | None, max_len: int = 300) -> str | None:
         return None
     text = _HTML_TAG_RE.sub("", raw).replace("\n", " ").strip()
     return text[:max_len] if text else None
-
-
-# --- Free, no-key sources ------------------------------------------------
-
-
-def fetch_hackernews(query: str, max_results: int = 5, since: datetime | None = None,
-                     section: str | None = None) -> list[dict]:
-    """`since`, when given, adds Algolia's `numericFilters=created_at_i>X`
-    -- confirmed live 2026-08-16 (45 hits in a 6h window for one query, all
-    strictly after the cutoff) -- so news_ingest.py can ask for everything
-    new since its last pull instead of a flat top-N regardless of how much
-    is genuinely new. Omitted (server returns its default top-N) when
-    `since` is None, e.g. the first-ever pull or agent.py's search_news,
-    which has no "last pull" concept."""
-    # `section` replaces the query for scheduled ingestion. HN's own
-    # front_page ranking is a better relevance signal than anything a query
-    # could express, and it carries no sampling bias toward what subscribers
-    # already named.
-    if section:
-        params = {"tags": section, "hitsPerPage": max_results}
-    else:
-        params = {"query": query, "tags": "story", "hitsPerPage": max_results}
-    if since is not None:
-        params["numericFilters"] = f"created_at_i>{int(since.timestamp())}"
-    # front_page is a RANKING; search_by_date would re-sort it into
-    # chronological order and throw away the only thing it was for.
-    endpoint = "search" if section == "front_page" else "search_by_date"
-    resp = requests.get(
-        f"https://hn.algolia.com/api/v1/{endpoint}",
-        params=params,
-        timeout=10,
-        headers=_REQUEST_HEADERS,
-    )
-    resp.raise_for_status()
-    return [
-        {
-            "title": hit.get("title"),
-            "link": hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}",
-            "source": "Hacker News",
-            "summary": None,
-            "published": hit.get("created_at"),
-            "published_dt": _parse_iso_published(hit.get("created_at")),
-        }
-        for hit in resp.json().get("hits", [])
-    ]
-
-
-def fetch_arxiv(query: str = "cat:cs.AI", max_results: int = 5, since: datetime | None = None,
-                section: str | None = None) -> list[dict]:
-    """`since`, when given, appends a `submittedDate:[X TO 9999...]` range
-    to the query -- confirmed live 2026-08-16 the syntax works. Note:
-    arXiv's own indexing has a real multi-day lag (a plain, unfiltered
-    query on 2026-08-16 returned nothing newer than 2026-08-13), so a
-    short since-last-pull window (news_ingest's default interval is 4h)
-    will often legitimately return nothing -- that's arXiv's real update
-    cadence, not a bug, and no worse than before (today's flat top-N cap
-    mostly re-fetches the same few papers on a source this slow)."""
-    # A section is an arXiv subject class, which is what this archive
-    # actually indexes by -- far better than free-text search, which found
-    # only 36 quantum and 6 optics articles for subscribers who follow
-    # exactly those topics.
-    search_query = f"cat:{section}" if section else query
-    if since is not None:
-        search_query = f"{search_query} AND submittedDate:[{since.strftime('%Y%m%d%H%M')} TO 99991231235959]"
-    resp = requests.get(
-        "http://export.arxiv.org/api/query",
-        params={
-            "search_query": search_query,
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
-            "max_results": max_results,
-        },
-        timeout=10,
-        headers=_REQUEST_HEADERS,
-    )
-    resp.raise_for_status()
-    feed = feedparser.parse(resp.text)
-    return [
-        {
-            "title": entry.get("title", "").replace("\n", " ").strip(),
-            "link": entry.get("link"),
-            "source": "arXiv",
-            "summary": entry.get("summary", "").replace("\n", " ").strip()[:300],
-            "published": entry.get("published"),
-            "published_dt": _parse_rss_published(entry),
-        }
-        for entry in feed.entries
-    ]
-
-
-def _news_source_api_key(name: str, required: bool = False) -> str | None:
-    """Resolves news_source.<name>.api-key. Two call shapes:
-
-    required=False (the gating check in enabled_sources()) -- None
-    whether the block is omitted entirely from settings.yml OR present
-    with an unresolvable credential (e.g. its env var unset). Both mean
-    "this optional source isn't configured right now," never a crash --
-    unlike models.*/storage.*'s required=True keys, os.environ.get()
-    never raised for these three either, and that's a real behavior this
-    migration keeps: a deployer without a NewsAPI/GNews/Perigon key gets
-    that source silently skipped, not a startup failure.
-
-    required=True (inside each fetch function, e.g. fetch_perigon) --
-    raises SettingsError if actually called without a configured key.
-    enabled_sources() should have already gated this out; if it's called
-    anyway, that's a real bug worth failing loudly on, matching the old
-    os.environ["KEY"] bracket-access behavior (KeyError, not a silent
-    None passed to the request).
-
-    Resolved fresh on every call, not cached at import time -- same
-    "live" semantics os.environ.get()/os.environ[...] always had, and
-    what lets tests swap Settings without needing to know this module
-    imported at some point in the past."""
-    path = f"news_source.{name}.api-key"
-    if required:
-        return get_settings().resolved(path, required=True)
-    try:
-        return get_settings().resolved(path, default=None)
-    except SettingsError:
-        return None
 
 
 def _fetch_rss(url: str, source_name: str, max_results: int = 5) -> list[dict]:
@@ -306,151 +122,125 @@ def _rss_sources_from_settings() -> list[tuple[str, callable, None, str]]:
     ]
 
 
-# --- Key-gated sources (skipped unless the env var below is set) --------
-# Deliberately NO `since` param on fetch_newsapi/fetch_perigon, unlike
-# fetch_hackernews/fetch_arxiv/fetch_gnews above -- news_ingest.py still
-# gets "everything since last pull" for these via a client-side filter on
-# published_dt instead (see its module docstring), which sidesteps two
-# real findings from live-testing this 2026-08-16:
-#   - NewsAPI's free "Developer" tier has an undocumented ~24-36h article
-#     delay -- `from=<24h ago>` returned 0 results live, `from=<36h ago>`
-#     returned 380. Since news_ingest.py pulls NewsAPI once every 24h
-#     (_SOURCE_INTERVAL_HOURS), a server-side `from=last_pulled_at` would
-#     frequently return nothing at all -- worse than today's flat top-N,
-#     not better. Client-side filtering has no such failure mode: it just
-#     takes whatever NewsAPI's own delayed index currently has and keeps
-#     what's new, so a delayed article surfaces on whichever later cycle
-#     it becomes available rather than being asked for and missed.
-#   - Perigon's date-filter behavior is simply unverified (no API key
-#     available to test against the live service, same caveat as its
-#     response-shape mapping below) -- not worth trusting an unconfirmed
-#     server-side param when the client-side filter works regardless.
+def _make_adapter_fetcher(adapter) -> callable:
+    """Adapts one already-initialize()'d adapter instance's pull() method
+    to the (query, max_results, since=None, section=None) -> list[dict]
+    shape every other source's fetch function has, so news_ingest.py's
+    existing functools.partial(fetch, since=...)/(fetch, section=...)
+    wiring (see its _pull_source) works unchanged regardless of whether
+    the callable underneath is a plain function or an adapter's bound
+    method."""
+    def fetch(query: str, max_results: int, since=None, section=None) -> list[dict]:
+        return adapter.pull(query, max_results, since=since, section=section)
+    return fetch
 
 
-def _newsapi_articles(resp) -> list[dict]:
-    """Shared by both NewsAPI endpoints -- /v2/everything for a real search
-    and /v2/top-headlines for a section pull. Same response shape."""
+def _always_on_sources() -> list[tuple[str, callable, None, str]]:
+    """hackernews/arxiv -- free, no credential, always registered
+    regardless of settings (these were never optional, unlike
+    newsapi/gnews/perigon below). Not read from news_source.api: there's
+    nothing to configure for a source with no credential and no override,
+    so routing them through the same settings-driven discovery/validation
+    as the credentialed sources would only add ceremony with no behavior
+    to justify it. Still implemented as NewsSourceAdapter classes (see
+    news_adapters/hackernews.py, arxiv.py) for consistency with the
+    credentialed sources -- just wired in directly here instead of via
+    _api_sources_from_settings."""
+    entries = [
+        ("hackernews", HackerNewsAdapter(), "forum"),
+        ("arxiv", ArxivAdapter(), "api"),
+    ]
+    for _key, adapter, _source_class in entries:
+        adapter.initialize({})
     return [
-        {
-            "title": a.get("title"),
-            "link": a.get("url"),
-            "source": (a.get("source") or {}).get("name", "NewsAPI"),
-            "summary": a.get("description"),
-            "published": a.get("publishedAt"),
-            "published_dt": _parse_iso_published(a.get("publishedAt")),
-        }
-        for a in resp.json().get("articles", [])
+        (key, _make_adapter_fetcher(adapter), None, source_class)
+        for key, adapter, source_class in entries
     ]
 
 
-def fetch_newsapi(query: str, max_results: int = 5, section: str | None = None) -> list[dict]:
-    """A `section` switches to /v2/top-headlines, which needs no query at
-    all. That matters more here than anywhere else: this source is a
-    multilingual aggregator, so an unconstrained query returns whatever
-    matches globally. Measured 2026-08-21 -- "AOI" came back half Chinese
-    (AOI is heavily covered by the Taiwanese electronics press) plus
-    Japanese anime (AOI is also a name), and "Bitcoin" returned
-    Spanish-language finance. All 65 cached articles from this source were
-    Chinese, against 1 from every other source combined."""
-    if section:
-        params = {
-            "category": section,
-            "language": "en",
-            "pageSize": max_results,
-            "apiKey": _news_source_api_key("newsapi", required=True),
-        }
-        resp = requests.get("https://newsapi.org/v2/top-headlines",
-                            params=params, timeout=10)
-        _raise_for_status(resp)
-        return _newsapi_articles(resp)
-    resp = requests.get(
-        "https://newsapi.org/v2/everything",
-        params={
-            "q": query,
-            # Pinned to English, matching fetch_gnews. Without it this
-            # source returned 65 of 65 articles in Chinese, because
-            # news_ingest._queries_for_source rotates through subscriber
-            # interest text as the query and several subscribers store
-            # theirs in Chinese (機器人科技, 科技財經, 光通訊). NewsAPI
-            # obliged; GNews didn't, purely because it had this parameter.
-            #
-            # Not a cosmetic difference. A monolingual block inside a
-            # mostly-English corpus clusters by LANGUAGE rather than
-            # subject: those 65 articles formed a 28-strong "hot topic"
-            # spanning Taiwanese stocks, optical networking, a Pixel phone
-            # review and robot touch sensors, with mean pairwise similarity
-            # 0.71 -- and they simultaneously dominated the
-            # farthest-from-everything novelty pick, since anything in
-            # another script is maximally distant from an English pool.
-            "language": "en",
-            "sortBy": "publishedAt",
-            "pageSize": max_results,
-            "apiKey": _news_source_api_key("newsapi", required=True),
-        },
-        timeout=10,
-    )
-    _raise_for_status(resp)
-    return _newsapi_articles(resp)
+def _raw_api_entries() -> list[dict]:
+    """Raw (unresolved) news_source.api entries -- reading this list via
+    Settings.resolved() directly would recursively resolve every entry's
+    api-key too, and one entry with an unresolvable credential (e.g. an
+    unset env var for a source that's intentionally not configured) would
+    raise SettingsError for the WHOLE list, taking every OTHER configured
+    source down with it. Confirmed live, not assumed: a Settings wrapping
+    a news_source.api list with one resolvable entry and one entry whose
+    api-key points at an unset env var raises the moment .resolved(
+    "news_source.api") is called, even though only the second entry is
+    actually broken.
+
+    Reading the raw list here (each entry's own trailsign-resolve nodes
+    still intact, not yet resolved) and resolving each entry's own
+    api-key independently (see _resolved_api_key) is what preserves the
+    "one bad optional credential degrades that ONE source, not the whole
+    process" contract every other optional-source path in this file has
+    always had. `key`/`type`/`interval_hours`/`daily_cap` are read
+    straight off these raw dicts elsewhere (news_ingest.py's
+    _interval_hours/_daily_cap) without going through Settings.resolved()
+    at all -- they're always plain literals in practice, never
+    trailsign-resolve nodes, so there's nothing to resolve for them."""
+    return get_settings()._raw.get("news_source", {}).get("api", [])
 
 
-def fetch_gnews(query: str, max_results: int = 5, since: datetime | None = None,
-                section: str | None = None) -> list[dict]:
-    """`since`, when given, adds GNews's documented `from` (ISO 8601) date
-    filter -- confirmed live 2026-08-16 (30 articles in a 24h window for
-    one query, all recent). Note: `max` is capped at 10/request by GNews's
-    own free tier regardless of what's asked (docs/current/ai-news-sources.md), so
-    news_ingest.py's generous safety cap for time-filterable sources just
-    gets silently clamped here, not an error."""
-    params = {"lang": "en", "max": max_results, "apikey": _news_source_api_key("gnews", required=True)}
-    if section:
-        params["topic"] = section
-    else:
-        params["q"] = query
-    if since is not None:
-        params["from"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    resp = requests.get(
-        "https://gnews.io/api/v4/top-headlines" if section else "https://gnews.io/api/v4/search",
-        params=params,
-        timeout=10,
-    )
-    _raise_for_status(resp)
-    return [
-        {
-            "title": a.get("title"),
-            "link": a.get("url"),
-            "source": (a.get("source") or {}).get("name", "GNews"),
-            "summary": a.get("description"),
-            "published": a.get("publishedAt"),
-            "published_dt": _parse_iso_published(a.get("publishedAt")),
-        }
-        for a in resp.json().get("articles", [])
-    ]
+def _resolved_api_key(entry: dict) -> str | None:
+    """Resolves one entry's own api-key node in isolation -- see
+    _raw_api_entries for why this can't just be part of a bulk
+    Settings.resolved() call on the whole list. None if unresolvable (an
+    unset env var, e.g.) -- matches this file's established "optional
+    source silently degrades" contract, never raises."""
+    try:
+        return Settings(entry).resolved("api-key", default=None)
+    except SettingsError:
+        return None
 
 
-def fetch_perigon(query: str, max_results: int = 5) -> list[dict]:
-    resp = requests.get(
-        "https://api.perigon.io/v1/all",
-        params={"q": query, "size": max_results, "apiKey": _news_source_api_key("perigon", required=True)},
-        timeout=10,
-    )
-    _raise_for_status(resp)
-    return [
-        {
-            "title": a.get("title"),
-            "link": a.get("url"),
-            "source": (a.get("source") or {}).get("domain", "Perigon"),
-            "summary": a.get("summary"),
-            "published": a.get("pubDate"),
-            "published_dt": _parse_iso_published(a.get("pubDate")),
-        }
-        for a in resp.json().get("articles", [])
-    ]
+def _api_sources_from_settings() -> list[tuple[str, callable, None, str]]:
+    """Builds the credential-gated portion of SOURCE_REGISTRY from
+    news_source.api -- one settings entry per source, each naming which
+    news_adapters/ class (its `type`) handles it. Mirrors
+    _rss_sources_from_settings's shape (default=[] via _raw_api_entries:
+    an empty/absent list is a legitimate "no optional sources configured"
+    state, not an error).
+
+    Two things happen here that _rss_sources_from_settings doesn't need:
+    (1) validate_configured_types -- fails the whole process at import
+    time if a configured `type` has no matching class under
+    news_adapters/, per the explicit "don't start the service" requirement
+    for that case; (2) per-entry credential resolution via
+    _resolved_api_key, which silently DROPS (not raises) an entry whose
+    api-key can't be resolved -- same "optional source degrades quietly"
+    contract this file has always had. Resolved once here, at
+    SOURCE_REGISTRY-build (import) time, not lazily re-checked on every
+    enabled_sources() call the way the old env-var-based gate was -- a
+    credential added or removed after import needs a re-import (a
+    process restart) to take effect, not just a settings edit. See
+    docs/standaloneplan/01-settings-migration.md for this tradeoff."""
+    configured = _raw_api_entries()
+    discovered = discover_adapter_types()
+    validate_configured_types(discovered, configured)
+
+    entries = []
+    for entry in configured:
+        resolved_entry = dict(entry)
+        if "api-key" in entry:
+            api_key = _resolved_api_key(entry)
+            if api_key is None:
+                continue
+            resolved_entry["api-key"] = api_key
+        adapter = discovered[entry["type"]]()
+        adapter.initialize(resolved_entry)
+        # Every source configured via news_source.api is real query-based
+        # search, JSON REST -- that's the "api" source_class by definition
+        # (see the SOURCE_REGISTRY comment below for what each class means).
+        entries.append((entry["key"], _make_adapter_fetcher(adapter), None, "api"))
+    return entries
 
 
 # The section vocabulary each query-capable source accepts, as an
 # alternative to a search query. The values are dictated by each API and
-# live here alongside the fetch functions that pass them; the reasoning for
-# pulling by section at all is ingestion policy and lives with it, in
+# live here alongside the source registry; the reasoning for pulling by
+# section at all is ingestion policy and lives with it, in
 # news_ingest._sections_for_source.
 #
 # Used only by news_ingest's scheduled pulls. agent.py's search_news still
@@ -492,55 +282,46 @@ SOURCE_SECTIONS: dict[str, list[str]] = {
 #   api   -- real query-based search, JSON REST
 #   rss   -- standard RSS/Atom feed, query-less (latest N regardless)
 #
-# Only the non-RSS sources are hardcoded here -- they have real per-source
-# logic (hackernews's numeric-id filter, arxiv's date-range param, the
-# three api-class sources' auth/query shapes) that doesn't reduce to
-# "a URL and a display name" the way every RSS source does. `gate` for
-# the three api-key sources is the news_source.<name> key used to build
-# the settings path (see _news_source_api_key) -- NOT a resolved value.
-# Resolving eagerly and baking the result into this tuple would freeze it
-# at import time; keeping the bare name here means enabled_sources()
-# re-checks Settings fresh on every call, same "live" semantics
-# os.environ.get() always had.
-_NON_RSS_SOURCES = [
-    ("hackernews", fetch_hackernews, None, "forum"),
-    ("arxiv", fetch_arxiv, None, "api"),
-    ("newsapi", fetch_newsapi, "newsapi", "api"),
-    ("gnews", fetch_gnews, "gnews", "api"),
-    ("perigon", fetch_perigon, "perigon", "api"),
-]
-
-SOURCE_REGISTRY = _NON_RSS_SOURCES + _rss_sources_from_settings()
+# `gate` is always None now, for every source class -- credential gating
+# for the api-class sources happens once, at _api_sources_from_settings's
+# construction time (an unresolvable credential just means that entry
+# never makes it into this list at all), not via a lazily-rechecked gate
+# value the way the old env-var-based design worked. The slot is kept
+# for tuple-shape stability (RESTRICTED_SOURCES filtering, tests, and
+# news_ingest._SOURCE_CLASS all unpack 4-tuples) even though nothing
+# reads it anymore.
+SOURCE_REGISTRY = _always_on_sources() + _api_sources_from_settings() + _rss_sources_from_settings()
 
 
-# Sources gated behind per-user access, on top of the env-var gate above --
-# not because they're technically different (they're plain "api"-class
-# sources like GNews), but because their real-world usage is constrained
-# in ways that don't scale to every caller of search_news: NewsAPI's free
-# tier is documented as development/testing only, not production
-# (docs/current/ai-news-sources.md), and Perigon's 150/month budget is already
-# fully spoken for by news_ingest.py's own scheduled pulls (3/day, see
-# docs/plans/local-news-cache-plan.md) -- search_news calling them too, on every
-# matching on-demand query from every user, would exhaust both almost
-# immediately. GNews is deliberately not here: its 100/day budget has
-# real headroom beyond what news_ingest.py alone uses.
+# Sources gated behind per-user access, on top of the credential gate
+# above -- not because they're technically different (they're plain "api"-
+# class sources like GNews), but because their real-world usage is
+# constrained in ways that don't scale to every caller of search_news:
+# NewsAPI's free tier is documented as development/testing only, not
+# production (docs/current/ai-news-sources.md), and Perigon's 150/month
+# budget is already fully spoken for by news_ingest.py's own scheduled
+# pulls (3/day, see docs/plans/local-news-cache-plan.md) -- search_news
+# calling them too, on every matching on-demand query from every user,
+# would exhaust both almost immediately. GNews is deliberately not here:
+# its 100/day budget has real headroom beyond what news_ingest.py alone
+# uses.
 RESTRICTED_SOURCES = {"newsapi", "perigon"}
 
 
 def enabled_sources(include_restricted: bool = True) -> list[tuple[str, callable]]:
-    """(name, fetch_fn) pairs usable right now: always-on free sources, plus
-    key-gated ones whose news_source.<name>.api-key is configured (see
-    _news_source_api_key). `include_restricted` additionally excludes
-    RESTRICTED_SOURCES when False -- see agent.py's search_news, the only
-    caller that ever passes False; every other caller (news_ingest.py)
-    keeps the default so it's unaffected. Same 2-tuple shape as before
-    source_class was added -- callers and tests all unpack exactly
-    (name, fn)."""
+    """(name, fetch_fn) pairs usable right now: the always-on free
+    sources, RSS sources, and any credential-gated source whose
+    news_source.api[].api-key resolved at SOURCE_REGISTRY construction
+    time (see _api_sources_from_settings). `include_restricted`
+    additionally excludes RESTRICTED_SOURCES when False -- see agent.py's
+    search_news, the only caller that ever passes False; every other
+    caller (news_ingest.py) keeps the default so it's unaffected. Same
+    2-tuple shape as before source_class was added -- callers and tests
+    all unpack exactly (name, fn)."""
     return [
         (name, fn)
-        for name, fn, gate, _source_class in SOURCE_REGISTRY
-        if (gate is None or _news_source_api_key(gate))
-        and (include_restricted or name not in RESTRICTED_SOURCES)
+        for name, fn, _gate, _source_class in SOURCE_REGISTRY
+        if include_restricted or name not in RESTRICTED_SOURCES
     ]
 
 
@@ -593,8 +374,8 @@ def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int,
             # own retention policy, not configured here -- see
             # docs/system-overview.md §C4). Belt-and-braces --
             # _raise_for_status already strips it at the source for the
-            # key-gated fetchers, but this is the last point before the value
-            # leaves the process.
+            # key-gated adapters, but this is the last point before the
+            # value leaves the process.
             span.set_attribute("error", _redact(exc))
             span.set_attribute("article_count", 0)
             raise

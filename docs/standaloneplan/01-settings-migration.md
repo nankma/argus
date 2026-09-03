@@ -194,7 +194,7 @@ Re-grepped 2026-09-01, not carried over from memory:
 | `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | ~~`agent.py`~~ | plain `os.environ` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` (and the `models.guardrail.*` mirrors) | **Migrated** 2026-09-02, `default=<literal>` in `build_model_from_config` (reasoning_effort defaults to absent, not `"none"` — that's DeepSeek-specific, set explicitly in settings.yml's own `models.main`/`models.guardrail`, not code) |
 | `LOGFIRE_ENABLED` | `agent.py` | plain `os.environ` | no | `telemetry.tracing.*` (folds into the seam-4 split, see `docs/standaloneplan/README.md` Phase 3) | Not started |
 | `LOGFIRE_API_KEY` | `agent.py`, `tools/check_logfire.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `telemetry.tracing.*` | Not started |
-| `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | ~~`news_sources.py`~~ | **`docker-entrypoint.sh` vault-fetch** (unchanged) | **yes** | `news_source.<name>.api-key` | **Migrated** 2026-09-03, `default=None` (a source with no key configured is skipped, same as an unset env var always was) -- see `news_sources._news_source_api_key`'s own docstring for a real trailsign gotcha this hit: a `trailsign-resolve` node that's *present* but points at an unset env var raises `SettingsError` even with `default=None` on the outer call -- `default=` only covers the path being absent entirely, not present-but-unresolvable. Handled by catching `SettingsError` in the gating check, not by assuming `default=` alone was enough. |
+| `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | ~~`news_sources.py`~~, now `news_adapters/{newsapi,gnews,perigon}.py` | **`docker-entrypoint.sh` vault-fetch** (unchanged) | **yes** | `news_source.api[].api-key` (see below -- reshaped from `news_source.<name>.api-key` the same day) | **Migrated** 2026-09-03, then **reshaped** 2026-09-03 into the `NewsSourceAdapter`/`news_adapters/` refactor -- see "News sources, take two" below. A source with no key configured (or an unresolvable one) is still skipped, same as an unset env var always was; the trailsign gotcha behind that (a `trailsign-resolve` node that's *present* but points at an unset env var raises `SettingsError` even with `default=None`) is now handled per-entry, not per-source-dict-key -- see `news_sources._raw_api_entries`/`_resolved_api_key`'s own docstrings for why resolving `news_source.api` as one list would have reintroduced a worse version of the same problem (one bad entry blowing up every other configured source, not just itself). |
 | `TELEGRAM_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.bot-token` | Not started — highest blast radius of the "current" set, bot startup itself depends on it |
 | `ADMIN_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.admin_bot_token` | Not started |
 | `ADMIN_CHAT_ID` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | no (an id, not a credential — still fetched the same way) | `delivery.telegram.admin_chat_id` | Not started |
@@ -281,7 +281,7 @@ not one blanket "internal, skip it":
 |---|---|---|
 | **`LOGFIRE_HOSTS`** | `agent.py` | **Architecturally misplaced, not just "maybe configurable."** It's a Logfire-specific region→host map, used only by `logfire_traces_endpoint()` — Logfire-vendor knowledge that has nothing to do with `agent.py`'s actual job (building the LangChain agent). It ended up there because `setup_telemetry()` currently lives in `agent.py` too. This should move as part of `docs/standaloneplan/README.md`'s Phase 3 (the `telemetry.events`/`telemetry.tracing` split) — once a Logfire-specific backend implementation exists behind that seam, `LOGFIRE_HOSTS`/`logfire_traces_endpoint()` belong inside *it*, not as a bare constant a deployer pokes at directly. Don't just add a setting here without doing that move first — it would cement the wrong location. |
 | `_ALLOWED_TAGS` | `telegram_html.py` | A security allowlist, and channel-specific — Telegram HTML's safe tag set isn't the same question as email's would be. Naturally belongs inside each delivery-channel's own formatter (Phase 4, the email-client work) rather than one global setting; loosening it casually is a real injection-risk, not a convenience knob. |
-| `RESTRICTED_SOURCES` | `news_sources.py` | Already tied to per-source config (`news_source.<name>.*`) once the news-source factory pattern lands (migration order step 3) — likely becomes a per-source flag there rather than a separate global set. |
+| `RESTRICTED_SOURCES` | `news_sources.py` | The news-source factory pattern landed (migration order step 3) but this stayed a separate global set, not a per-`news_source.api[]` flag as originally guessed here — it's a per-user-access policy (`docs/current/ai-news-sources.md`'s "Restricted sources" section), a different axis from "is this source configured/enabled" that `news_source.api` answers. Revisit only if that policy itself needs to become settings-driven, not as a side effect of the adapter refactor. |
 | `NOUN_TAGS`, `MIN_GLOBAL_DF`, `MIN_EXPECTED_COUNT` | `news_keyness.py` | Algorithm hyperparameters for the novelty-detection statistic, not deployment config — closer to a research/tuning knob than something a self-hoster would reach for. Could theoretically be exposed later if someone's actually experimenting with the algorithm, different category of "configurable" than the rest of this doc. |
 | `ROUTE_B_CATEGORIES` | `agent.py` | Coupled to the guardrail/routing design itself (`docs/plans/guardrails-plan.md`) — changing this changes routing/security behavior, not a sizing/cadence knob. A setting here needs guardrail-reliability re-measurement (`tools/measure_guardrails.py`) before it's safe, not just a config wire-up. |
 | `_NARROW_CHECK_CATEGORIES` | `guardrails.py` | Same reasoning as `ROUTE_B_CATEGORIES` — the two are each other's mirror across the router/output-check layers. |
@@ -332,15 +332,53 @@ them independently settable wouldn't even be coherent:
      `hackernews`/`arxiv` (real query/date-range logic) stayed hardcoded
      Python, alongside the three still-pending API-gated sources below.
    - ~~`NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY`~~ — **done**
-     2026-09-03. Turned out NOT to need the factory pattern after all --
-     each source's real per-source query/auth logic (URL, param shapes,
-     response parsing) stayed exactly where it was in `news_sources.py`;
-     only the credential (`os.environ["X_API_KEY"]` →
-     `news_source.<name>.api-key` via Settings) moved. `_NON_RSS_SOURCES`
-     now stores a settings-path fragment per gated source instead of a
-     raw env-var name, resolved fresh on every `enabled_sources()` call
-     (not cached at import) so the "unset key = source silently skipped"
-     behavior these three have always had stays exactly the same.
+     2026-09-03, in two passes the same day:
+     - **First pass**: credential-only. Turned out NOT to need the
+       factory pattern -- each source's real per-source query/auth logic
+       (URL, param shapes, response parsing) stayed exactly where it was
+       in `news_sources.py`'s `fetch_newsapi`/`fetch_gnews`/`fetch_perigon`
+       functions; only the credential (`os.environ["X_API_KEY"]` →
+       `news_source.<name>.api-key` via Settings, one dict key per
+       source) moved. `_NON_RSS_SOURCES` stored a settings-path fragment
+       per gated source instead of a raw env-var name.
+     - **Second pass, same day: the factory pattern after all.** A
+       direct follow-up request asked for exactly the plugin
+       architecture the first pass had judged unnecessary: a
+       `NewsSourceAdapter` interface (`initialize(config)`/`pull(...)`,
+       a `typing.Protocol`, structurally typed like `logfire_logger.py`'s
+       `Logger`/`LogfireLogger` -- no explicit subclassing), one class
+       per source under a new `news_adapters/` package, discovered at
+       process startup via `pkgutil.iter_modules` +
+       `inspect.getmembers` (`news_sources.discover_adapter_types`) so a
+       new source is "write the adapter file, add a settings entry," no
+       registry edit. Settings reshaped again, from separate
+       `news_source.newsapi`/`.gnews`/`.perigon` dict keys to one
+       `news_source.api: [{key, type, api-key, interval_hours,
+       daily_cap}, ...]` list -- `type` selects the adapter class,
+       `key` is the source's own registry identity (kept distinct so a
+       future second account could reuse one adapter type). A
+       misconfigured/absent `type` fails the whole process at startup
+       (`validate_configured_types`, `SettingsError`), per an explicit
+       requirement that this be loud, not silent, unlike a merely-
+       unresolvable credential (still dropped quietly, matching the
+       always-standing "optional source degrades, doesn't crash"
+       contract). `hackernews`/`arxiv` also became adapter classes for
+       consistency, but stayed OUTSIDE `news_source.api` entirely --
+       free, no credential, no override, wired in directly by
+       `news_sources._always_on_sources()` -- forcing them through the
+       same settings-driven list as the credentialed sources would only
+       have added ceremony with no real behavior to justify it.
+       **A real trailsign finding drove the settings design**: resolving
+       `news_source.api` as one list in one `Settings.resolved()` call
+       recursively resolves every entry's `api-key` too, so ONE entry
+       with an unresolvable credential (an unset env var for an
+       intentionally-off optional source) raised for the WHOLE list,
+       reintroducing a worse version of the exact problem the first
+       pass's per-source-dict-key design had avoided (see
+       `news_sources._raw_api_entries`'s own docstring). Fixed by
+       reading the list raw (unresolved) and resolving each entry's own
+       `api-key` independently, catching `SettingsError` per entry --
+       verified live before settling on this shape, not assumed.
 4. **Telegram / admin** (`TELEGRAM_BOT_TOKEN`, `ADMIN_BOT_TOKEN`,
    `ADMIN_CHAT_ID`) — deliberately last of the "current" set. Bot
    startup itself depends on these; get comfortable with the pattern on

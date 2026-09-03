@@ -40,9 +40,9 @@ redundant write harmless, but a redundant *classification call* isn't
 free the way an overwrite is.
 
 Two complementary mechanisms, not one, per source-specific findings from
-live-testing this 2026-08-16 (see news_sources.py's fetch_hackernews/
-fetch_arxiv/fetch_gnews/fetch_newsapi docstrings and comments for the
-per-source detail):
+live-testing this 2026-08-16 (see each source's own NewsSourceAdapter
+class under news_adapters/ -- HackerNewsAdapter.pull/ArxivAdapter.pull/
+GNewsAdapter.pull/NewsApiAdapter.pull -- for the per-source detail):
   - Server-side date filter (_SERVER_SIDE_SINCE_SOURCES) -- passed as the
     `since` kwarg, for the 3 sources confirmed live to support it
     correctly. Reduces payload size/wasted budget on rate-limited sources.
@@ -176,7 +176,7 @@ _TIME_FILTERABLE_CLASSES = {"forum", "api"}
 
 # Of the 5 time-filterable sources, only these 3 get the `since` kwarg
 # passed through to their fetch function (a server-side date filter) --
-# see news_sources.py's fetch_newsapi/fetch_perigon comment for why the
+# see NewsApiAdapter.pull/PerigonAdapter.pull's own comments for why the
 # other two (newsapi, perigon) deliberately don't: a free-tier delay and
 # an unverified param, respectively. All 5 still get the client-side
 # published_dt filter below regardless -- that's the mechanism actually
@@ -184,21 +184,42 @@ _TIME_FILTERABLE_CLASSES = {"forum", "api"}
 _SERVER_SIDE_SINCE_SOURCES = {"hackernews", "arxiv", "gnews"}
 
 
+def _api_entry(source_key: str) -> dict | None:
+    """This source's own news_source.api entry (raw, not credential-
+    resolved -- interval_hours/daily_cap are never trailsign-resolve
+    nodes in practice, so there's nothing to resolve for them), or None
+    if it doesn't have one -- covers RSS sources and the two always-on
+    free sources (hackernews, arxiv), neither of which are settings-
+    driven via news_source.api at all (see
+    news_sources._always_on_sources's own docstring). Reads
+    news_sources._raw_api_entries fresh on every call, same "live, not
+    cached at import" reasoning _interval_hours/_daily_cap have always
+    had -- a deployer can change an override in settings.yml and see it
+    reflected without a restart, even though which SOURCES exist at all
+    is fixed at import time (see news_sources.SOURCE_REGISTRY)."""
+    for entry in news_sources._raw_api_entries():
+        if entry.get("key") == source_key:
+            return entry
+    return None
+
+
 def _interval_hours(source_key: str) -> int:
-    """news_source.<source_key>.interval_hours -- docs/plans/local-news-cache-plan.md's
-    resolved "pull interval" question. Sources with no override in
-    Settings use DEFAULT_INTERVAL_HOURS (unrestricted sources, and GNews
-    -- its 100/day budget comfortably covers 6 pulls/day at the default
-    interval). Live lookup (not cached), same reasoning as
-    news_sources._news_source_api_key -- a deployer can add or change an
-    override in settings.yml without a code change or a restart mid-test."""
-    return get_settings().resolved(f"news_source.{source_key}.interval_hours", default=DEFAULT_INTERVAL_HOURS)
+    """news_source.api[].interval_hours for this source --
+    docs/plans/local-news-cache-plan.md's resolved "pull interval"
+    question. Sources with no override (no news_source.api entry at all,
+    or an entry with no interval_hours field) use DEFAULT_INTERVAL_HOURS
+    (unrestricted sources, and GNews -- its 100/day budget comfortably
+    covers 6 pulls/day at the default interval)."""
+    entry = _api_entry(source_key)
+    return (entry or {}).get("interval_hours", DEFAULT_INTERVAL_HOURS)
 
 
 def _daily_cap(source_key: str) -> int | None:
-    """news_source.<source_key>.daily_cap -- docs/plans/local-news-cache-plan.md's
-    Perigon/NewsAPI worked examples. None (the default) means no cap."""
-    return get_settings().resolved(f"news_source.{source_key}.daily_cap", default=None)
+    """news_source.api[].daily_cap for this source --
+    docs/plans/local-news-cache-plan.md's Perigon/NewsAPI worked
+    examples. None (the default) means no cap."""
+    entry = _api_entry(source_key)
+    return (entry or {}).get("daily_cap", None)
 
 
 def _is_source_due(source_key: str, last_pulled_at: datetime | None, now: datetime) -> bool:
