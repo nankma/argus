@@ -24,6 +24,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from app_settings import get_settings
+from ptb_error_handler import register_error_handler
 import users_db
 
 
@@ -179,6 +180,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_category_decision, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|deny):"))
     app.add_handler(MessageHandler(filters.ALL, reject_non_admin))
+    register_error_handler(app, "argus.admin_bot")
 
     print("Admin bot ready (polling). Ctrl+C to stop.")
     app.run_polling()

@@ -61,6 +61,11 @@ def test_build_info_app_wires_bot_data(monkeypatch, isolated_subscribers_db):
     for i, h in enumerate(handlers):
         if isinstance(h, CommandHandler):
             assert i < catch_all_at, f"{h.commands} must be registered before the catch-all"
+    # The global PTB backstop (bot.register_error_handler) -- catches
+    # anything a specific handler/job doesn't (see bot.py's own
+    # docstring on why). One registered handler is enough to prove it
+    # was wired up; its own behavior is tested in tests/test_bot.py.
+    assert len(app.error_handlers) == 1
 
 
 def test_build_admin_app_wires_bot_data(monkeypatch):
@@ -72,6 +77,7 @@ def test_build_admin_app_wires_bot_data(monkeypatch):
     handlers = [h for group in app.handlers.values() for h in group]
     assert any(isinstance(h, CallbackQueryHandler) for h in handlers)
     assert any(isinstance(h, MessageHandler) for h in handlers)
+    assert len(app.error_handlers) == 1
 
 
 def test_build_info_app_raises_when_the_bot_token_is_missing(monkeypatch):
