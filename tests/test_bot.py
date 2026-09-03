@@ -598,6 +598,31 @@ def test_handle_message_multi_category_dispatches_both_and_joins_replies(isolate
     assert args[0].index("Added robotics") < args[0].index("Robotics Trend Report")
 
 
+def test_process_message_logs_and_reraises_an_unhandled_pipeline_failure(isolated_subscribers_db, monkeypatch):
+    """The one place both real Telegram traffic (handle_message, which
+    has no try/except of its own around process_message) and
+    test_api.py's /test_message go through -- logging here once covers
+    both, instead of duplicating it in each caller (or, before this,
+    logging it in neither). Real incident, 2026-09-03: a live INT deploy
+    test hit exactly this kind of failure with no durable record of it
+    anywhere. Confirms both halves: the exception still propagates
+    (callers each decide their own user-facing behavior), AND it's
+    independently queryable via _events.log first."""
+    monkeypatch.setattr(bot.guardrails, "fails_local_prefilter", MagicMock(return_value=False))
+    monkeypatch.setattr(
+        bot.guardrails, "classify_message",
+        MagicMock(side_effect=RuntimeError("simulated pipeline failure")),
+    )
+    span = _patch_events_span(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="simulated pipeline failure"):
+        asyncio.run(bot.process_message(999, "What's new with OpenAI?", "fake-agent", "fake-guard-model"))
+
+    assert len(span.exceptions) == 1
+    assert isinstance(span.exceptions[0], RuntimeError)
+    assert span.attrs["chat_id"] == 999
+
+
 def test_handle_message_multi_category_blocks_whole_reply_if_any_segment_blocked(isolated_subscribers_db, monkeypatch):
     # All-or-nothing: one blocked segment redirects the whole reply rather
     # than sending a partial result -- even though the Route B state

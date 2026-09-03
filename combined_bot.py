@@ -38,6 +38,7 @@ import signal
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from agent import build_agent, build_model_from_settings, run_agent, setup_telemetry
 from app_settings import get_settings
+from ptb_error_handler import register_error_handler
 import bot as info_bot
 import admin_bot
 import news_embed
@@ -69,6 +70,7 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.add_handler(MessageHandler(filters.COMMAND, info_bot.handle_unknown_command))
     info_bot.register_push_job(app)
     info_bot.register_ingest_job(app)
+    register_error_handler(app, "argus.bot")
     return app
 
 
@@ -81,6 +83,7 @@ def build_admin_app(admin_chat_id: int, info_bot_token: str) -> Application:
     app.add_handler(CallbackQueryHandler(admin_bot.handle_category_decision, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(admin_bot.handle_decision, pattern=r"^(approve|deny):"))
     app.add_handler(MessageHandler(filters.ALL, admin_bot.reject_non_admin))
+    register_error_handler(app, "argus.admin_bot")
     return app
 
 

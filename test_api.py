@@ -6,7 +6,11 @@ Telegram client. See docs/reference/local-testing-api-plan.md.
 Calls bot.process_message directly -- the exact same guardrail/agent/
 formatting pipeline real Telegram traffic runs, not a separate
 reimplementation. handle_message and this module both call it; neither
-duplicates the pipeline itself.
+duplicates the pipeline itself. That also means process_message's own
+try/except is where an unhandled pipeline failure gets logged (once,
+via _events.log) before it re-raises -- do_POST's except block below
+only translates the re-raised exception into an HTTP response, it does
+not record it a second time.
 
 Security: the boundary is the `docker run -p 127.0.0.1:8765:8765` flag,
 NOT the bind address in this file. Binds to 0.0.0.0 *inside* the
@@ -98,6 +102,11 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             result = future.result(timeout=CALL_TIMEOUT_SECONDS)
         except Exception as exc:
+            # process_message already logged this (see bot.py) unless
+            # it's a concurrent.futures.TimeoutError -- that one means
+            # THIS call gave up waiting, not that process_message itself
+            # failed; it may still finish (or fail, and log itself) in
+            # the background after this response is sent.
             self._json_response(500, {"error": f"process_message failed: {exc!r}"})
             return
 

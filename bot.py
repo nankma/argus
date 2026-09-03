@@ -43,6 +43,7 @@ import news_push
 import telegram_html
 import test_api
 import users_db
+from ptb_error_handler import register_error_handler
 from telemetry import EventLogger, get_event_logger
 from telemetry_providers import Level
 
@@ -538,28 +539,49 @@ async def process_message(chat_id: int, user_text: str, agent, guard_model) -> d
     the way through) -- useful for a test caller to assert on without
     parsing the reply text or cross-referencing docker logs/Logfire.
     `category` is the first (or only) category classified for this turn --
-    see _process_multi_category for how more than one is handled."""
-    # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
-    # docs/plans/guardrails-plan.md for the incident this design responds to.
-    if guardrails.fails_local_prefilter(user_text):
-        return {"blocked_at": "layer1_prefilter", "category": None, "reply": guardrails.REDIRECT_MESSAGE}
+    see _process_multi_category for how more than one is handled.
 
-    # Guardrail layer 2 -- the router (docs/plans/context-management-plan.md):
-    # one structured-output call answers "is this on-topic", "what kind of
-    # request(s) is this", and (for Route B categories) the arguments each
-    # one needs -- gating the expensive agent call and, for settings
-    # categories, replacing it entirely.
-    classification = await asyncio.to_thread(guardrails.classify_message, guard_model, user_text)
-    if not classification.on_topic:
-        return {"blocked_at": "layer2_router", "category": classification.categories[0], "reply": guardrails.REDIRECT_MESSAGE}
+    Logs and re-raises on an unhandled failure ANYWHERE in the pipeline
+    below (a DeepSeek timeout, a tool call raising, guardrails.
+    classify_message itself failing outside its own internal fail-open
+    try/except) -- this is the ONE place both real Telegram traffic
+    (handle_message, which has no try/except of its own around this
+    call) and test_api.py's /test_message go through, so logging here
+    once covers both instead of duplicating it in every caller. Before
+    this, an unhandled failure here reached test_api.py's caller only as
+    an HTTP response body (nothing durable if that wasn't captured), and
+    reached handle_message's caller only via python-telegram-bot's own
+    unstructured default error logging -- neither path was queryable in
+    Logfire (PROD) or the file provider (INT), and neither showed up
+    anywhere this project's own telemetry could see. Real incident,
+    2026-09-03: a live INT deploy test hit exactly this, with no way to
+    reconstruct what happened afterward."""
+    try:
+        # Guardrail layer 1: free, local, zero-LLM-call pre-filter. See
+        # docs/plans/guardrails-plan.md for the incident this design responds to.
+        if guardrails.fails_local_prefilter(user_text):
+            return {"blocked_at": "layer1_prefilter", "category": None, "reply": guardrails.REDIRECT_MESSAGE}
 
-    history, history_timestamps = _get_trimmed_history(chat_id)
+        # Guardrail layer 2 -- the router (docs/plans/context-management-plan.md):
+        # one structured-output call answers "is this on-topic", "what kind of
+        # request(s) is this", and (for Route B categories) the arguments each
+        # one needs -- gating the expensive agent call and, for settings
+        # categories, replacing it entirely.
+        classification = await asyncio.to_thread(guardrails.classify_message, guard_model, user_text)
+        if not classification.on_topic:
+            return {"blocked_at": "layer2_router", "category": classification.categories[0], "reply": guardrails.REDIRECT_MESSAGE}
 
-    if len(classification.categories) == 1:
-        return await _process_single_category(
-            chat_id, user_text, classification.categories[0], classification, agent, guard_model, history, history_timestamps
-        )
-    return await _process_multi_category(chat_id, user_text, classification, agent, guard_model, history, history_timestamps)
+        history, history_timestamps = _get_trimmed_history(chat_id)
+
+        if len(classification.categories) == 1:
+            return await _process_single_category(
+                chat_id, user_text, classification.categories[0], classification, agent, guard_model, history, history_timestamps
+            )
+        return await _process_multi_category(chat_id, user_text, classification, agent, guard_model, history, history_timestamps)
+    except Exception as exc:
+        _events.log("process_message_failed", {"message": "unhandled pipeline failure", "chat_id": chat_id},
+                     level=Level.ERROR, exc=exc)
+        raise
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -798,6 +820,7 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
     register_push_job(app)
     register_ingest_job(app)
+    register_error_handler(app, "argus.bot")
 
     print("Telegram bot ready (polling). Ctrl+C to stop.")
     app.run_polling()

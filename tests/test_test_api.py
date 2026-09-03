@@ -87,6 +87,24 @@ def test_missing_fields_returns_400(running_server):
     assert status == 400
 
 
+def test_process_message_failure_returns_500(running_server, monkeypatch):
+    """This endpoint's own responsibility is just the HTTP translation --
+    a real exception in the pipeline becomes a 500 with the error in the
+    body. process_message itself is responsible for logging the failure
+    durably (see tests/test_bot.py's own coverage of that -- it's the
+    one place both this endpoint and real Telegram traffic go through,
+    so that's where the logging test lives, not here)."""
+    async def failing_process_message(chat_id, text, agent, guard_model):
+        raise RuntimeError("simulated pipeline failure")
+    monkeypatch.setattr(bot, "process_message", failing_process_message)
+
+    port = running_server.server_address[1]
+    status, body = _post(port, {"chat_id": 1, "text": "hello"})
+
+    assert status == 500
+    assert "simulated pipeline failure" in body["error"]
+
+
 def test_server_binds_to_all_interfaces_inside_the_container(running_server):
     """Deliberately 0.0.0.0, not 127.0.0.1 -- see test_api.py's module
     docstring. Real incident: binding to 127.0.0.1 here made the service
