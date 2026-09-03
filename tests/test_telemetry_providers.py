@@ -84,73 +84,12 @@ def test_otlp_initialize_adds_a_span_processor_not_a_new_provider(monkeypatch):
     assert isinstance(calls[0], _FakeProcessor)
 
 
-def test_otlp_instrument_langchain_only_when_asked(monkeypatch):
-    import telemetry_providers.otlp as otlp_module
-    otlp_module._langchain_instrumented = False
-    monkeypatch.setattr(otlp_module, "OTLPSpanExporter", lambda endpoint, headers: "exporter")
-    monkeypatch.setattr(otlp_module, "BatchSpanProcessor", lambda exporter: _FakeProcessor())
-
-    class _FakeProvider:
-        def add_span_processor(self, processor):
-            pass
-
-    provider = _FakeProvider()
-    # If LangChainInstrumentor were imported/called without
-    # instrument_langchain=True, this import failing (module not
-    # mocked) would raise -- proving it wasn't touched.
-    OtlpProvider().initialize({"endpoint": "x"}, provider, "llm")
-    otlp_module._langchain_instrumented = False
-
-
-def test_otlp_instrument_langchain_never_fires_on_the_general_call(monkeypatch):
-    """A dual-KIND entry with instrument_langchain: true gets
-    initialize() called once for general and once for llm (see
-    telemetry.py's _activate) -- the SAME config dict both times.
-    Without the kind=="llm" gate, the general call would also try to
-    instrument LangChain onto the general provider, which is wrong (LLM
-    spans have no business there). If LangChainInstrumentor were
-    imported/called on the kind="general" call, this import failing
-    (module not mocked) would raise -- proving it wasn't touched."""
-    import telemetry_providers.otlp as otlp_module
-    otlp_module._langchain_instrumented = False
-    monkeypatch.setattr(otlp_module, "OTLPSpanExporter", lambda endpoint, headers: "exporter")
-    monkeypatch.setattr(otlp_module, "BatchSpanProcessor", lambda exporter: _FakeProcessor())
-
-    class _FakeProvider:
-        def add_span_processor(self, processor):
-            pass
-
-    OtlpProvider().initialize({"endpoint": "x", "instrument_langchain": True}, _FakeProvider(), "general")
-    otlp_module._langchain_instrumented = False
-
-
-def test_otlp_instruments_langchain_once_when_asked(monkeypatch):
-    import telemetry_providers.otlp as otlp_module
-    otlp_module._langchain_instrumented = False
-    monkeypatch.setattr(otlp_module, "OTLPSpanExporter", lambda endpoint, headers: "exporter")
-    monkeypatch.setattr(otlp_module, "BatchSpanProcessor", lambda exporter: _FakeProcessor())
-
-    instrumented = []
-    fake_module = type(
-        "M", (), {
-            "LangChainInstrumentor": lambda: type(
-                "I", (), {"instrument": lambda self, tracer_provider: instrumented.append(tracer_provider)}
-            )()
-        }
-    )
-    monkeypatch.setitem(sys.modules, "openinference.instrumentation.langchain", fake_module)
-
-    class _FakeProvider:
-        def add_span_processor(self, processor):
-            pass
-
-    provider = _FakeProvider()
-    OtlpProvider().initialize({"endpoint": "x", "instrument_langchain": True}, provider, "llm")
-    # A second entry asking for it again must NOT double-instrument.
-    OtlpProvider().initialize({"endpoint": "y", "instrument_langchain": True}, provider, "llm")
-
-    assert instrumented == [provider]
-    otlp_module._langchain_instrumented = False
+# instrument_langchain is no longer this adapter's concern -- it moved
+# to telemetry.py's setup_telemetry(), which triggers it once at the
+# coordinator level for ANY llm-kind entry that asks for it, not just
+# otlp ones (see telemetry.py's own tests, and otlp.py's module
+# docstring for why: an otlp-only trigger meant phoenix-only configs
+# could never get LangChain traces onto the llm provider at all).
 
 
 # --- file.py ---------------------------------------------------------------

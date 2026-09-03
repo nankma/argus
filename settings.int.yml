@@ -258,9 +258,42 @@ delivery:
 # production's Logfire project/service_name across two live instances
 # would defeat the dead-man's-switch alerts and commingle trace data
 # (see local-infra/infrastructure.yaml's own note on this). If INT ever
-# needs its own telemetry, give it its OWN Logfire project (or a local
-# `file` provider instead), not PROD's -- see settings.oracle.yml's
-# telemetry: section for the shape to copy.
+# needs its own telemetry, give it its OWN Logfire project, not PROD's.
+#
+# TEMPORARY, added 2026-09-03: a deliberate live test of the just-shipped
+# pluggable telemetry_providers/ architecture, using the two providers
+# that don't touch PROD's Logfire project at all -- file (writes to the
+# persistent /data volume, no external dependency) and phoenix (a
+# self-hosted Phoenix container run on the dev machine specifically for
+# this test, NOT the old retired Phoenix VM -- see
+# telemetry_providers/phoenix.py's own docstring for why this needs no
+# arize-phoenix-otel dependency). REMOVE this whole telemetry: block once
+# the test window ends -- same "never meant to be a standing INT config"
+# reasoning as the newsapi/gnews/perigon test block that used to be
+# here (see git history), not a permanent INT telemetry setup.
+#
+# endpoint is the dev machine's LAN IP (192.168.0.26 as of this test --
+# same subnet as INT's own 192.168.0.10, confirmed reachable), not
+# localhost -- "localhost" from inside INT's own container would mean
+# INT's own machine, not the dev machine running Phoenix. Verify this
+# is still reachable from INT's actual machine before trusting it, not
+# just from the dev machine itself (Windows Firewall rules can differ
+# by source even on the same subnet).
+#
+# instrument_langchain: true on the phoenix entry -- without it, nothing
+# ever attaches LangChain's auto-instrumentation to the llm provider, so
+# Phoenix would receive zero spans despite being otherwise correctly
+# configured (see telemetry.py's setup_telemetry() and otlp.py's own
+# module docstring for the real gap this closes -- it used to be an
+# otlp-only config key).
+telemetry:
+  providers:
+    - type: file
+      path: /data/telemetry-events.log
+    - type: phoenix
+      endpoint: http://192.168.0.26:6006/v1/traces
+      project_name: myfirstagent-int-test
+      instrument_langchain: true
 
 test_api:
   enabled:
