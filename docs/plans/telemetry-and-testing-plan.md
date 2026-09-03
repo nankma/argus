@@ -12,9 +12,9 @@ they're constructed, rather than hardcoded.
 |---|------|--------|
 | 1 | Dependency injection (model + callbacks as parameters) | Done |
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
-| 3 | Telemetry service install + hook (real backend for normal runs) | Done — originally Arize Phoenix via Docker, then a second backend (Logfire) added alongside it 2026-08-21. **Superseded 2026-08-24: Phoenix retired, Logfire is now the sole live backend** (`docs/plans/observability-platform-plan.md`'s migration completed). **Updated 2026-08-30: the `PHOENIX_ENABLED` fail-open path itself is gone too, not just unused** — `agent.py`'s Phoenix branch, `telemetry_monitor.py`, `tests/test_telemetry_monitor.py`, and `tools/check_telemetry.py` were deleted outright, and `setup_telemetry()` now just resolves the Logfire endpoint and delegates to the new `logfire_logger.LogfireLogger.setup()` (see `docs/current/telemetry-catalog.md`). The row below this one (its own text, not yet updated at the time of the migration) still describes the two-backend-coexistence period as current; read it as history, not present tense. |
+| 3 | Telemetry service install + hook (real backend for normal runs) | Done — originally Arize Phoenix via Docker, then a second backend (Logfire) added alongside it 2026-08-21. Superseded 2026-08-24: Phoenix retired, Logfire the sole live backend. **Superseded again 2026-09-03: `logfire_logger.py` (a single hardcoded `LogfireLogger`) was itself replaced by a pluggable-provider architecture** — new top-level `telemetry.py` reads ONE settings list (`telemetry.providers`) and routes each entry to two internally-separate `TracerProvider`s (general app-events vs. LLM-call tracing) purely by the entry's own discovered class's `KIND`; providers (`otlp.py` — generic OTLP, covers Logfire/Grafana Cloud/SigNoz/OpenObserve; `file.py` — local JSON lines; `phoenix.py` — direct OTLP to a self-hosted Phoenix, no `arize-phoenix-otel` dependency) live under `telemetry_providers/`, auto-discovered the same way `news_adapters/` are. `logfire_logger.py`/`tests/test_logfire_logger.py` deleted outright. See `docs/standaloneplan/01-settings-migration.md`'s "Telemetry providers, take two/take three" sections for the full history (take two shipped a real double-export/kind-leak bug, caught by code review the same day; take three is the corrected, currently-live design) and `docs/current/telemetry-catalog.md` for what actually gets emitted. **`docs/current/infrastructure.md` was not updated alongside this and still describes the retired `logfire_logger.py`/`LOGFIRE_ENABLED` shape as current — stale, needs a pass.** |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
-| 5 | Test cases (actual scenarios) | Done — 683 tests as of 2026-08-30 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
+| 5 | Test cases (actual scenarios) | Done — 708 tests as of 2026-09-03 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer) |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
@@ -476,6 +476,41 @@ behaviour rather than more of an existing one:
   values are byte-identical to before (only the `print()` inside the
   `except` block changed), so this carries no guardrail-reliability risk
   and didn't need a `measure_guardrails.py` re-run to confirm.
+- **Pluggable telemetry providers (2026-09-03)** — `tests/test_telemetry.py`
+  rewritten around `telemetry.setup_telemetry()`/`get_event_logger()`;
+  `tests/test_telemetry_providers.py` is new, covering discovery/
+  validation (including a real subprocess repro of the "unknown type
+  fails the whole process at startup" contract), `otlp.py`'s
+  processor-not-provider attachment and `instrument_langchain` gating
+  (both the "only on the llm-side call" and "only once across repeat
+  entries" cases), `file.py`'s actual JSON-line writing including a
+  missing parent directory, and `phoenix.py`'s "attaches to the shared
+  provider it's given, never builds its own" contract. `tests/
+  test_telemetry.py`'s kind-isolation tests
+  (`test_dual_kind_otlp_entry_receives_both_general_and_llm_spans_from_one_config`,
+  `test_get_event_logger_llm_only_provider_never_receives_a_general_event`)
+  use real `TracerProvider`/`SimpleSpanProcessor`/`InMemorySpanExporter`
+  objects rather than mocks specifically because a mocked processor can't
+  reveal a cross-provider leak — these are what caught the take-two
+  double-export/kind-leak bug (see the Status table's row 3) and now
+  guard against a regression of it. QA re-verified 2026-09-03: 708/708
+  passing, 94% line coverage across `telemetry.py`/`telemetry_providers/`/
+  `agent.py` combined (`telemetry_providers/otlp.py`/`phoenix.py` both
+  100%). Two real gaps found and NOT yet closed (flagged back, not
+  written here per this doc's own division of labor):
+  - No test asserts `phoenix`'s `project_name` config value actually
+    lands on the llm `TracerProvider`'s `Resource` as
+    `openinference.project.name` (`telemetry.setup_telemetry`'s own
+    per-entry loop that builds `resource_attrs`). Manually verified live
+    (a real `Settings` + real `TracerProvider`, `llm_provider.resource.
+    attributes["openinference.project.name"] == "my-proj"`) — the
+    behavior is correct, just has no permanent regression test.
+  - `telemetry_providers/file.py`'s `except OSError: pass` fail-open
+    branch (lines 63-69) is untested — the file provider's one stated
+    resilience guarantee ("a logging sink must never be the reason the
+    thing it was logging about doesn't complete") has no test forcing a
+    write failure (e.g. a read-only path) and confirming `log()` doesn't
+    raise.
 
 **Not covered yet** (candidates for later):
 - ~~`agent._logfire_processor`'s actual body, and the Logfire-only wiring

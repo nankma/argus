@@ -85,13 +85,14 @@ import news_keyness
 import news_sources
 import users_db
 from opentelemetry import trace
-from logfire_logger import Level, Logger, LogfireLogger
+from telemetry import EventLogger, get_event_logger
+from telemetry_providers import Level
 
 # A no-op when no tracer provider is configured -- which is every test and
 # CI run -- because OpenTelemetry's default is a no-op tracer. Same
 # reasoning as news_push._tracer.
 _tracer = trace.get_tracer("argus.news_ingest")
-_events: Logger = LogfireLogger("argus.news_ingest")
+_events: EventLogger = get_event_logger("argus.news_ingest")
 
 # Raised from 5 to 200 on 2026-08-16 -- see module docstring. Still a real
 # cap, not "unlimited": RSS feeds are the publisher's own choice of how

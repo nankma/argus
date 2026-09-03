@@ -358,23 +358,49 @@ delivery:
       trailsign-resolve: environment-variable
       name: ADMIN_CHAT_ID
 
-# Logfire tracing -- both optional (resolved_optional in app_settings.py,
-# not required=True), since an unconfigured deployment should run
-# untelemetered, not fail to start. Real env-var bridges, not a literal
-# true/false baked in here -- toggling telemetry in production is an
-# operational lever exercised via docker_run.command's -e flags (see
-# local-infra/infrastructure.yaml's own incident history of flipping
-# LOGFIRE_ENABLED on/off), not something that should need a settings-file
-# edit and rebuild. See agent.setup_telemetry's own docstring for why
-# `enabled` is a separate gate from the credential rather than keying off
-# the key's presence alone.
-telemetry:
-  enabled:
-    trailsign-resolve: environment-variable
-    name: LOGFIRE_ENABLED
-  logfire-api-key:
-    trailsign-resolve: environment-variable
-    name: LOGFIRE_API_KEY
+# Pluggable telemetry providers (see telemetry.py, telemetry_providers/)
+# -- ONE list, telemetry.providers, empty/absent by default, same "no
+# entry means off" contract news_source.api has (validate_configured_
+# types fails the whole process at startup if a configured type has no
+# matching class under telemetry_providers/). Which category(ies) an
+# entry actually feeds -- general app-event logging (guardrails.py/
+# news_classify.py/etc.'s _events.log(...) call sites) vs. llm-call
+# tracing via auto-instrumentation -- comes from the discovered
+# provider class's own KIND, not from a separate list a deployer picks;
+# otlp's KIND is {"general","llm"}, so one otlp entry (as below) feeds
+# both from a single config line -- see telemetry.py's own module
+# docstring for why an earlier two-separate-lists version of this
+# schema was wrong (it forced the same entry to be duplicated once per
+# list, which is what caused a real double-export bug, caught by code
+# review 2026-09-03).
+#
+# Commented out here on purpose, unlike settings.oracle.yml's live
+# entry -- there is no more "enabled" boolean gate to keep this safe
+# by default the way the old telemetry.enabled/LOGFIRE_ENABLED flag did.
+# LOGFIRE_API_KEY is present in this project's development environment
+# (see docs/plans/observability-platform-plan.md), so an UNcommented
+# otlp entry here would start every local script/test run exporting
+# real spans the moment that env var resolves -- exactly the failure
+# mode the old enabled-flag design existed to prevent. Uncomment and
+# fill in your own endpoint/token to test telemetry locally.
+#
+# endpoint is a literal value, not derived from the token at runtime
+# the way it used to be (see agent.logfire_traces_endpoint) -- compute
+# it once with that function and paste the result in, per provider/
+# region. instrument_langchain attaches LangChain's auto-instrumentation
+# to the llm provider specifically (a separate internal TracerProvider
+# from general's -- see telemetry.py's own module docstring), never the
+# general one, regardless of this being one shared config entry.
+#
+# telemetry:
+#   providers:
+#     - type: otlp
+#       endpoint: https://logfire-us.pydantic.dev/v1/traces
+#       headers:
+#         Authorization:
+#           trailsign-resolve: environment-variable
+#           name: LOGFIRE_API_KEY
+#       instrument_langchain: true
 
 # test_api.py's local HTTP debug endpoint (POST /test_message) -- ships in
 # the image (see Dockerfile's COPY list) and is enabled on both INT and

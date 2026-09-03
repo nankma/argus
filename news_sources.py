@@ -343,12 +343,13 @@ def traced_fetch(source_key: str, fetch: callable, query: str, max_results: int,
     visibility" section.
 
     trace.get_tracer() returns a real tracer once agent.py's
-    setup_telemetry() has called LogfireLogger.setup() (see
-    logfire_logger.py), or a safe no-op tracer if it hasn't
-    (LOGFIRE_ENABLED unset, or setup_telemetry() never called at all,
-    e.g. in tests) -- this call has no effect either way when tracing
-    isn't configured, same "no-op by default" shape as everywhere else
-    telemetry touches this project.
+    setup_telemetry() has built the general TracerProvider (see
+    telemetry.py -- this module's spans are general-category, so it's
+    always that one, never the llm provider), or a safe no-op tracer if
+    it hasn't (telemetry.providers empty, or setup_telemetry() never
+    called at all, e.g. in tests) -- this call has no effect either way
+    when tracing isn't configured, same "no-op by default" shape as
+    everywhere else telemetry touches this project.
 
     Re-raises on fetch failure after recording it on the span -- callers
     already have their own per-source try/except (news_ingest.py,

@@ -42,14 +42,15 @@ class FakeToolCallingModel(BaseChatModel):
 
 
 class FakeSpan:
-    """Stand-in for an OTel span, for asserting on LogfireLogger.log(...)
-    calls -- monkeypatch a module's `<logger>._tracer.start_as_current_span`
-    to `lambda name: FakeSpan()` and check `.attrs`/`.exceptions` after.
-    Shared here because Part 3 of the LogfireLogger rollout (news_embed.py,
-    message_archive.py, news_ingest.py, bot.py, news_classify.py,
-    guardrails.py) needed the identical class in six test files -- keeping
-    one copy means `Logger.log()` growing a new span method only needs
-    updating here, not in lockstep across all six."""
+    """Stand-in for an OTel span, for asserting on EventLogger.log(...)
+    calls (telemetry.py) -- monkeypatch a module's
+    `<logger>._tracer.start_as_current_span` to `lambda name: FakeSpan()`
+    and check `.attrs`/`.exceptions` after. Shared here because six
+    call-site test files (news_embed.py, message_archive.py,
+    news_ingest.py, bot.py, news_classify.py, guardrails.py) need the
+    identical class -- keeping one copy means EventLogger.log() growing
+    a new span method only needs updating here, not in lockstep across
+    all six."""
 
     def __init__(self):
         self.attrs = {}

@@ -41,9 +41,15 @@ app_settings.reset_settings_for_tests(Settings({
             "admin-chat-id": {"trailsign-resolve": "environment-variable", "name": "ADMIN_CHAT_ID"},
         },
     },
+    # Empty by default -- telemetry.py's setup_telemetry() treats an
+    # empty/absent telemetry.providers the same as news_source.rss/
+    # news_source.api's empty-list default (off, not an error), which is
+    # exactly what every test/CI run needs (no test wants to actually
+    # export spans). tests/test_telemetry.py builds its own one-off
+    # Settings per test for the cases that need a real provider entry,
+    # rather than this shared fixture carrying one.
     "telemetry": {
-        "enabled": {"trailsign-resolve": "environment-variable", "name": "LOGFIRE_ENABLED"},
-        "logfire-api-key": {"trailsign-resolve": "environment-variable", "name": "LOGFIRE_API_KEY"},
+        "providers": [],
     },
     "test_api": {
         "enabled": {"trailsign-resolve": "environment-variable", "name": "ENABLE_TEST_API"},

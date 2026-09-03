@@ -46,7 +46,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # than the exporter sets is a check that always passes or always
 # fails, and 2026-08-23 was the always-fails version.
 from agent import SERVICE_NAME  # noqa: E402
-from app_settings import resolved_optional  # noqa: E402
 LOGFIRE_HOSTS = {"us": "https://logfire-us.pydantic.dev",
                  "eu": "https://logfire-eu.pydantic.dev"}
 TEST_API_PORT = 8765
@@ -125,7 +124,15 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=90)
     args = parser.parse_args()
 
-    token = resolved_optional("telemetry.logfire-api-key")
+    # Read directly from the environment rather than through Settings'
+    # telemetry.providers list: this tool queries Logfire's own read API
+    # from the local dev machine, using whatever LOGFIRE_API_KEY is set
+    # here -- the same value that ends up bridged into a
+    # settings.oracle.yml otlp entry's headers.Authorization, but
+    # reaching into that list's structure to re-derive it would couple
+    # this diagnostic tool to internal provider-config shape it has no
+    # real need to know about.
+    token = os.environ.get("LOGFIRE_API_KEY")
     if not token:
         print("FAIL: LOGFIRE_API_KEY is not set -- cannot query Logfire.")
         raise SystemExit(1)

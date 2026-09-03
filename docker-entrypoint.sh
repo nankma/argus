@@ -40,8 +40,11 @@ fi
 if [ -n "$ADMIN_CHAT_ID_SECRET_OCID" ]; then
     export ADMIN_CHAT_ID="$(fetch_secret "$ADMIN_CHAT_ID_SECRET_OCID")"
 fi
-# Resolving the secret alone does not turn tracing on -- the deployment
-# still needs LOGFIRE_ENABLED set as well (see agent.setup_telemetry).
+# Resolving this secret is what turns tracing on now -- there's no
+# separate LOGFIRE_ENABLED gate any more (telemetry.py reads
+# telemetry.providers instead; an empty/absent list is off, same as
+# not setting this secret at all). See settings.oracle.yml's own
+# telemetry: comment.
 if [ -n "$LOGFIRE_API_KEY_SECRET_OCID" ]; then
     export LOGFIRE_API_KEY="$(fetch_secret "$LOGFIRE_API_KEY_SECRET_OCID")"
 fi

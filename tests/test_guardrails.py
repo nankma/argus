@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock
 
 import guardrails
-from logfire_logger import Level
+from telemetry_providers import Level
 from tests.fakes import FakeSpan
 
 

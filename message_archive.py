@@ -21,9 +21,10 @@ from pathlib import Path
 
 import users_db
 from app_settings import get_settings
-from logfire_logger import Level, Logger, LogfireLogger
+from telemetry import EventLogger, get_event_logger
+from telemetry_providers import Level
 
-_events: Logger = LogfireLogger("argus.message_archive")
+_events: EventLogger = get_event_logger("argus.message_archive")
 
 # required=True, no default -- archiving is always on, so an absent
 # key here is a deployment mistake, not a legitimate "unset" state. See

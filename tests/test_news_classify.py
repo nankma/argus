@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import news_classify
 import users_db
-from logfire_logger import Level
+from telemetry_providers import Level
 from tests.fakes import FakeSpan
 
 # The same 13 categories users_db seeds, so these tests exercise the

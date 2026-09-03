@@ -12,8 +12,9 @@ adapters that DON'T go through news_source.api at all (no credential, no
 override -- see news_sources._always_on_sources).
 
 Concrete adapters do NOT subclass NewsSourceAdapter -- this file's
-Protocol is structural typing, same convention as logfire_logger.py's
-Logger Protocol / LogfireLogger (no explicit inheritance there either).
+Protocol is structural typing, same convention as
+telemetry_providers/__init__.py's TelemetryProvider Protocol (no
+explicit inheritance there either).
 """
 
 import importlib

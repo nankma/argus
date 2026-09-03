@@ -1,5 +1,5 @@
 import news_embed
-from logfire_logger import Level
+from telemetry_providers import Level
 from tests.fakes import FakeEmbedder, FakeSpan
 
 

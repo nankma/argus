@@ -18,7 +18,7 @@ from bot import (
     _trim_history,
     split_for_telegram,
 )
-from logfire_logger import Level
+from telemetry_providers import Level
 from tests.fakes import FakeSpan
 
 
