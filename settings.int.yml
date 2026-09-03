@@ -177,25 +177,14 @@ delivery:
       trailsign-resolve: environment-variable
       name: ADMIN_CHAT_ID
 
-# Not PROD's Logfire project -- sharing it would defeat PROD's
-# dead-man's-switch alerts and commingle trace data. TEMPORARY, added
-# 2026-09-03 for a live test of the pluggable telemetry_providers/
-# architecture: file (local, no external dependency) + phoenix (a
-# self-hosted container on the dev machine). REMOVE this block once the
-# test window ends -- not a standing INT config; see
-# local-infra/infrastructure.yaml's deploy notes and
-# docs/standaloneplan/01-settings-migration.md's "Telemetry providers"
-# sections if this needs to come back. endpoint is the dev machine's LAN
-# IP, not localhost. instrument_langchain: true is required on the
-# phoenix entry or it silently receives zero spans.
-telemetry:
-  providers:
-    - type: file
-      path: /data/telemetry-events.log
-    - type: phoenix
-      endpoint: http://192.168.0.26:6006/v1/traces
-      project_name: myfirstagent-int-test
-      instrument_langchain: true
+# No telemetry.providers here on purpose -- INT doesn't share PROD's
+# Logfire project (would defeat PROD's dead-man's-switch alerts and
+# commingle trace data). Was live TEMPORARILY, 2026-09-02 to 2026-09-04,
+# for a real test of the pluggable telemetry_providers/ architecture
+# (file + a self-hosted phoenix container); removed once that test
+# finished -- see docs/standaloneplan/01-settings-migration.md's
+# "Telemetry providers" sections for the shape to copy if this needs to
+# come back.
 
 test_api:
   enabled:
