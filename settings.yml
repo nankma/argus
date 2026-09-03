@@ -109,9 +109,10 @@ news_source:
   # Add/remove/edit a feed by editing this list, no code change --
   # news_sources._rss_sources_from_settings reads it. default=[] in code:
   # an empty list here is a legitimate (if sparse) state, not an error.
-  # hackernews/arxiv (real query/date-range logic) and newsapi/gnews/perigon
-  # (API-key-gated) are NOT here -- still hardcoded in news_sources.py, see
-  # its own module docstring for why.
+  # hackernews/arxiv (free, always-on) are NOT here -- wired in directly
+  # by news_sources._always_on_sources, see its own docstring for why.
+  # newsapi/gnews/perigon (credential-gated) live in news_source.api
+  # below instead, one entry per source.
   #
   # THIS SAME LIST MUST BE KEPT IN settings.oracle.yml TOO (byte-identical,
   # no secrets involved either way) -- production reads settings.oracle.yml
@@ -196,29 +197,47 @@ news_source:
       display_name: TechRadar
       url: https://www.techradar.com/rss
 
-  # newsapi/gnews/perigon -- unlike everything above, these three are
-  # genuinely OPTIONAL, gated sources (news_sources.enabled_sources()
-  # skips any of them whose api-key isn't configured, same as an unset
-  # env var always did -- see news_sources._news_source_api_key).
+  # api -- unlike everything above, these are genuinely OPTIONAL,
+  # credential-gated sources: [{key, type, api-key, interval_hours,
+  # daily_cap}, ...], one entry per source. `type` selects which
+  # news_adapters/*.py class (its own TYPE attribute) handles this entry;
+  # `key` is this source's own registry identity, distinct from `type` so
+  # two differently-keyed sources could someday share one adapter type
+  # (e.g. two NewsAPI accounts under different keys). An entry with an
+  # unresolvable api-key (e.g. an unset env var) is silently dropped --
+  # that ONE source is skipped, same as an unset env var always did --
+  # without taking any OTHER configured entry down with it (see
+  # news_sources._raw_api_entries's own docstring for the trailsign
+  # finding this design had to account for: resolving the whole list in
+  # one call would raise for everything the moment any single entry's
+  # credential fails to resolve).
+  #
   # Uncomment only the ones you actually have a key for; DO NOT uncomment
   # one with a placeholder/missing env var "just to have it visible" --
   # unlike storage.*/models.* (required=True, must always resolve), a
   # trailsign-resolve node that's PRESENT but points at an unset env var
-  # raises SettingsError the moment it's checked, even though the check
-  # itself uses default=None. Omitted entirely is the only way to express
-  # "I don't have this one" -- confirmed directly against trailsign, not
-  # assumed.
+  # raises SettingsError the moment it's checked, even though the entry
+  # is still dropped gracefully once caught. Omitting the entry entirely
+  # is the only way to express "I don't have this one".
   #
-  # These stay nested under the SAME news_source: key as tick_seconds/
-  # rss above (this indentation is exactly where they'd paste in) --
-  # never add a second top-level `news_source:` mapping, YAML would keep
-  # only the last one and silently drop everything above it.
+  # hackernews/arxiv are NOT listed here -- free, no credential, no
+  # override, always registered directly by news_sources.py itself (see
+  # news_sources._always_on_sources). Only credential-gated sources go
+  # in this list; a `type` that has no matching class under news_adapters/
+  # fails the whole process at startup (validate_configured_types), so
+  # don't add an entry here without a corresponding news_adapters/*.py
+  # file already shipped.
+  #
+  # This stays nested under the SAME news_source: key as tick_seconds/
+  # rss above (this indentation is exactly where it'd paste in) -- never
+  # add a second top-level `news_source:` mapping, YAML would keep only
+  # the last one and silently drop everything above it.
   #
   # interval_hours/daily_cap override news_source.default_interval_hours
   # (above) per source -- e.g. perigon's 8h/3-per-day matches its
   # 150/month budget, newsapi's 24h/1-per-day matches the individual-use
   # judgment recorded in docs/plans/local-news-cache-plan.md. Omit either
-  # field on a source to just use the global default / no cap.
+  # field on an entry to just use the global default / no cap.
   #
   # newsapi's free tier is documented as development/testing only, not
   # production (docs/current/ai-news-sources.md) -- also restricted from
@@ -228,22 +247,26 @@ news_source:
   # RESTRICTED_SOURCES. gnews is the one with real headroom (100/day) and
   # isn't restricted from live search either.
   #
-  # newsapi:
-  #   api-key:
-  #     trailsign-resolve: environment-variable
-  #     name: NEWSAPI_API_KEY
-  #   interval_hours: 24
-  #   daily_cap: 1
-  # gnews:
-  #   api-key:
-  #     trailsign-resolve: environment-variable
-  #     name: GNEWS_API_KEY
-  # perigon:
-  #   api-key:
-  #     trailsign-resolve: environment-variable
-  #     name: PERIGON_API_KEY
-  #   interval_hours: 8
-  #   daily_cap: 3
+  # api:
+  #   - key: newsapi
+  #     type: newsapi
+  #     api-key:
+  #       trailsign-resolve: environment-variable
+  #       name: NEWSAPI_API_KEY
+  #     interval_hours: 24
+  #     daily_cap: 1
+  #   - key: gnews
+  #     type: gnews
+  #     api-key:
+  #       trailsign-resolve: environment-variable
+  #       name: GNEWS_API_KEY
+  #   - key: perigon
+  #     type: perigon
+  #     api-key:
+  #       trailsign-resolve: environment-variable
+  #       name: PERIGON_API_KEY
+  #     interval_hours: 8
+  #     daily_cap: 3
 
 # Push job mechanics (bot.py's tick_seconds, news_push.py's own
 # content-selection tuning) -- distinct from subscription.* below, which

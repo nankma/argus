@@ -31,15 +31,18 @@ def _fake_classifying_model(categories_by_index=None):
 
 
 def _set_source_overrides(monkeypatch, **overrides):
-    """news_ingest._interval_hours/_daily_cap now read
-    news_source.<name>.interval_hours/.daily_cap via Settings, not a
-    hardcoded dict -- injects the per-source override a test needs, e.g.
+    """news_ingest._interval_hours/_daily_cap now read the matching entry
+    out of news_source.api (a LIST of {key, type, ...} dicts, not a
+    per-source dotted-path lookup) via news_ingest._api_entry, which
+    delegates to news_sources._raw_api_entries -- so this patches
+    news_sources.get_settings (not news_ingest's own), e.g.
     _set_source_overrides(monkeypatch, perigon={"interval_hours": 8}).
     perigon/newsapi are still real sources with real code elsewhere
-    (query-capable class, section vocab) -- only their interval/cap
-    values are settings data now."""
-    fake_settings = Settings({"news_source": overrides})
-    monkeypatch.setattr(news_ingest, "get_settings", lambda: fake_settings)
+    (query-capable class, section vocab, now in news_adapters/) -- only
+    their interval/cap values are settings data."""
+    entries = [{"key": name, "type": name, **fields} for name, fields in overrides.items()]
+    fake_settings = Settings({"news_source": {"api": entries}})
+    monkeypatch.setattr(news_sources, "get_settings", lambda: fake_settings)
 
 
 def test_is_source_due_when_never_pulled():
@@ -416,7 +419,7 @@ def test_run_ingestion_cycle_passes_since_to_server_side_since_sources(
 ):
     # hackernews is in _SERVER_SIDE_SINCE_SOURCES -- confirmed live
     # 2026-08-16 that its numericFilters date param actually works, see
-    # news_sources.fetch_hackernews's docstring. The cutoff is
+    # news_adapters.hackernews.HackerNewsAdapter.pull's docstring. The cutoff is
     # last_article_dt (newest article actually seen), not last_pulled_at
     # (wall-clock job time) -- see news_ingest.py's module docstring for
     # why that distinction matters.

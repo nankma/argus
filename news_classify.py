@@ -400,7 +400,7 @@ def normalize_interest_detailed(model, text: str, alongside: list[str] | None = 
     and classified into categories. All three of those are English-facing,
     so a non-English interest degrades quietly rather than failing:
 
-      - `fetch_gnews` pins `lang=en` and `fetch_newsapi` now does too, so
+      - `GNewsAdapter.pull` pins `lang=en` and `NewsApiAdapter.pull` now does too, so
         a Chinese query returns nothing at all. Measured: 0 articles for
         機器人科技 and 光通訊, 10 for "robotics".
       - BM25 scored **0%** recall for 光通訊 against this corpus, because

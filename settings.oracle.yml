@@ -98,10 +98,13 @@ models:
 # Bridges to the same NEWSAPI_API_KEY/GNEWS_API_KEY/PERIGON_API_KEY env
 # vars docker-entrypoint.sh already vault-fetches (via
 # NEWSAPI_API_KEY_SECRET_OCID etc.) -- same worked-example pattern as
-# models.*'s DEEPSEEK_API_KEY. All three genuinely optional -- see
-# news_sources._news_source_api_key -- but production has real keys for
-# all three, so all three are live here (with their interval_hours/
-# daily_cap overrides), unlike settings.yml's commented preview.
+# models.*'s DEEPSEEK_API_KEY. All three genuinely optional -- an entry
+# whose api-key can't resolve is dropped, not a crash (see
+# news_sources._raw_api_entries/_resolved_api_key) -- but production has
+# real keys for all three, so all three are live in news_source.api below
+# (with their interval_hours/daily_cap overrides), unlike settings.yml's
+# commented preview. `type` selects the news_adapters/*.py class that
+# handles each entry -- see news_sources.py's module docstring.
 #
 # RSS list byte-identical to settings.yml's news_source.rss -- MUST be
 # kept in sync with it; this is the file production actually reads
@@ -114,22 +117,26 @@ news_source:
   default_interval_hours: 4
   request_delay_seconds: 1.1
 
-  newsapi:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: NEWSAPI_API_KEY
-    interval_hours: 24
-    daily_cap: 1
-  gnews:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: GNEWS_API_KEY
-  perigon:
-    api-key:
-      trailsign-resolve: environment-variable
-      name: PERIGON_API_KEY
-    interval_hours: 8
-    daily_cap: 3
+  api:
+    - key: newsapi
+      type: newsapi
+      api-key:
+        trailsign-resolve: environment-variable
+        name: NEWSAPI_API_KEY
+      interval_hours: 24
+      daily_cap: 1
+    - key: gnews
+      type: gnews
+      api-key:
+        trailsign-resolve: environment-variable
+        name: GNEWS_API_KEY
+    - key: perigon
+      type: perigon
+      api-key:
+        trailsign-resolve: environment-variable
+        name: PERIGON_API_KEY
+      interval_hours: 8
+      daily_cap: 3
 
   rss:
     - key: openai_blog

@@ -1,10 +1,10 @@
 """
-Mock response data for news_sources.py fetchers, shaped to match real
-responses captured during live verification (see docs/current/ai-news-sources.md
-for when/how each source was checked). Perigon's shape is NOT independently
-verified — no API key was available to test against the real service, so
-its fixture only matches what news_sources.fetch_perigon expects, not a
-confirmed real response.
+Mock response data for news_sources.py/news_adapters/*.py fetchers,
+shaped to match real responses captured during live verification (see
+docs/current/ai-news-sources.md for when/how each source was checked).
+Perigon's shape is NOT independently verified — no API key was available
+to test against the real service, so its fixture only matches what
+PerigonAdapter.pull expects, not a confirmed real response.
 """
 
 HACKERNEWS_RESPONSE = {

@@ -340,9 +340,11 @@ hitting the same block doesn't need its own special case.
 
 ## Documented, not yet enabled (need an API key)
 
-Implemented in `news_sources.py` but skipped by `enabled_sources()` until
-the corresponding env var is set — nothing breaks if it's absent, they're
-just not called. **These are the only three sources in the registry that
+Implemented as `news_adapters/*.py` adapter classes, configured via
+`news_source.api` entries, but skipped by `enabled_sources()` until the
+corresponding env var is set — nothing breaks if it's absent, that
+source's entry is just dropped at startup (see
+`news_sources._resolved_api_key`). **These are the only three sources in the registry that
 would have covered the AAOI gap** (real query-based search across broad
 press, including financial press) — getting a free-tier key for any one
 of them is a smaller change than adding a new source, since these already
@@ -377,7 +379,7 @@ fit, not features:
 3. Send the key value in this conversation (or set it directly as an env var if working locally) and it'll be wired in: locally via `$env:GNEWS_API_KEY = "..."` for testing, and into OCI Vault following the existing secrets pattern (`docs/plans/security-plan.md` finding 2) for the deployed bot — same handling as `DEEPSEEK_API_KEY`/`TELEGRAM_BOT_TOKEN`, never as a plaintext env var in the running container.
 4. Once the key is set, `enabled_sources()` picks it up automatically — no code change needed, it's already implemented and registered.
 
-**After GNews is working and verified live** (confirm the response shape actually matches what `fetch_gnews` expects — per this doc's standing rule, verify before trusting), Perigon is the natural second pick if broader coverage is still wanted. NewsAPI stays parked unless a paid plan is actually being considered.
+**After GNews is working and verified live** (confirm the response shape actually matches what `GNewsAdapter.pull` expects — per this doc's standing rule, verify before trusting), Perigon is the natural second pick if broader coverage is still wanted. NewsAPI stays parked unless a paid plan is actually being considered.
 
 ## Restricted sources: NewsAPI and Perigon require per-user access
 
@@ -466,10 +468,10 @@ rejected on a docs page's word alone.
 3. Add a row to the appropriate table above.
 4. **Test it live before trusting it** — several entries in this doc exist because a docs page or search summary turned out to be wrong (see `CLAUDE.md` for the DeepSeek-model-retirement false alarm and the OK Surf News API response-shape mismatch from earlier in this project's history). Check the HTTP status, the actual item count via `feedparser` (not a raw string search — see the Nikkei Asia note above), and how stale `lastBuildDate` is before adding it. `news_sources._make_rss_fetcher(url, "Source Name")()` in a throwaway Python shell is the quickest way to check.
 
-**A source with real per-source logic** (a query parameter, a date-range filter, an API key, pagination — anything `_fetch_rss(url, name, max_results)` alone can't express) — this still needs code, same as before:
+**A source with real per-source logic** (a query parameter, a date-range filter, an API key, pagination — anything `_fetch_rss(url, name, max_results)` alone can't express) needs a `NewsSourceAdapter` class under `news_adapters/`, not a hardcoded registry entry:
 
-1. Write a function matching the shape `fetch_x(query: str, max_results: int = 5) -> list[dict]`, returning a list of `{"title", "link", "source", "summary", "published"}` dicts (any field can be `None` if the source doesn't provide it).
-2. Add `("name", fetch_x, gate_or_None, "class")` to `_NON_RSS_SOURCES` in `news_sources.py`, where `class` is `"forum"` or `"api"` per the table above. `gate` is `"name"` if it needs an API key (matching `news_source.<name>.api-key` in Settings — see step 3), or `None` if it doesn't (like hackernews/arxiv).
-3. If it needs an API key, read it inside the function via `_news_source_api_key("name", required=True)` (see `fetch_newsapi`/`fetch_gnews`/`fetch_perigon` for the pattern) — `enabled_sources()` will skip it automatically until `news_source.<name>.api-key` is configured in settings.yml. Add the same `news_source.<name>.api-key: {trailsign-resolve: environment-variable, name: YOUR_ENV_VAR_NAME}` block to `settings.oracle.yml` (live) if production has the key, and to `settings.yml` (commented, as a preview) otherwise — **never include the block in a file where the underlying env var genuinely won't be set**, that raises `SettingsError` rather than gracefully skipping (see `news_sources._news_source_api_key`'s own docstring).
+1. Write `news_adapters/<name>.py` declaring a class with `TYPE = "<name>"`, `initialize(self, config: dict) -> None` (store `config["api-key"]` if the source needs one; a no-op otherwise), and `pull(self, query: str, max_results: int, since: datetime | None = None, section: str | None = None) -> list[dict]`, returning a list of `{"title", "link", "source", "summary", "published", "published_dt"}` dicts (any field can be `None` if the source doesn't provide it). `since`/`section` must both be accepted even if the adapter ignores them (see `PerigonAdapter` — no `since`, no `section`), to satisfy the Protocol shape uniformly. `news_sources.discover_adapter_types()` picks the class up automatically at process startup by scanning `news_adapters/` for classes with a `TYPE` attribute — no registry to edit by hand.
+2. If it needs an API key, add an entry to `news_source.api` in `settings.oracle.yml` (live, if production has the key) and `settings.yml` (commented, as a preview otherwise): `{key: <name>, type: <name>, api-key: {trailsign-resolve: environment-variable, name: YOUR_ENV_VAR_NAME}}` — **never include the block in a file where the underlying env var genuinely won't be set**; an entry whose credential can't resolve is silently dropped (that source stays off), not a crash (see `news_sources._raw_api_entries`/`_resolved_api_key`'s own docstrings), but a `type` with no matching adapter class under `news_adapters/` fails the whole process at startup (`validate_configured_types`) — ship the adapter file first.
+3. If it needs no credential and should always be on (like `hackernews`/`arxiv`), wire it in directly via `news_sources._always_on_sources()` instead of a `news_source.api` entry — there's nothing to configure for a source with no credential and no override.
 4. Add a row to the appropriate table above.
 5. Test it live before trusting it, same as step 4 above.
