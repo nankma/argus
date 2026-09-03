@@ -4,7 +4,7 @@ from pathlib import Path
 
 import message_archive
 import users_db
-from logfire_logger import Level
+from telemetry_providers import Level
 from tests.fakes import FakeSpan
 
 NOW = datetime(2026, 8, 28, 12, 0, 0, tzinfo=timezone.utc)

@@ -43,16 +43,21 @@ WORKDIR /app
 # supposed to when SETTINGS_FILE isn't explicitly configured for
 # production (see docs/standaloneplan/01-settings-migration.md). Don't
 # add it back without re-reading that reasoning first.
-COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py app_settings.py news_sources.py news_cache.py news_classify.py news_embed.py news_keyness.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py logfire_logger.py guardrails.py users_db.py test_api.py telegram_html.py message_archive.py settings.oracle.yml settings.int.yml docker-entrypoint.sh ./
-# news_sources.py imports from this package -- a directory can't sit in
-# the flat file list above (COPY needs its own destination), so it needs
-# its own line. Missed once already (2026-09-02, caught by deploy-engineer
-# before it reached INT: the file-list COPY above silently skips anything
-# not named in it, no error, so the image built "successfully" without
-# this package and every import of news_sources crash-looped the
-# container at startup) -- if a future package gets added the same way
-# news_adapters/ was, it needs a line here too, not just an entry above.
+COPY --chown=$MAMBA_USER:$MAMBA_USER agent.py app_settings.py news_sources.py news_cache.py news_classify.py news_embed.py news_keyness.py news_ingest.py news_push.py bot.py admin_bot.py combined_bot.py telemetry.py guardrails.py users_db.py test_api.py telegram_html.py message_archive.py settings.oracle.yml settings.int.yml docker-entrypoint.sh ./
+# news_sources.py/telemetry.py each import from their own package -- a
+# directory can't sit in the flat file list above (COPY needs its own
+# destination), so each needs its own line. Missed once already
+# (2026-09-02, caught by deploy-engineer before it reached INT: the
+# file-list COPY above silently skips anything not named in it, no
+# error, so the image built "successfully" without news_adapters/ and
+# every import of news_sources crash-looped the container at startup)
+# -- confirmed as a repeat class of bug, not a one-off, when
+# telemetry_providers/ was added the same way and initially missed here
+# too (caught by code review before it ever reached a build). If a
+# future package gets added the same way, it needs a line here too, not
+# just a file entry above.
 COPY --chown=$MAMBA_USER:$MAMBA_USER news_adapters ./news_adapters
+COPY --chown=$MAMBA_USER:$MAMBA_USER telemetry_providers ./telemetry_providers
 RUN chmod +x docker-entrypoint.sh
 
 # Real incident, 2026-08-09: `docker logs` returned zero lines for this

@@ -43,9 +43,10 @@ import news_push
 import telegram_html
 import test_api
 import users_db
-from logfire_logger import Level, Logger, LogfireLogger
+from telemetry import EventLogger, get_event_logger
+from telemetry_providers import Level
 
-_events: Logger = LogfireLogger("argus.bot")
+_events: EventLogger = get_event_logger("argus.bot")
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 

@@ -16,12 +16,17 @@ catching attribute-shape drift, not for deciding what belongs here.
 ## Service name
 
 The code sets exactly one: `myfirstagent`, via
-`Resource.create({"service.name": SERVICE_NAME})` in `agent.py`'s
+`Resource.create({"service.name": SERVICE_NAME})` in `telemetry.py`'s
 `setup_telemetry()` (also forced onto `OTEL_SERVICE_NAME` before any
-provider is built — see `LogfireLogger.setup()`'s own docstring for why
-that ordering still matters even with only one backend). Every span
-below is under this service; nothing in the current codebase produces
-any other `service_name`.
+provider is built — see that function's own docstring for why that
+ordering still matters). `agent.setup_telemetry()` is now a one-line
+delegate to `telemetry.setup_telemetry()` — see that module and
+`telemetry_providers/` (the pluggable-provider package, same
+auto-discovery pattern as `news_adapters/`) for how the exporter/
+instrumentation actually gets built; this doc only describes what gets
+emitted, which is unchanged by that refactor. Every span below is under
+this one service; nothing in the current codebase produces any other
+`service_name`.
 
 ## `level`, `tags`, and `message` — two mechanisms, not one
 
@@ -29,25 +34,29 @@ Two different ways a span reaches Logfire, with different `level`/
 `message` behavior:
 
 **Plain OTel spans** (`tracer.start_as_current_span(...)` directly, no
-`logfire_logger.py` involved — e.g. every span in the table below except
-the eleven `*_failed` events) never set level explicitly. Logfire derives
-`level=17` (ERROR) automatically whenever a span's `otel_status_code` is
-`ERROR` (an exception propagated out of the `with` block uncaught);
-everything else defaults to `level=9` (INFO). `message` for these spans
-exactly equals `span_name` — Logfire's default rendering when a span
-carries no explicit message template. **The real content is in
-`attributes`, never in `message`**, for this kind of span.
+`telemetry.EventLogger` involved — e.g. every span in the table below
+except the eleven `*_failed` events) never set level explicitly. Logfire
+derives `level=17` (ERROR) automatically whenever a span's
+`otel_status_code` is `ERROR` (an exception propagated out of the `with`
+block uncaught); everything else defaults to `level=9` (INFO). `message`
+for these spans exactly equals `span_name` — Logfire's default rendering
+when a span carries no explicit message template. **The real content is
+in `attributes`, never in `message`**, for this kind of span.
 
-**`LogfireLogger.log(...)` spans** (`logfire_logger.py` — the eleven
-`*_failed` events below) set `level`/`tags`/`message` explicitly, via
-three Logfire-recognized attribute keys verified live against a real
-`records` query (not documented in Logfire's own public docs for
-plain-OTel senders, so worth recording here for the next span that wants
-this):
+**`EventLogger.log(...)` spans** (`telemetry.py` — the eleven `*_failed`
+events below, via each module's own `_events = get_event_logger(...)`)
+set `level`/`tags`/`message` explicitly, via three Logfire-recognized
+attribute keys verified live against a real `records` query (not
+documented in Logfire's own public docs for plain-OTel senders, so worth
+recording here for the next span that wants this). These three keys are
+Logfire-specific vendor behavior, unconditionally set regardless of
+which `telemetry_providers/*.py` backend(s) are actually configured —
+harmless extra attributes to any other OTLP-compatible receiver that
+doesn't recognize them:
 
 - `logfire.level_num` (int) — sets the native `level` column directly,
   not limited to OTel span status's OK/ERROR binary. This project uses
-  `logfire_logger.Level`'s five values (TRACE=1, INFO=9, WARN=13,
+  `telemetry_providers.Level`'s five values (TRACE=1, INFO=9, WARN=13,
   ERROR=17, FATAL=21) — WARN is real here, unlike the plain-OTel spans
   above where it can never appear.
 - `logfire.tags` (tuple/list of str) — sets the native `tags` column (a
@@ -71,11 +80,13 @@ attributes.
 | `ingest_source_pull` | `argus.news_ingest` | `news_ingest._pull_source` | `pull.source`, `pull.outcome` (`not_due`/`budget_exhausted`/`success`/`failed`), `pull.expected_interval_hours`, `pull.sections_attempted`, `pull.sections_failed` | Once per source per ingest cycle, for every registered source regardless of outcome | `argus ingest pull stalled`, `argus ingest pull failures`, `argus ingest source stale`. **Zero spans observed in the 30-day window as of 2026-08-30** — the code shipped 2026-08-29 but the ingest job's post-deploy dispatch hang (see this project's `project-ingest-hang-post-deploy-20260825` memory) has prevented it from ever running successfully since |
 | `fetch_source` | `news_sources` | `news_sources.traced_fetch` | `source_key`, `section` (query-capable sources) or `query` (RSS), `restricted` (bool), `article_count` (int), `error` (only present on failure, redacted of API keys — see `_redact`) | Once per section fetch attempt — nests as a child span inside `ingest_source_pull` (or under `search_news` when called from the agent's on-demand tool) | Not read by any alert directly today — the closest is `argus ingest pull failures`, which reads the coarser `ingest_source_pull.pull.outcome='failed'` instead. This is the natural place to add a section-level failure-count alert later if `ingest pull failures`' source-level granularity ever turns out too coarse |
 
-### `LogfireLogger`-emitted events (all `level`/`message` set explicitly — see above)
+### `EventLogger`-emitted events (all `level`/`message` set explicitly — see above)
 
 Eleven `except ... as exc:` sites that previously only reached
 `docker logs` via a bare `print()`, converted to `_events.log(...)` calls
-(`logfire_logger.py`) so each failure mode is independently queryable
+(`telemetry.get_event_logger(...)`, fanning out to every configured
+`telemetry.providers[]` entry whose `KIND` includes `"general"` — see
+`telemetry.py`) so each failure mode is independently queryable
 (`WHERE span_name = '<event>'`) instead of needing a `docker logs` grep.
 Every row also carries `otel.status_code=ERROR` and a recorded exception
 (`span.record_exception`), on top of the `logfire.level_num` shown.
@@ -101,9 +112,12 @@ candidates for one, given the incident they're already tied to.
 ## Auto-instrumented spans (not hand-written — `openinference-instrumentation-langchain`)
 
 Everything under `otel_scope_name = 'openinference.instrumentation.langchain'`
-is produced automatically by `auto_instrument=True` wiring up the agent's
-LangGraph/LangChain execution (`agent.py`'s `setup_telemetry()`) — this
-project never names these spans itself. Seen in the last 30 days:
+is produced automatically by an `otlp`-type `telemetry.providers[]`
+entry's `instrument_langchain: true` config wiring up the agent's
+LangGraph/LangChain execution onto `telemetry.py`'s internal llm
+`TracerProvider` (`telemetry_providers/otlp.py`, called from
+`telemetry.setup_telemetry()`) — this project never names these spans
+itself. Seen in the last 30 days:
 `ChatDeepSeek`, `RunnableSequence`, `PydanticToolsParser`, `tools`,
 `model`, `search_news`, `LangGraph`, `save_note`, `FakeToolCallingModel`
 (test-only). None of these are read by any alert today — `argus model

@@ -192,8 +192,8 @@ Re-grepped 2026-09-01, not carried over from memory:
 | `DEEPSEEK_API_KEY` | ~~`tools/measure_guardrails.py`, `tools/run_eval.py`, `agent.py` (implicitly via `ChatDeepSeek`)~~ | **`docker-entrypoint.sh` vault-fetch** (via `DEEPSEEK_API_KEY_SECRET_OCID`, unchanged) | **yes** | `models.main.api-key` / `models.guardrail.api-key` | **Migrated** 2026-09-02 — see methodology rule 3, this was the worked example |
 | `LLM_MODEL` / `LLM_MODEL_CLASSIFIER` | ~~`agent.py` (`build_model`)~~ | plain `os.environ` | no | `models.main.model` / `models.guardrail.model` | **Migrated** 2026-09-02 — `build_model`/`init_chat_model` removed outright, not kept alongside; the new `agent.build_model_from_config` is provider-generic (any OpenAI-wire-compatible endpoint via `ChatOpenAI`), superseding the LangChain-provider-registry approach `model-portability-plan.md` originally described, not just feeding it |
 | `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | ~~`agent.py`~~ | plain `os.environ` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` (and the `models.guardrail.*` mirrors) | **Migrated** 2026-09-02, `default=<literal>` in `build_model_from_config` (reasoning_effort defaults to absent, not `"none"` — that's DeepSeek-specific, set explicitly in settings.yml's own `models.main`/`models.guardrail`, not code) |
-| `LOGFIRE_ENABLED` | ~~`agent.py`~~ | plain `os.environ` | no | `telemetry.enabled` | **Migrated** 2026-09-03, `resolved_optional` (fails open — an unset env var means untelemetered, not a startup error). Flat `telemetry.*`, not the originally-sketched `telemetry.tracing.*` — there's only one telemetry backend (Logfire) today, no second sub-concern to make room for by nesting one level deeper; can nest later if that changes. Stays an env-var bridge, not a literal `true`/`false` baked into `settings.oracle.yml`/`settings.int.yml` — toggling this in production is an operational lever exercised via `docker_run.command`'s `-e` flags (see `local-infra/infrastructure.yaml`'s own incident history of flipping it), not something that should need a settings-file edit and rebuild. |
-| `LOGFIRE_API_KEY` | ~~`agent.py`, `tools/check_logfire.py`~~ | **`docker-entrypoint.sh` vault-fetch** | **yes** | `telemetry.logfire-api-key` | **Migrated** 2026-09-03, `resolved_optional`, same reasoning as `LOGFIRE_ENABLED` above |
+| `LOGFIRE_ENABLED` | ~~`agent.py`~~ | plain `os.environ` | no | ~~`telemetry.enabled`~~, now `telemetry.providers[]` (see below) | **Migrated** 2026-09-03 to flat `telemetry.enabled`/`.logfire-api-key`, `resolved_optional` (fails open). **Reshaped** 2026-09-03, same day, into the pluggable-provider refactor below (take two: `telemetry.general[]`/`telemetry.llm[]`), then **reshaped again** the same day (take three: ONE list, `telemetry.providers[]`, routed by each entry's own `KIND` — see below for why take two's two-list schema was itself a real bug). There is no more separate `enabled` boolean at all now — see below for why an empty provider list replaces it. |
+| `LOGFIRE_API_KEY` | ~~`agent.py`, `tools/check_logfire.py`~~ | **`docker-entrypoint.sh` vault-fetch** | **yes** | ~~`telemetry.logfire-api-key`~~, now nested inside a `telemetry.providers[]` entry's `headers.Authorization` (see below) | **Migrated** 2026-09-03, then **reshaped twice** 2026-09-03 (same day) into the pluggable-provider refactor -- see "Telemetry providers, take two" and "take three" below |
 | `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | ~~`news_sources.py`~~, now `news_adapters/{newsapi,gnews,perigon}.py` | **`docker-entrypoint.sh` vault-fetch** (unchanged) | **yes** | `news_source.api[].api-key` (see below -- reshaped from `news_source.<name>.api-key` the same day) | **Migrated** 2026-09-03, then **reshaped** 2026-09-03 into the `NewsSourceAdapter`/`news_adapters/` refactor -- see "News sources, take two" below. A source with no key configured (or an unresolvable one) is still skipped, same as an unset env var always was; the trailsign gotcha behind that (a `trailsign-resolve` node that's *present* but points at an unset env var raises `SettingsError` even with `default=None`) is now handled per-entry, not per-source-dict-key -- see `news_sources._raw_api_entries`/`_resolved_api_key`'s own docstrings for why resolving `news_source.api` as one list would have reintroduced a worse version of the same problem (one bad entry blowing up every other configured source, not just itself). |
 | `TELEGRAM_BOT_TOKEN` | ~~`bot.py`, `combined_bot.py`, `admin_bot.py`~~ | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.bot-token` | **Migrated** 2026-09-03, `required=True` (unchanged bracket-access-equivalent semantics — a bot that can't authenticate to Telegram should fail loudly at startup) |
 | `ADMIN_BOT_TOKEN` | ~~`bot.py`, `combined_bot.py`, `admin_bot.py`~~ | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.admin-bot-token` | **Migrated** 2026-09-03, `required=True`. Path uses a hyphen (`admin-bot-token`), not the underscore this table originally sketched (`admin_bot_token`) — normalized to match `bot-token`'s own hyphen and this codebase's broader `api-key`-style hyphenated-field convention. |
@@ -225,6 +225,164 @@ specifically about env-var ordering before any Settings/provider exists,
 migrating it would defeat the test's own point), `OMP_NUM_THREADS`
 (`docs/analysis/tools/build_taxonomy.py`, an analysis tool outside the
 image, not part of the running service).
+
+### Telemetry providers, take two: `telemetry.enabled` reshaped into pluggable `telemetry.general[]`/`telemetry.llm[]` — SUPERSEDED, see "take three" below
+
+**This subsection describes the FIRST reshape, kept as history.** Code
+review caught a real bug in it hours later — double-exporting every
+span to Logfire, and an llm-only provider silently receiving general
+app-event spans — and it was corrected the same day into the one-list
+`telemetry.providers[]` schema. See "Telemetry providers, take three"
+further down for the corrected, currently-live design; the rest of
+this subsection is left as originally written, so the reasoning that
+seemed right at the time (and why it turned out wrong) isn't lost.
+
+Same day as the migration above, and same reasoning class as `news_source.api`'s
+own reshape (see `NEWSAPI_API_KEY`'s row above) — a single-backend,
+boolean-gated design (`telemetry.enabled` + `telemetry.logfire-api-key`,
+hardcoded to Logfire) got replaced with a `NewsSourceAdapter`-style
+pluggable-provider mechanism once it became clear more than one telemetry
+backend, and two DIFFERENT capability concerns (general app-event logging
+vs. LLM-call tracing specifically), needed to be independently
+configurable — Phoenix, Grafana Cloud, SigNoz, OpenObserve, a local
+file all being real candidates, not just Logfire.
+
+New package `telemetry_providers/` (structurally identical to
+`news_adapters/`: a `TelemetryProvider` Protocol, `pkgutil`/`importlib`
+auto-discovery, `validate_configured_types` failing the whole process at
+startup if a configured `type` has no matching class). Three providers
+shipped this batch: `otlp` (generic — endpoint/headers only, covers
+Logfire/Grafana Cloud/SigNoz/OpenObserve/Phoenix's own OTLP ingestion,
+`KIND={"general","llm"}`), `file` (writes JSON lines to a local file, no
+OTel involved, `KIND={"general"}` only), `phoenix` (`KIND={"llm"}` only —
+see below for why it needs no `arize-phoenix-otel` dependency at all,
+deliberately deviating from an earlier plan to use that package).
+`langfuse`/`openlit` were discussed as future candidates but not built —
+no stub files, just an open extension point.
+
+New top-level `telemetry.py` replaces `logfire_logger.py` (deleted
+outright, no compat shim — same "clean delete" precedent this project
+already set for `telemetry_monitor.py`'s Phoenix retirement) — its
+`setup_telemetry()` builds ONE shared `TracerProvider` per process and
+attaches every configured provider's own processor/instrumentation to
+it via `add_span_processor` (additive), and `get_event_logger(scope)`
+replaces `LogfireLogger(scope)` at all eleven `_events = ...` call
+sites, fanning out each `.log(...)` call to every configured
+non-span-based general provider while emitting exactly one shared span
+regardless of how many span-based ones (otlp entries) are configured --
+OTel's own multi-processor delivery already fans that one span out to
+all of them; calling per-provider would double-export.
+
+**No more `telemetry.enabled` boolean.** Two independent lists,
+`telemetry.general`/`telemetry.llm`, each `default=[]` — an empty list
+IS "off" for that category, same contract `news_source.rss`/
+`news_source.api` already have. `settings.oracle.yml` (PROD,
+`LOGFIRE_ENABLED=true` today) got live entries in both lists, pointed at
+Logfire; `settings.int.yml` (INT, `LOGFIRE_ENABLED` deliberately never
+set — see `local-infra/infrastructure.yaml`'s own note on why sharing
+PROD's Logfire project would defeat the dead-man's-switch alerts) got no
+`telemetry:` section at all, same "absent means off" shape as an
+unconfigured `news_source.api`; `settings.yml` (local dev) got a
+commented preview — **NOT live**, unlike the old
+`telemetry.enabled`/`.logfire-api-key` shape, which safely relied on the
+separate `enabled` flag to stay off even though `LOGFIRE_API_KEY` is
+present in this project's dev environment. Without that flag, an
+uncommented live entry here would start every local script/test run
+exporting real spans the moment that env var resolves — the exact
+failure the old design's `enabled` gate existed to prevent. This is the
+one real, deliberate behavior-shape change from the reshape: the
+"off by default even with a credential present" safety net moved from
+an explicit flag to "don't put a live entry in the file," same as every
+other optional Settings section in this project already works.
+
+`endpoint` is now a literal value in Settings, not derived from the
+token's region at runtime the way `agent.setup_telemetry()` used to
+(`agent.logfire_traces_endpoint`) — `telemetry_providers/otlp.py` takes
+whatever `endpoint` config says, no vendor-specific logic. That function
+still exists in `agent.py`, kept as a standalone deployer's tool (run it
+once against a real token to get the value to paste into settings), just
+no longer called automatically.
+
+**Deviation from the original plan, backed by evidence not assumption:**
+`telemetry_providers/phoenix.py` does NOT use `arize-phoenix-otel` at
+all, despite that being the original intent when this batch started.
+Directly inspecting `phoenix.otel.register()`'s actual implementation
+(installed into a scratch directory outside this project's environment,
+purely to read the source) showed it unconditionally builds and returns
+its OWN `TracerProvider` subclass — there is no parameter to hand it an
+existing provider to attach to instead, and that subclass is the same
+one whose "silently discards its own default processor unless told not
+to" behavior caused the real dual-write incident this whole redesign
+exists to avoid (see `docs/plans/observability-platform-plan.md`).
+Sidestepping `register()` avoids that failure class at the root: Phoenix
+ingests plain OTLP under the hood, so `phoenix.py` builds a plain
+`OTLPSpanExporter` pointed at Phoenix's endpoint and attaches it to the
+same shared provider every other provider uses — identical shape to
+`otlp.py`, needing nothing beyond `opentelemetry-sdk`/
+`opentelemetry-exporter-otlp-proto-http`, both already required
+dependencies. Nothing new went into `environment.yml` for this.
+
+### Telemetry providers, take three: ONE list, `telemetry.providers[]`, routed by KIND — the currently-live design
+
+Found by code review, same day (2026-09-03), hours after "take two"
+shipped: **two separate settings lists for two capability categories
+was itself a bug, not just a design preference.** `otlp`'s `KIND` is
+`{"general","llm"}` — a deployer wanting one Logfire project to receive
+both general app-events and LLM-call traces had to write the SAME
+`type: otlp` / `endpoint` / `headers` entry out TWICE, once under
+`telemetry.general` and once under `telemetry.llm` (exactly what
+`settings.oracle.yml`'s live config did). Combined with the take-two
+implementation building one SHARED `TracerProvider` for everything,
+this meant every span got exported to Logfire twice, and a genuinely
+llm-only provider (Phoenix) silently received every general-category
+span too, since nothing scoped a processor to the list its entry came
+from. Confirmed with a real, not mocked, OTel repro
+(`TracerProvider`/`InMemorySpanExporter`): two processors registered
+the way a general entry and an llm entry each would, one span emitted
+the way `EventLogger.log()` does — both processors received it.
+
+**The fix collapses to ONE settings list, `telemetry.providers[]`.**
+Each entry is just `{type, ...config}` — no `general:`/`llm:` split at
+all. `telemetry.py`'s coordinator determines what an entry does purely
+from its discovered class's own `KIND`: `"general"` in `KIND` routes it
+to an internal general `TracerProvider`; `"llm"` in `KIND` routes it to
+an internal llm `TracerProvider`; a dual-KIND entry (otlp) gets routed
+to BOTH from the one config line — `initialize()` is called once per
+applicable internal provider, on a FRESH provider-class instance each
+time (never the same instance twice), so a dual-KIND entry ends up with
+two genuinely independent processors, not one shared unsafely between
+categories. `TelemetryProvider.initialize()`'s signature grew a third
+parameter, `kind: str` ("general" or "llm"), so a provider like otlp can
+tell which call this is -- load-bearing for `instrument_langchain`
+specifically: without checking `kind == "llm"`, a dual-KIND entry with
+`instrument_langchain: true` would also instrument LangChain onto the
+GENERAL provider on its general-side call, which makes no sense (LLM
+spans have no business there).
+
+The two internal `TracerProvider` objects themselves are unchanged from
+take two's intent (that part was correct) -- genuinely separate
+providers is still what makes the general/llm categories actually
+isolated at the OTel level; only the SETTINGS SHAPE (one list vs. two)
+and the routing mechanism (by KIND, not by which list a deployer chose)
+changed. `validate_configured_types` simplified alongside this -- it
+only checks a configured `type` exists at all now; there's no more
+"configured under the wrong list" case to check, since there's no
+longer a list a deployer can put an entry under incorrectly.
+
+`settings.oracle.yml` shrank to ONE `otlp` entry (`instrument_langchain:
+true`), replacing the take-two duplicate-entry-under-both-lists shape --
+this alone is direct proof the new schema removes the double-export bug
+at the config level, not just internally. `settings.yml`'s commented
+preview and `settings.int.yml`'s "no telemetry section" state both
+updated the same way. Three new/rewritten empirical tests in
+`tests/test_telemetry.py` (real `TracerProvider`/`SimpleSpanProcessor`/
+`InMemorySpanExporter`, not mocks) prove: a dual-KIND `otlp` entry
+genuinely receives both categories from one config entry (two
+independent exporters, not a shared one); an llm-only provider
+(`phoenix`) never receives a general-category event even when
+configured in the same list as a general-only provider (`file`). See
+`telemetry.py`'s own module docstring for the full mechanism -- this
+paragraph is the abbreviated tracking-doc version.
 
 ## Hardcoded constants (beyond `os.environ`) — surveyed 2026-09-01, not migrated
 

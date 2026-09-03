@@ -26,15 +26,14 @@ Run:
 """
 
 import json
-import os
 from datetime import datetime, timezone
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 from langchain.agents.middleware import dynamic_prompt
 from langchain.tools import ToolRuntime
 from langchain_openai import ChatOpenAI
-from app_settings import get_settings, resolved_optional
-from logfire_logger import LogfireLogger
+from app_settings import get_settings
+import telemetry
 import news_classify
 import news_sources
 import users_db
@@ -499,14 +498,22 @@ def run_agent(
 
 # --- Telemetry -------------------------------------------------------------
 
-# Logfire's ingest host is regional and the region is encoded in the write
-# token's own prefix (pylf_v1_us_ / pylf_v2_us_ / ..._eu_), so the endpoint
-# is derived rather than configured -- one fewer env var to get wrong, and
-# it cannot disagree with the credential it authenticates.
-# The name every telemetry backend groups by, and every query filters
-# on. One constant so the exporter and the checks cannot disagree.
-SERVICE_NAME = "myfirstagent"
+# Owned by telemetry.py now (the pluggable-provider coordinator -- see
+# that module and telemetry_providers/) -- re-exported here so existing
+# callers (agent.SERVICE_NAME, agent.setup_telemetry) keep working
+# unchanged. setup_telemetry() itself is a thin delegate; the real
+# implementation (reading telemetry.providers, routing each entry to
+# the right internal TracerProvider(s) by its own KIND, fanning events
+# out to every configured general-kind provider) lives in telemetry.py,
+# not here.
+SERVICE_NAME = telemetry.SERVICE_NAME
 
+# Logfire's ingest host is regional and the region is encoded in the write
+# token's own prefix (pylf_v1_us_ / pylf_v2_us_ / ..._eu_). Kept as a
+# standalone helper -- NOT called by setup_telemetry() below anymore,
+# since telemetry_providers/otlp.py takes its endpoint directly from
+# Settings rather than deriving it at runtime (a deployer computes the
+# right value once, with this function, and puts it in settings.yml).
 LOGFIRE_HOSTS = {"us": "https://logfire-us.pydantic.dev",
                  "eu": "https://logfire-eu.pydantic.dev"}
 
@@ -517,7 +524,10 @@ _LOGFIRE_PREFIX_LEN = len("pylf_v2_us_")
 
 
 def logfire_traces_endpoint(token: str) -> str:
-    """OTLP/HTTP traces URL for whichever region `token` belongs to.
+    """OTLP/HTTP traces URL for whichever region `token` belongs to. A
+    deployer's tool, not runtime logic -- run this once to compute the
+    endpoint value for a telemetry.providers otlp entry in settings.yml,
+    see this section's own module-level comment.
 
     Raises rather than guessing a default: an unrecognised prefix means the
     token format changed, and quietly sending US-region traffic to a token
@@ -534,48 +544,15 @@ def logfire_traces_endpoint(token: str) -> str:
 
 
 def setup_telemetry():
-    """Wires up tracing to Logfire, or does nothing.
-
-    `telemetry.enabled` (bridges to LOGFIRE_ENABLED) is required even
-    though `telemetry.logfire-api-key` (LOGFIRE_API_KEY) alone would be
-    enough to export, because the key is present in the development
-    environment: keying off the credential would turn every local script
-    and test run into a live exporter. Tests/CI set neither env var, so
-    resolved_optional's fail-open behavior means they never reach a
-    collector. Both stay real env-var bridges rather than a literal
-    value baked into settings.oracle.yml/settings.int.yml, since toggling
-    telemetry on/off in production is an operational lever exercised via
-    docker_run.command -e flags (see local-infra/infrastructure.yaml's
-    own incident history of flipping this), not something that should
-    need a settings-file edit and rebuild to change."""
-    # Set before any provider is built, because the OTel SDK reads it when
-    # it constructs the default Resource and never revisits it. Not
-    # strictly required now that LogfireLogger.setup() always sets
-    # service.name explicitly on its own Resource -- kept anyway as the
-    # general discipline LogfireLogger's own docstring asks callers to
-    # follow (a portable class shouldn't assume it's the only thing
-    # touching OTel setup), and as a real regression test still covers.
-    #
-    # setdefault, not assignment: a deployment that wants a different name
-    # per instance should be able to say so from the outside.
-    os.environ.setdefault("OTEL_SERVICE_NAME", SERVICE_NAME)
-
-    if not resolved_optional("telemetry.enabled"):
-        return None
-
-    token = resolved_optional("telemetry.logfire-api-key")
-    if not token:
-        # Loud, because the alternative is a bot that looks instrumented
-        # and silently isn't -- the failure this whole plan exists to
-        # prevent.
-        raise RuntimeError("LOGFIRE_ENABLED is set but LOGFIRE_API_KEY is not")
-
-    return LogfireLogger.setup(
-        service_name=SERVICE_NAME,
-        token=token,
-        endpoint=logfire_traces_endpoint(token),
-        instrument_langchain=True,
-    )
+    """Delegates to telemetry.setup_telemetry() -- see that module for
+    the real implementation. Kept as a one-line wrapper here (rather
+    than updating every caller to `import telemetry` directly) since
+    bot.py/combined_bot.py/tools/run_eval.py all already import
+    setup_telemetry from agent alongside build_agent/run_agent/etc.,
+    and none of that has anything to do with telemetry specifically --
+    no reason to make them import a second module just for this one
+    function."""
+    return telemetry.setup_telemetry()
 
 
 # --- CLI chat interface ----------------------------------------------------

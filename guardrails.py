@@ -39,9 +39,10 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from logfire_logger import Level, Logger, LogfireLogger
+from telemetry import EventLogger, get_event_logger
+from telemetry_providers import Level
 
-_events: Logger = LogfireLogger("argus.guardrails")
+_events: EventLogger = get_event_logger("argus.guardrails")
 
 REDIRECT_MESSAGE = (
     "I only help with tech industry news and this bot's own subscription "

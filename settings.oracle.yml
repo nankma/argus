@@ -250,13 +250,47 @@ delivery:
       trailsign-resolve: environment-variable
       name: ADMIN_CHAT_ID
 
+# Pluggable telemetry providers (see telemetry.py, telemetry_providers/)
+# -- replaces the old telemetry.enabled/telemetry.logfire-api-key
+# boolean-gated shape. There is no more separate "enabled" flag: an
+# entry with an unresolvable credential is silently dropped (same
+# contract news_source.api's api-key resolution already has), so the
+# SAME operational lever the old LOGFIRE_ENABLED flag gave --
+# turning telemetry on/off via docker_run.command without a
+# settings-file edit or rebuild -- now works by adding/removing
+# LOGFIRE_API_KEY_SECRET_OCID (or the resolved LOGFIRE_API_KEY it
+# produces) from that command, not a second flag. Simpler than before:
+# local-infra/infrastructure.yaml's own history has an incident from
+# LOGFIRE_ENABLED and LOGFIRE_API_KEY_SECRET_OCID getting out of sync
+# (one set without the other); one lever instead of two closes that.
+#
+# ONE list, telemetry.providers -- not a separate list per category.
+# otlp's KIND is {"general","llm"}, so this single entry gets routed to
+# BOTH internally (telemetry.py builds two separate TracerProviders and
+# initializes a fresh OtlpProvider instance against each one, so the
+# two categories still get independent processors -- see telemetry.py's
+# own module docstring for the real incident, caught by code review
+# 2026-09-03, that an earlier two-separate-lists version of this schema
+# caused: the same Logfire entry had to be written out TWICE, once per
+# list, which is exactly the config duplication that produced a
+# double-export). One line here now gets both general app-events
+# (guardrails.py/news_classify.py/etc.'s _events.log(...) sites) and
+# the LLM-call trace tree (agent -> tool -> LLM, via
+# instrument_langchain) reaching this one Logfire project.
+#
+# endpoint is a literal value, computed once with
+# agent.logfire_traces_endpoint(token) from this project's real
+# LOGFIRE_API_KEY -- verified as the us region, see
+# docs/plans/observability-platform-plan.md.
 telemetry:
-  enabled:
-    trailsign-resolve: environment-variable
-    name: LOGFIRE_ENABLED
-  logfire-api-key:
-    trailsign-resolve: environment-variable
-    name: LOGFIRE_API_KEY
+  providers:
+    - type: otlp
+      endpoint: https://logfire-us.pydantic.dev/v1/traces
+      headers:
+        Authorization:
+          trailsign-resolve: environment-variable
+          name: LOGFIRE_API_KEY
+      instrument_langchain: true
 
 test_api:
   enabled:

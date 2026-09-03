@@ -251,13 +251,16 @@ delivery:
       trailsign-resolve: environment-variable
       name: ADMIN_CHAT_ID
 
-telemetry:
-  enabled:
-    trailsign-resolve: environment-variable
-    name: LOGFIRE_ENABLED
-  logfire-api-key:
-    trailsign-resolve: environment-variable
-    name: LOGFIRE_API_KEY
+# No telemetry.providers section here, deliberately -- same "absent
+# means off" contract news_source.api/news_source.rss already have when
+# a deployer configures nothing (default=[]). INT's docker_run.command
+# has never set LOGFIRE_API_KEY -- not an oversight: sharing
+# production's Logfire project/service_name across two live instances
+# would defeat the dead-man's-switch alerts and commingle trace data
+# (see local-infra/infrastructure.yaml's own note on this). If INT ever
+# needs its own telemetry, give it its OWN Logfire project (or a local
+# `file` provider instead), not PROD's -- see settings.oracle.yml's
+# telemetry: section for the shape to copy.
 
 test_api:
   enabled:

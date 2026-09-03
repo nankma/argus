@@ -24,9 +24,10 @@ from functools import cached_property
 
 from pydantic import BaseModel
 
-from logfire_logger import Level, Logger, LogfireLogger
+from telemetry import EventLogger, get_event_logger
+from telemetry_providers import Level
 
-_events: Logger = LogfireLogger("argus.news_classify")
+_events: EventLogger = get_event_logger("argus.news_classify")
 
 
 @dataclass(frozen=True)

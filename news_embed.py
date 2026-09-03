@@ -35,9 +35,10 @@ either the embedder or a specific article's embedding is unavailable.
 
 import os
 
-from logfire_logger import Level, Logger, LogfireLogger
+from telemetry import EventLogger, get_event_logger
+from telemetry_providers import Level
 
-_events: Logger = LogfireLogger("argus.news_embed")
+_events: EventLogger = get_event_logger("argus.news_embed")
 
 # model2vec's own encode() already L2-normalizes its output (confirmed by
 # measurement: every vector's norm is 1.0), which is what makes a plain

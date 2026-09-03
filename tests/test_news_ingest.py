@@ -10,7 +10,7 @@ import news_keyness
 import news_push
 import news_sources
 import users_db
-from logfire_logger import Level
+from telemetry_providers import Level
 from tests.fakes import FakeEmbedder, FakeSpan
 
 

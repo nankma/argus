@@ -20,14 +20,28 @@ SSH key pair.
 | Public IP | see `local-infra/infrastructure.yaml` | see `local-infra/infrastructure.yaml` (changes on stop/start — this is an ephemeral, not reserved, public IP) |
 | Private IP | `10.0.0.7` | `10.0.0.234` |
 
-**Telemetry is Logfire now, not Phoenix.** `agent.setup_telemetry()`
-sends spans straight to Logfire's cloud API (`LOGFIRE_ENABLED`/
-`LOGFIRE_API_KEY`) via `logfire_logger.py`'s `LogfireLogger` — no second
-VM, no self-hosted collector, no OTLP hop across the private subnet. The
+**Telemetry is Logfire now, not Phoenix.** `telemetry.setup_telemetry()`
+(moved out of `agent.py` and out of `logfire_logger.py`'s old
+`LogfireLogger` — see `telemetry.py`/`telemetry_providers/` for the
+current pluggable-provider architecture, one class per backend, this
+project's own `news_adapters/`-style plugin pattern) sends spans
+straight to Logfire's cloud API via `telemetry_providers/otlp.py`, a
+generic OTLP exporter configured from `settings.oracle.yml`'s
+`telemetry.providers` list (one `type: otlp` entry, endpoint + a
+`LOGFIRE_API_KEY`-bridged `Authorization` header) — no second VM, no
+self-hosted collector, no OTLP hop across the private subnet. There is
+no more `LOGFIRE_ENABLED` flag: telemetry is on/off purely by whether
+`telemetry.providers` has an entry (an env var that fails to resolve —
+e.g. a missing `LOGFIRE_API_KEY_SECRET_OCID`/`LOGFIRE_API_KEY` — drops
+that one entry silently, same "optional config degrades quietly"
+contract every other pluggable-adapter list in this project has). The
 bot VM's `docker run` has carried no `PHOENIX_*` vars since 2026-08-23;
 the Phoenix code path itself (`phoenix.otel.register()`, `PHOENIX_ENABLED`/
 `PHOENIX_ENDPOINT`, `telemetry_monitor.py`) was removed from this repo
-entirely, not just left unused.
+entirely, not just left unused. (A `telemetry_providers/phoenix.py`
+adapter exists again as of 2026-09-03, but it's for local/dev testing
+against a self-hosted Phoenix container — PROD's `settings.oracle.yml`
+does not configure it, and nothing here changes PROD's own topology.)
 
 **The second VM (`instance-mnk-phoenix-20260808-1012` in
 `local-infra/infrastructure.yaml`'s `vm_phoenix` entry) still exists —
