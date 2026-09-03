@@ -25,6 +25,25 @@ pass first, per that rule.
   100/day budget has headroom beyond what ingest alone uses (see
   `news_sources.py`'s own comment) -- shouldn't compete with PROD's usage.
 
+- [ ] **Move `push_outcomes` from a DB table to a log, not a DB record.**
+  Currently a SQLite table in `subscribers.db` (`users_db.py`) -- one row
+  per push attempt (chat_id, outcome, recorded_at, detail), pruned by
+  `storage.push_outcomes_ttl_days`. Doesn't make sense to "remember"
+  this relationally: it's an event stream (what happened, once), not
+  state a subscriber has -- a better fit for this project's existing
+  `LogfireLogger`/`logfire_logger.py` pattern (already used throughout
+  for exactly this kind of "record that X happened" event), queried via
+  Logfire instead of SQL.
+  Before implementing: find and account for every current reader --
+  at least the "ratio alarm" (failure rate in the last 24h across all
+  subscribers) and the "consecutive-failure alarm" (a subscriber's last
+  N outcomes) both query this table directly today; moving to a log
+  means redesigning how those two queries work against Logfire (or
+  whatever the log backend ends up being), not just swapping the write
+  side. Also: if the table goes away, `storage.push_outcomes_ttl_days`
+  (just added, 2026-09-03) goes away too or gets repointed at whatever
+  the new retention mechanism is -- don't leave it orphaned.
+
 - [ ] **Design: switch `search_news` from live source fetch to searching
   downloaded/ingested content.** Currently `search_news` fetches live,
   per query, from `news_sources.enabled_sources()` (excludes

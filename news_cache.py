@@ -34,8 +34,8 @@ from app_settings import get_settings
 # should fail loudly at startup, not silently fall back to anything
 # (including the old NEWS_CACHE_DIR env var). See
 # docs/standaloneplan/01-settings-migration.md's "Migration methodology".
-CACHE_DIR = get_settings().resolved("storage.news_cache_dir", required=True)
-DEFAULT_TTL_HOURS = 48
+CACHE_DIR = get_settings().resolved("storage.news_cache_dir.path", required=True)
+DEFAULT_TTL_HOURS = get_settings().resolved("storage.news_cache_dir.ttl_hours", default=48)
 
 # Where expired articles go instead of being deleted. Unset (the default)
 # keeps the original behaviour -- cleanup_expired unlinks them.

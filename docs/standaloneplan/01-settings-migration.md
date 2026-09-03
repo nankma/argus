@@ -227,26 +227,26 @@ it be set).
 
 | Constant | File | Controls | Status |
 |---|---|---|---|
-| ~~`PUSH_TICK_SECONDS = 900`~~ | `bot.py` | Push heartbeat cadence | **Not started** — deliberately separate from the ingest batch below (push scheduling, not news-source fetching); destined for its own `push.*` section alongside `news_push.py`'s batch, not `news_source.*` |
+| ~~`PUSH_TICK_SECONDS = 900`~~ | `bot.py` | Push heartbeat cadence | **Migrated** 2026-09-03 → `push.tick_seconds` — first real entry in `push.*`, still mostly reserved for `news_push.py`'s own batch |
 | ~~`INGEST_TICK_SECONDS = 900`~~ | `bot.py` | Ingest periodic-check cadence | **Migrated** 2026-09-03 → `news_source.tick_seconds` |
 | ~~`DEFAULT_INTERVAL_HOURS = 4`~~ | `news_ingest.py` | Default per-source pull interval | **Migrated** → `news_source.default_interval_hours` |
 | ~~`_SOURCE_INTERVAL_HOURS`~~ | `news_ingest.py` | Per-source interval overrides (dict) | **Migrated, redesigned** — no longer a dict; each source's override is `news_source.<name>.interval_hours`, nested in that source's own block (alongside its `api-key`), not a separate global mapping. `_interval_hours()` does a live per-source lookup. |
 | ~~`_DAILY_CAPS`~~ | `news_ingest.py` | Per-source daily API-call budget (dict) | **Migrated, same redesign** → `news_source.<name>.daily_cap` |
 | ~~`REQUEST_DELAY_SECONDS = 1.1`~~ | `news_ingest.py` | Rate-limit delay between source requests | **Migrated** → `news_source.request_delay_seconds` |
-| `DEFAULT_TTL_HOURS = 48` | `news_cache.py` | Article cache retention | Not started (next batch — `storage.news_cache_ttl_hours`) |
-| `DEFAULT_TTL_DAYS = 7` | `message_archive.py` | Message archive retention | Not started (next batch — `storage.message_archive_ttl_days`) |
+| ~~`DEFAULT_TTL_HOURS = 48`~~ | `news_cache.py` | Article cache retention | **Migrated, redesigned same day** → `storage.news_cache_dir.ttl_hours` — first landed as a flat sibling key (`storage.news_cache_ttl_hours`), then renested inside `news_cache_dir` itself (`{path, ttl_hours}`) to co-locate the retention setting with the directory it prunes, same pattern as `news_source.<name>.interval_hours`. Real gotcha hit doing this: a `trailsign-resolve` node collapses ENTIRELY to the resolver's return value, so `ttl_hours` can't be a sibling of `trailsign-resolve` inside the same dict (confirmed live — it silently vanishes) — it has to nest under `path` specifically, one level below where `trailsign-resolve` lives. This is *why* `settings.oracle.yml`/`settings.int.yml` need the extra `path:` layer that `settings.yml` doesn't strictly require (no `trailsign-resolve` there) but uses anyway for consistency across all three files. |
+| ~~`DEFAULT_TTL_DAYS = 7`~~ | `message_archive.py` | Message archive retention | **Migrated, same redesign** → `storage.message_archive_dir.ttl_days` |
 | ~~`DEFAULT_PUSH_INTERVAL_HOURS = 24` / `MIN_PUSH_INTERVAL_HOURS = 1`~~ | `users_db.py` | Subscriber push-frequency default/floor | **Migrated** → `subscription.default_interval_hours` / `subscription.min_interval_hours` — a subscriber-preference concern, not push mechanics, hence `subscription.*` not `push.*` |
 | ~~`PUSHED_LINK_RETENTION_HOURS = 72`~~ | `users_db.py` | How long "already seen" dedup memory lasts | **Migrated** → `subscription.pushed_link_retention_hours` |
 | ~~`CATEGORY_PROPOSAL_THRESHOLD = 5`~~ | `users_db.py` | Sightings needed before proposing a new category | **Migrated** → `categories.proposal_threshold` — the category-taxonomy-proposal feature got its own top-level section, kept isolated from `subscription.*` |
 | ~~`MAX_INTERESTS = 10`~~ | `users_db.py` | Per-subscriber interest cap | **Migrated** → `subscription.max_interests` |
-| `MAX_HTML_ATTEMPTS = 3` | `news_push.py` | HTML-validation retry budget | Not started |
-| `NEAR_DUPLICATE_SIMILARITY = 0.95` | `news_push.py` | Near-dup collapse threshold | Not started |
-| `MAX_ARTICLE_AGE_HOURS = 168` | `news_push.py` | How stale an article can be and still get pushed | Not started |
-| `UNREACHABLE_STRIKES = 3` | `news_push.py` | Retries before giving up on a subscriber | Not started |
+| ~~`MAX_HTML_ATTEMPTS = 3`~~ | `news_push.py` | HTML-validation retry budget | **Migrated** 2026-09-03 → `push.max_html_attempts` |
+| ~~`NEAR_DUPLICATE_SIMILARITY = 0.95`~~ | `news_push.py` | Near-dup collapse threshold | **Migrated** → `push.near_duplicate_similarity` |
+| ~~`MAX_ARTICLE_AGE_HOURS = 168`~~ | `news_push.py` | How stale an article can be and still get pushed | **Migrated** → `push.max_article_age_hours` |
+| ~~`UNREACHABLE_STRIKES = 3`~~ | `news_push.py` | Retries before giving up on a subscriber | **Migrated** → `push.unreachable_strikes` |
 | `CALL_TIMEOUT_SECONDS = 60` | `test_api.py` | Dev-tool only, low priority, same reasoning as the others | Not started |
-| **`MAX_ARTICLES_PER_TOPIC = 5`** | `news_push.py` | **Tied to this deployment's own cloud sizing** — see below | Not started |
-| **`MAX_INTERESTS_PER_PUSH = 5`** | `news_push.py` | same | Not started |
-| **`RELEVANCE_KEEP_FRACTION/MIN/MAX`, `NOVELTY_RELEVANCE_KEEP_FRACTION/MIN/MAX`** | `news_push.py` | same | Not started |
+| ~~`MAX_ARTICLES_PER_TOPIC = 5`~~ | `news_push.py` | Tied to this deployment's own cloud sizing — see below | **Migrated** → `push.max_articles_per_topic` |
+| ~~`MAX_INTERESTS_PER_PUSH = 5`~~ | `news_push.py` | same | **Migrated** → `push.max_interests_per_push` |
+| ~~`RELEVANCE_KEEP_FRACTION/MIN/MAX`, `NOVELTY_RELEVANCE_KEEP_FRACTION/MIN/MAX`~~ | `news_push.py` | same | **Migrated** → `push.relevance_keep.{fraction,min,max}` / `push.novelty_relevance_keep.{fraction,min,max}` |
 | ~~`CATEGORY_SIGHTING_RETENTION_DAYS = 30`~~ | `users_db.py` | same | **Migrated** → `categories.sighting_retention_days` (moved out of the "tied to cloud sizing" framing -- it's the category-proposal feature's own retention window, not a sizing knob) |
 | ~~`PUSH_OUTCOME_RETENTION_DAYS = 90`~~ | `users_db.py` | same | **Migrated, redesigned** → `storage.push_outcomes_ttl_days` — reframed as a storage/retention concern (alongside `news_cache_dir` etc.), not a push-behavior or subscription setting, and renamed to match the `_ttl_` convention planned for `news_cache.py`/`message_archive.py`'s retention values above |
 
