@@ -41,15 +41,15 @@ process_message is a coroutine.
 
 import asyncio
 import json
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from app_settings import resolved_optional
 import bot as info_bot
 import users_db
 
 HOST = "0.0.0.0"
-PORT = int(os.environ.get("TEST_API_PORT", "8765"))
+PORT = int(resolved_optional("test_api.port", default=8765))
 CALL_TIMEOUT_SECONDS = 60
 
 
@@ -120,7 +120,7 @@ def start(agent, guard_model) -> _Server | None:
     returned server on shutdown. Must be called from the thread running
     the bot's asyncio event loop, so it can capture the loop via
     asyncio.get_running_loop() for run_coroutine_threadsafe to target."""
-    if not os.environ.get("ENABLE_TEST_API"):
+    if not resolved_optional("test_api.enabled"):
         return None
     loop = asyncio.get_running_loop()
     server = _Server(loop, agent, guard_model)

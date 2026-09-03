@@ -18,12 +18,12 @@ Run:
 """
 
 import html
-import os
 from datetime import datetime, timezone
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from app_settings import get_settings
 import users_db
 
 
@@ -173,9 +173,9 @@ async def handle_category_decision(update: Update, context: ContextTypes.DEFAULT
 
 def main():
     users_db.init_db()
-    app = Application.builder().token(os.environ["ADMIN_BOT_TOKEN"]).build()
-    app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
-    app.bot_data["info_bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+    app = Application.builder().token(get_settings().resolved("delivery.telegram.admin-bot-token", required=True)).build()
+    app.bot_data["admin_chat_id"] = int(get_settings().resolved("delivery.telegram.admin-chat-id", required=True))
+    app.bot_data["info_bot_token"] = get_settings().resolved("delivery.telegram.bot-token", required=True)
     app.add_handler(CallbackQueryHandler(handle_category_decision, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|deny):"))
     app.add_handler(MessageHandler(filters.ALL, reject_non_admin))

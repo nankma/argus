@@ -34,6 +34,28 @@ def test_setup_telemetry_ignores_a_logfire_key_without_the_enable_flag(monkeypat
     assert calls == []
 
 
+def test_setup_telemetry_treats_the_literal_string_false_as_enabled(monkeypatch):
+    """Historical-compatibility edge case, preserved deliberately across
+    the delivery/telemetry Settings migration: LOGFIRE_ENABLED was always
+    a bare presence check (`if not os.environ.get(...)`), so ANY
+    non-empty string enabled it, including the literal text "false" --
+    not real boolean parsing. resolved_optional() carries that same
+    semantics forward (it returns the raw resolved string, not a parsed
+    bool), so this must still come out enabled. Real deployments have
+    only ever set this to "true" (see local-infra/infrastructure.yaml),
+    so this edge case has never mattered in practice -- but a future
+    refactor that "fixes" this into real boolean parsing would silently
+    change behavior with nothing here to catch it."""
+    monkeypatch.setenv("LOGFIRE_ENABLED", "false")
+    monkeypatch.setenv("LOGFIRE_API_KEY", "pylf_v2_us_" + "x" * 40)
+    calls = []
+    monkeypatch.setattr(LogfireLogger, "setup", classmethod(lambda cls, **kwargs: calls.append(kwargs)))
+
+    agent.setup_telemetry()
+
+    assert len(calls) == 1
+
+
 def test_setup_telemetry_raises_when_enabled_without_a_key(monkeypatch):
     """Loud rather than silent: a bot that looks instrumented and isn't is
     the exact failure this plan exists to prevent."""

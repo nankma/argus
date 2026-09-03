@@ -192,13 +192,31 @@ Re-grepped 2026-09-01, not carried over from memory:
 | `DEEPSEEK_API_KEY` | ~~`tools/measure_guardrails.py`, `tools/run_eval.py`, `agent.py` (implicitly via `ChatDeepSeek`)~~ | **`docker-entrypoint.sh` vault-fetch** (via `DEEPSEEK_API_KEY_SECRET_OCID`, unchanged) | **yes** | `models.main.api-key` / `models.guardrail.api-key` | **Migrated** 2026-09-02 — see methodology rule 3, this was the worked example |
 | `LLM_MODEL` / `LLM_MODEL_CLASSIFIER` | ~~`agent.py` (`build_model`)~~ | plain `os.environ` | no | `models.main.model` / `models.guardrail.model` | **Migrated** 2026-09-02 — `build_model`/`init_chat_model` removed outright, not kept alongside; the new `agent.build_model_from_config` is provider-generic (any OpenAI-wire-compatible endpoint via `ChatOpenAI`), superseding the LangChain-provider-registry approach `model-portability-plan.md` originally described, not just feeding it |
 | `LLM_REASONING_EFFORT` / `LLM_REQUEST_TIMEOUT_SECONDS` | ~~`agent.py`~~ | plain `os.environ` | no | `models.main.reasoning_effort` / `models.main.request_timeout_seconds` (and the `models.guardrail.*` mirrors) | **Migrated** 2026-09-02, `default=<literal>` in `build_model_from_config` (reasoning_effort defaults to absent, not `"none"` — that's DeepSeek-specific, set explicitly in settings.yml's own `models.main`/`models.guardrail`, not code) |
-| `LOGFIRE_ENABLED` | `agent.py` | plain `os.environ` | no | `telemetry.tracing.*` (folds into the seam-4 split, see `docs/standaloneplan/README.md` Phase 3) | Not started |
-| `LOGFIRE_API_KEY` | `agent.py`, `tools/check_logfire.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `telemetry.tracing.*` | Not started |
+| `LOGFIRE_ENABLED` | ~~`agent.py`~~ | plain `os.environ` | no | `telemetry.enabled` | **Migrated** 2026-09-03, `resolved_optional` (fails open — an unset env var means untelemetered, not a startup error). Flat `telemetry.*`, not the originally-sketched `telemetry.tracing.*` — there's only one telemetry backend (Logfire) today, no second sub-concern to make room for by nesting one level deeper; can nest later if that changes. Stays an env-var bridge, not a literal `true`/`false` baked into `settings.oracle.yml`/`settings.int.yml` — toggling this in production is an operational lever exercised via `docker_run.command`'s `-e` flags (see `local-infra/infrastructure.yaml`'s own incident history of flipping it), not something that should need a settings-file edit and rebuild. |
+| `LOGFIRE_API_KEY` | ~~`agent.py`, `tools/check_logfire.py`~~ | **`docker-entrypoint.sh` vault-fetch** | **yes** | `telemetry.logfire-api-key` | **Migrated** 2026-09-03, `resolved_optional`, same reasoning as `LOGFIRE_ENABLED` above |
 | `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `PERIGON_API_KEY` | ~~`news_sources.py`~~, now `news_adapters/{newsapi,gnews,perigon}.py` | **`docker-entrypoint.sh` vault-fetch** (unchanged) | **yes** | `news_source.api[].api-key` (see below -- reshaped from `news_source.<name>.api-key` the same day) | **Migrated** 2026-09-03, then **reshaped** 2026-09-03 into the `NewsSourceAdapter`/`news_adapters/` refactor -- see "News sources, take two" below. A source with no key configured (or an unresolvable one) is still skipped, same as an unset env var always was; the trailsign gotcha behind that (a `trailsign-resolve` node that's *present* but points at an unset env var raises `SettingsError` even with `default=None`) is now handled per-entry, not per-source-dict-key -- see `news_sources._raw_api_entries`/`_resolved_api_key`'s own docstrings for why resolving `news_source.api` as one list would have reintroduced a worse version of the same problem (one bad entry blowing up every other configured source, not just itself). |
-| `TELEGRAM_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.bot-token` | Not started — highest blast radius of the "current" set, bot startup itself depends on it |
-| `ADMIN_BOT_TOKEN` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.admin_bot_token` | Not started |
-| `ADMIN_CHAT_ID` | `bot.py`, `combined_bot.py`, `admin_bot.py` | **`docker-entrypoint.sh` vault-fetch** | no (an id, not a credential — still fetched the same way) | `delivery.telegram.admin_chat_id` | Not started |
-| `TEST_API_PORT` / `ENABLE_TEST_API` | `test_api.py` | plain `os.environ` | no | `test_api.port` / `test_api.enabled` | Not started — lowest priority, dev-only tool |
+| `TELEGRAM_BOT_TOKEN` | ~~`bot.py`, `combined_bot.py`, `admin_bot.py`~~ | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.bot-token` | **Migrated** 2026-09-03, `required=True` (unchanged bracket-access-equivalent semantics — a bot that can't authenticate to Telegram should fail loudly at startup) |
+| `ADMIN_BOT_TOKEN` | ~~`bot.py`, `combined_bot.py`, `admin_bot.py`~~ | **`docker-entrypoint.sh` vault-fetch** | **yes** | `delivery.telegram.admin-bot-token` | **Migrated** 2026-09-03, `required=True`. Path uses a hyphen (`admin-bot-token`), not the underscore this table originally sketched (`admin_bot_token`) — normalized to match `bot-token`'s own hyphen and this codebase's broader `api-key`-style hyphenated-field convention. |
+| `ADMIN_CHAT_ID` | ~~`bot.py`, `combined_bot.py`, `admin_bot.py`~~ | **`docker-entrypoint.sh` vault-fetch** | no (an id, not a credential — still fetched the same way) | `delivery.telegram.admin-chat-id` | **Migrated** 2026-09-03, `required=True` (same hyphen normalization as `admin-bot-token` above) |
+| `TEST_API_PORT` / `ENABLE_TEST_API` | ~~`test_api.py`~~ | plain `os.environ` | no | `test_api.port` / `test_api.enabled` | **Migrated** 2026-09-03, `resolved_optional` (both fail open — `port` keeps its old 8765 default, `enabled` keeps its old "server never starts" default) |
+
+**A deliberately SHALLOWER migration than `DEEPSEEK_API_KEY`'s rule-3
+"worked example" for the four entrypoint-vault-fetched rows above
+(`TELEGRAM_BOT_TOKEN`, `ADMIN_BOT_TOKEN`, `ADMIN_CHAT_ID`,
+`LOGFIRE_API_KEY`) — flagging so a future session doesn't assume every
+vault-fetched secret finished the same way.** These bridge to the
+*already-vault-fetched plain env var* (`trailsign-resolve:
+environment-variable`, same as any plain `os.environ` migration) rather
+than doing rule 3's full 3-step pattern (Python reading directly via a
+`trailsign-resolve: oracleKeyVault` node, `docker-entrypoint.sh`'s
+now-redundant fetch block for that variable removed). `docker-entrypoint.sh`
+is completely untouched by this batch — still fetches all four from
+Vault and exports them as plain env vars, exactly as before. This was a
+scope choice, not an oversight: going all the way to direct
+`oracleKeyVault` resolution for these four is real, separate follow-up
+work (touching `docker-entrypoint.sh` and re-verified on a real deploy,
+per rule 3's own requirements), not something to fold into a
+same-shape-as-plain-env-vars batch.
 
 Deliberately **not** migrating (stay raw `os.environ`, out of scope):
 `SETTINGS_FILE` itself (the bootstrap exception, see above),

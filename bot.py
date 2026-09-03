@@ -24,7 +24,6 @@ Run:
 """
 
 import asyncio
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from langchain_core.messages import AIMessage, HumanMessage
@@ -758,7 +757,7 @@ async def _stop_test_api(app: Application) -> None:
 def main():
     setup_telemetry()
     users_db.init_db()
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    token = get_settings().resolved("delivery.telegram.bot-token", required=True)
     # Two independently-configured models -- see docs/plans/model-portability-plan.md
     # Level 2. `models.main`/`models.guardrail` in settings.yml both point
     # at the same underlying model by default (no second provider is set
@@ -783,8 +782,8 @@ def main():
     app.bot_data["agent"] = agent
     app.bot_data["guard_model"] = guard_model
     app.bot_data["embedder"] = embedder
-    app.bot_data["admin_chat_id"] = int(os.environ["ADMIN_CHAT_ID"])
-    app.bot_data["admin_bot_token"] = os.environ["ADMIN_BOT_TOKEN"]
+    app.bot_data["admin_chat_id"] = int(get_settings().resolved("delivery.telegram.admin-chat-id", required=True))
+    app.bot_data["admin_bot_token"] = get_settings().resolved("delivery.telegram.admin-bot-token", required=True)
     # Idempotent -- safe to run every startup. Only the admin gets
     # search_news access to news_sources.RESTRICTED_SOURCES (NewsAPI,
     # Perigon) by default; granting it to anyone else is a plain DB update

@@ -254,3 +254,36 @@ subscription:
 categories:
   proposal_threshold: 5
   sighting_retention_days: 30
+
+# See settings.yml's own comments for what each of these controls. Bridges
+# to the same plain env var names -- unlike settings.oracle.yml's PROD
+# deploy, INT's docker_run.command sets these as plain literal values
+# directly (no vault/*_SECRET_OCID indirection), but the env var NAMES
+# this file bridges to are identical either way.
+delivery:
+  telegram:
+    bot-token:
+      trailsign-resolve: environment-variable
+      name: TELEGRAM_BOT_TOKEN
+    admin-bot-token:
+      trailsign-resolve: environment-variable
+      name: ADMIN_BOT_TOKEN
+    admin-chat-id:
+      trailsign-resolve: environment-variable
+      name: ADMIN_CHAT_ID
+
+telemetry:
+  enabled:
+    trailsign-resolve: environment-variable
+    name: LOGFIRE_ENABLED
+  logfire-api-key:
+    trailsign-resolve: environment-variable
+    name: LOGFIRE_API_KEY
+
+test_api:
+  enabled:
+    trailsign-resolve: environment-variable
+    name: ENABLE_TEST_API
+  port:
+    trailsign-resolve: environment-variable
+    name: TEST_API_PORT

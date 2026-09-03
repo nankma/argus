@@ -332,16 +332,61 @@ categories:
   proposal_threshold: 5
   sighting_retention_days: 30
 
-# Not yet migrated onto Settings -- still raw os.environ reads as of
-# 2026-09-03 (delivery.*, telemetry.*). See
-# docs/standaloneplan/01-settings-migration.md for current status. This
-# section is a preview of the eventual shape, not live yet -- and per the
-# criterion above, TELEGRAM_BOT_TOKEN below is an env-var *name*, not a
-# real value, safe to leave uncommented as-is when this section does go
-# live:
+# Delivery channel config -- currently just Telegram (bot.py/admin_bot.py/
+# combined_bot.py all read these three independently, each via its own
+# get_settings().resolved() call, same "no shared helper" shape the old
+# os.environ[...] reads had -- see docs/standaloneplan/01-settings-migration.md).
+# All three required=True: a bot that can't authenticate to Telegram at
+# all should fail loudly at startup, not limp along -- same bracket-access
+# (os.environ["X"], KeyError-on-missing) semantics the old reads had.
 #
-# delivery:
-#   telegram:
-#     bot-token:
-#       trailsign-resolve: environment-variable
-#       name: TELEGRAM_BOT_TOKEN
+# bot-token is the info bot's own token (what subscribers talk to);
+# admin-bot-token is the SEPARATE second bot admin_bot.py runs (category
+# proposal review, access-request approval); admin-chat-id is the
+# operator's own numeric Telegram user id -- always allowed past the
+# access-request gate (bot.py's own docstring), and where admin_bot.py's
+# notifications land.
+delivery:
+  telegram:
+    bot-token:
+      trailsign-resolve: environment-variable
+      name: TELEGRAM_BOT_TOKEN
+    admin-bot-token:
+      trailsign-resolve: environment-variable
+      name: ADMIN_BOT_TOKEN
+    admin-chat-id:
+      trailsign-resolve: environment-variable
+      name: ADMIN_CHAT_ID
+
+# Logfire tracing -- both optional (resolved_optional in app_settings.py,
+# not required=True), since an unconfigured deployment should run
+# untelemetered, not fail to start. Real env-var bridges, not a literal
+# true/false baked in here -- toggling telemetry in production is an
+# operational lever exercised via docker_run.command's -e flags (see
+# local-infra/infrastructure.yaml's own incident history of flipping
+# LOGFIRE_ENABLED on/off), not something that should need a settings-file
+# edit and rebuild. See agent.setup_telemetry's own docstring for why
+# `enabled` is a separate gate from the credential rather than keying off
+# the key's presence alone.
+telemetry:
+  enabled:
+    trailsign-resolve: environment-variable
+    name: LOGFIRE_ENABLED
+  logfire-api-key:
+    trailsign-resolve: environment-variable
+    name: LOGFIRE_API_KEY
+
+# test_api.py's local HTTP debug endpoint (POST /test_message) -- ships in
+# the image (see Dockerfile's COPY list) and is enabled on both INT and
+# PROD today (local-infra/infrastructure.yaml's docker_run.command), used
+# by tools/check_logfire.py and manual live verification. Both optional:
+# `enabled` fails closed (server never starts) same as the old
+# `if not os.environ.get("ENABLE_TEST_API")` did; `port` keeps its old
+# 8765 default.
+test_api:
+  enabled:
+    trailsign-resolve: environment-variable
+    name: ENABLE_TEST_API
+  port:
+    trailsign-resolve: environment-variable
+    name: TEST_API_PORT

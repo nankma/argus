@@ -49,6 +49,33 @@ def test_reset_settings_for_tests_can_inject_a_fake():
     assert app_settings.get_settings().resolved("storage.news_cache_dir") == "injected"
 
 
+def test_resolved_optional_returns_default_when_path_absent():
+    app_settings.reset_settings_for_tests(Settings({}))
+    assert app_settings.resolved_optional("telemetry.enabled") is None
+    assert app_settings.resolved_optional("telemetry.enabled", default=False) is False
+
+
+def test_resolved_optional_returns_default_when_node_is_unresolvable(monkeypatch):
+    """The behavior this helper exists for: a PRESENT trailsign-resolve
+    node whose env var isn't set still raises SettingsError out of
+    Settings.resolved() even with default= given -- default= only covers
+    a path that's absent entirely. resolved_optional must catch that and
+    fail open the same way, or every env-var-bridged optional setting
+    (telemetry.enabled, bot tokens if they were optional, etc.) would
+    crash instead of degrading."""
+    monkeypatch.delenv("SOME_UNSET_VAR", raising=False)
+    fake = Settings({"telemetry": {"enabled": {
+        "trailsign-resolve": "environment-variable", "name": "SOME_UNSET_VAR",
+    }}})
+    app_settings.reset_settings_for_tests(fake)
+    assert app_settings.resolved_optional("telemetry.enabled", default=False) is False
+
+
+def test_resolved_optional_returns_the_resolved_value_when_present():
+    app_settings.reset_settings_for_tests(Settings({"telemetry": {"enabled": "true"}}))
+    assert app_settings.resolved_optional("telemetry.enabled", default=False) == "true"
+
+
 def test_required_true_call_site_raises_when_settings_missing(monkeypatch, tmp_path):
     """End-to-end check of the actual fail-loud contract (not just
     app_settings.py in isolation): a required=True call site
