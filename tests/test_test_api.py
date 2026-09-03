@@ -87,13 +87,19 @@ def test_missing_fields_returns_400(running_server):
     assert status == 400
 
 
-def test_process_message_failure_returns_500(running_server, monkeypatch):
+def test_process_message_failure_returns_500(running_server, monkeypatch, isolated_subscribers_db):
     """This endpoint's own responsibility is just the HTTP translation --
     a real exception in the pipeline becomes a 500 with the error in the
     body. process_message itself is responsible for logging the failure
     durably (see tests/test_bot.py's own coverage of that -- it's the
     one place both this endpoint and real Telegram traffic go through,
-    so that's where the logging test lives, not here)."""
+    so that's where the logging test lives, not here). isolated_subscribers_db
+    is required, not optional -- do_POST calls users_db.mark_test_account
+    unconditionally before process_message even runs, so without it this
+    only passed locally by test-ordering luck (an earlier test already
+    having created the real subscribers.db table) -- failed for real on
+    CI, a fresh environment with no such luck (sqlite3.OperationalError:
+    no such table: subscribers)."""
     async def failing_process_message(chat_id, text, agent, guard_model):
         raise RuntimeError("simulated pipeline failure")
     monkeypatch.setattr(bot, "process_message", failing_process_message)
