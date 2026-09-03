@@ -34,7 +34,6 @@ Run:
 """
 
 import asyncio
-import os
 import signal
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from agent import build_agent, build_model_from_settings, run_agent, setup_telemetry
@@ -47,7 +46,7 @@ import users_db
 
 
 def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None, embedder=None) -> Application:
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+    app = Application.builder().token(get_settings().resolved("delivery.telegram.bot-token", required=True)).build()
     app.bot_data["agent"] = agent
     # guard_model is independently configurable from agent's own model via
     # LLM_MODEL_CLASSIFIER -- see agent.build_model and
@@ -74,7 +73,7 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
 
 
 def build_admin_app(admin_chat_id: int, info_bot_token: str) -> Application:
-    app = Application.builder().token(os.environ["ADMIN_BOT_TOKEN"]).build()
+    app = Application.builder().token(get_settings().resolved("delivery.telegram.admin-bot-token", required=True)).build()
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["info_bot_token"] = info_bot_token
     # Disjoint patterns so the category buttons and the approve/deny
@@ -120,9 +119,9 @@ async def run_both(
 def main():
     setup_telemetry()
     users_db.init_db()
-    admin_chat_id = int(os.environ["ADMIN_CHAT_ID"])
-    admin_bot_token = os.environ["ADMIN_BOT_TOKEN"]
-    info_bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
+    admin_chat_id = int(get_settings().resolved("delivery.telegram.admin-chat-id", required=True))
+    admin_bot_token = get_settings().resolved("delivery.telegram.admin-bot-token", required=True)
+    info_bot_token = get_settings().resolved("delivery.telegram.bot-token", required=True)
 
     # Two independently-configured models -- see docs/plans/model-portability-plan.md
     # Level 2. `models.main`/`models.guardrail` in settings.yml both point

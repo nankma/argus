@@ -18,8 +18,9 @@ fail loudly on a missing settings.yml, not silently guess).
 """
 
 import os
+from typing import Any
 
-from trailsign import Settings
+from trailsign import Settings, SettingsError
 
 _settings: Settings | None = None
 
@@ -29,6 +30,24 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = _load()
     return _settings
+
+
+def resolved_optional(path: str, default: Any = None) -> Any:
+    """get_settings().resolved(path, default=default), but also treats a
+    node that's PRESENT and unresolvable (e.g. an environment-variable
+    bridge whose env var isn't set) as equivalent to the path being
+    absent. Settings.resolved()'s own `default=` only covers the latter
+    -- a present-but-unresolvable node still raises SettingsError
+    regardless of `default=` (see
+    docs/standaloneplan/01-settings-migration.md's "Migration
+    methodology"). Use this instead of calling get_settings().resolved()
+    directly for any setting that's meant to fail open when its
+    underlying env var isn't set -- an optional feature flag or
+    credential, as opposed to something required=True should guard."""
+    try:
+        return get_settings().resolved(path, default=default)
+    except SettingsError:
+        return default
 
 
 def _load() -> Settings:

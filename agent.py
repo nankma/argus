@@ -33,7 +33,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import dynamic_prompt
 from langchain.tools import ToolRuntime
 from langchain_openai import ChatOpenAI
-from app_settings import get_settings
+from app_settings import get_settings, resolved_optional
 from logfire_logger import LogfireLogger
 import news_classify
 import news_sources
@@ -536,11 +536,18 @@ def logfire_traces_endpoint(token: str) -> str:
 def setup_telemetry():
     """Wires up tracing to Logfire, or does nothing.
 
-    `LOGFIRE_ENABLED` is required even though `LOGFIRE_API_KEY` alone
-    would be enough to export, because the key is present in the
-    development environment: keying off the credential would turn every
-    local script and test run into a live exporter. Tests/CI set neither,
-    so they never reach a collector."""
+    `telemetry.enabled` (bridges to LOGFIRE_ENABLED) is required even
+    though `telemetry.logfire-api-key` (LOGFIRE_API_KEY) alone would be
+    enough to export, because the key is present in the development
+    environment: keying off the credential would turn every local script
+    and test run into a live exporter. Tests/CI set neither env var, so
+    resolved_optional's fail-open behavior means they never reach a
+    collector. Both stay real env-var bridges rather than a literal
+    value baked into settings.oracle.yml/settings.int.yml, since toggling
+    telemetry on/off in production is an operational lever exercised via
+    docker_run.command -e flags (see local-infra/infrastructure.yaml's
+    own incident history of flipping this), not something that should
+    need a settings-file edit and rebuild to change."""
     # Set before any provider is built, because the OTel SDK reads it when
     # it constructs the default Resource and never revisits it. Not
     # strictly required now that LogfireLogger.setup() always sets
@@ -553,10 +560,10 @@ def setup_telemetry():
     # per instance should be able to say so from the outside.
     os.environ.setdefault("OTEL_SERVICE_NAME", SERVICE_NAME)
 
-    if not os.environ.get("LOGFIRE_ENABLED"):
+    if not resolved_optional("telemetry.enabled"):
         return None
 
-    token = os.environ.get("LOGFIRE_API_KEY")
+    token = resolved_optional("telemetry.logfire-api-key")
     if not token:
         # Loud, because the alternative is a bot that looks instrumented
         # and silently isn't -- the failure this whole plan exists to

@@ -1,4 +1,7 @@
+import pytest
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler
+from trailsign import SettingsError
+
 import combined_bot
 import users_db
 
@@ -69,5 +72,29 @@ def test_build_admin_app_wires_bot_data(monkeypatch):
     handlers = [h for group in app.handlers.values() for h in group]
     assert any(isinstance(h, CallbackQueryHandler) for h in handlers)
     assert any(isinstance(h, MessageHandler) for h in handlers)
+
+
+def test_build_info_app_raises_when_the_bot_token_is_missing(monkeypatch):
+    """delivery.telegram.bot-token is required=True -- same bracket-access
+    (os.environ["X"], KeyError-on-missing) semantics the old direct env
+    read had. main()/bot.py/admin_bot.py all hand-copy this identical
+    resolved(..., required=True) call rather than sharing a helper (see
+    docs/standaloneplan/01-settings-migration.md), so this is worth its own
+    regression test -- a typo in one copy wouldn't be caught by testing
+    only the others."""
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+    with pytest.raises(SettingsError):
+        combined_bot.build_info_app(
+            agent="fake-agent", admin_chat_id=999, admin_bot_token="admin-token",
+            guard_model="fake-guard-model", embedder="fake-embedder",
+        )
+
+
+def test_build_admin_app_raises_when_the_admin_bot_token_is_missing(monkeypatch):
+    monkeypatch.delenv("ADMIN_BOT_TOKEN", raising=False)
+
+    with pytest.raises(SettingsError):
+        combined_bot.build_admin_app(admin_chat_id=999, info_bot_token="info-token")
 
 

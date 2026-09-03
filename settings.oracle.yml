@@ -233,3 +233,35 @@ subscription:
 categories:
   proposal_threshold: 5
   sighting_retention_days: 30
+
+# See settings.yml's own comments for what each of these controls. Bridges
+# to the same plain env var names docker-entrypoint.sh already vault-fetches
+# into (TELEGRAM_BOT_TOKEN_SECRET_OCID -> TELEGRAM_BOT_TOKEN, etc.) -- same
+# worked-example pattern as models.main.api-key/DEEPSEEK_API_KEY.
+delivery:
+  telegram:
+    bot-token:
+      trailsign-resolve: environment-variable
+      name: TELEGRAM_BOT_TOKEN
+    admin-bot-token:
+      trailsign-resolve: environment-variable
+      name: ADMIN_BOT_TOKEN
+    admin-chat-id:
+      trailsign-resolve: environment-variable
+      name: ADMIN_CHAT_ID
+
+telemetry:
+  enabled:
+    trailsign-resolve: environment-variable
+    name: LOGFIRE_ENABLED
+  logfire-api-key:
+    trailsign-resolve: environment-variable
+    name: LOGFIRE_API_KEY
+
+test_api:
+  enabled:
+    trailsign-resolve: environment-variable
+    name: ENABLE_TEST_API
+  port:
+    trailsign-resolve: environment-variable
+    name: TEST_API_PORT

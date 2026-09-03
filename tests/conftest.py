@@ -28,6 +28,27 @@ app_settings.reset_settings_for_tests(Settings({
             {"key": "fake_rss_source", "display_name": "Fake RSS Source", "url": "https://fake.invalid/feed.xml"},
         ],
     },
+    # Real trailsign-resolve nodes (not literal placeholder strings), so
+    # tests that monkeypatch.setenv these same env var names (test_bot.py,
+    # test_admin_bot.py, test_combined_bot.py, test_telemetry.py,
+    # test_test_api.py) see that value flow through get_settings()/
+    # resolved_optional() -- a literal string here would make those tests
+    # pass regardless of what they set the env var to.
+    "delivery": {
+        "telegram": {
+            "bot-token": {"trailsign-resolve": "environment-variable", "name": "TELEGRAM_BOT_TOKEN"},
+            "admin-bot-token": {"trailsign-resolve": "environment-variable", "name": "ADMIN_BOT_TOKEN"},
+            "admin-chat-id": {"trailsign-resolve": "environment-variable", "name": "ADMIN_CHAT_ID"},
+        },
+    },
+    "telemetry": {
+        "enabled": {"trailsign-resolve": "environment-variable", "name": "LOGFIRE_ENABLED"},
+        "logfire-api-key": {"trailsign-resolve": "environment-variable", "name": "LOGFIRE_API_KEY"},
+    },
+    "test_api": {
+        "enabled": {"trailsign-resolve": "environment-variable", "name": "ENABLE_TEST_API"},
+        "port": {"trailsign-resolve": "environment-variable", "name": "TEST_API_PORT"},
+    },
 }))
 
 import agent
