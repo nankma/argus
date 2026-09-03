@@ -12,12 +12,25 @@ computed once by whoever deploys.
 KIND includes both "general" and "llm": one telemetry.providers entry
 can receive both general event spans (this provider's log(), when it's
 ever called directly -- see SPAN_BASED below) and LangChain-auto-
-instrumented LLM spans (via instrument_langchain) -- a single config
-entry, not two. telemetry.py's coordinator calls initialize() on a
-FRESH instance once per applicable internal provider (general and/or
-llm), passing `kind` so this class knows which one it's attaching to on
-any given call -- see initialize()'s own docstring for why that matters
-for instrument_langchain specifically.
+instrumented LLM spans -- a single config entry, not two. telemetry.py's
+coordinator calls initialize() on a FRESH instance once per applicable
+internal provider (general and/or llm), passing `kind` so this class
+knows which one it's attaching to on any given call.
+
+instrument_langchain (the "should LangChain's auto-instrumentation
+attach to the llm provider" switch) is NOT this adapter's concern --
+see telemetry.py's setup_telemetry(), which handles it once at the
+coordinator level, independent of which llm-kind provider(s) end up
+receiving the resulting spans. It used to live here (checking
+config.get("instrument_langchain") per otlp entry), which meant
+phoenix.py -- an llm-only provider with an equally good claim to
+wanting LLM traces -- had no way to trigger it at all: configuring
+ONLY a phoenix entry (no otlp entry alongside it) meant nothing ever
+called LangChainInstrumentor, so Phoenix received zero spans despite
+being correctly wired up in every other respect. Moving the trigger to
+the coordinator (checked once, against every llm-kind entry regardless
+of adapter type) fixes that for any current or future llm-kind
+provider, not just otlp.
 """
 
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -25,8 +38,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from telemetry_providers import Level
-
-_langchain_instrumented = False
 
 
 class OtlpProvider:
@@ -58,30 +69,9 @@ class OtlpProvider:
         package instead attaches to a plain TracerProvider via
         add_span_processor, which is additive by default on a plain
         OTel provider -- there is no "default processor" here to
-        silently lose.
-
-        instrument_langchain (config, default False): also attaches
-        openinference's LangChain auto-instrumentation to this call's
-        tracer_provider -- but ONLY when kind == "llm". Without this
-        gate, a dual-KIND entry with instrument_langchain: true would
-        instrument LangChain onto the GENERAL provider too (since
-        initialize() is also called once for the general side of the
-        same entry) -- LLM-call spans have no business on the general
-        provider, so this is a real correctness gate, not a redundant
-        check. Guarded by a module-level flag on top of that --
-        LangChainInstrumentor().instrument() is not documented as
-        idempotent, and more than one otlp entry could plausibly ask
-        for it (e.g. Logfire AND Grafana Cloud both wanting LLM traces)
-        -- only the first such request actually instruments."""
+        silently lose."""
         exporter = OTLPSpanExporter(endpoint=config["endpoint"], headers=config.get("headers", {}))
         tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
-
-        if kind == "llm" and config.get("instrument_langchain"):
-            global _langchain_instrumented
-            if not _langchain_instrumented:
-                from openinference.instrumentation.langchain import LangChainInstrumentor
-                LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
-                _langchain_instrumented = True
 
     def log(self, scope: str, event: str, message: str | dict,
             level: int = Level.INFO, tags: tuple[str, ...] = (),

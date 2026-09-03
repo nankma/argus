@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 
 import pytest
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -113,6 +114,49 @@ def test_setup_telemetry_puts_phoenix_project_name_on_the_llm_resource(monkeypat
 
     assert general_provider is None  # phoenix's KIND is {"llm"} only
     assert llm_provider.resource.attributes["openinference.project.name"] == "my-proj"
+
+
+def test_setup_telemetry_instruments_langchain_for_a_phoenix_only_config(monkeypatch):
+    """The real gap this coordinator-level trigger was built to close:
+    instrument_langchain used to live inside otlp.py's own initialize(),
+    so a config with ONLY a phoenix entry (no otlp entry alongside it)
+    could never trigger LangChainInstrumentor at all -- Phoenix would
+    receive zero spans despite being otherwise correctly wired, since
+    nothing ever emitted anything onto the llm provider in the first
+    place. Proves the fix with a real (fake-module-injected)
+    LangChainInstrumentor, not just that a code path was reached."""
+    monkeypatch.setattr("telemetry_providers.phoenix.OTLPSpanExporter",
+                        lambda endpoint, headers: "exporter")
+    monkeypatch.setattr("telemetry_providers.phoenix.BatchSpanProcessor", lambda exporter: _FakeProcessor())
+    instrumented = []
+    fake_module = type("M", (), {
+        "LangChainInstrumentor": lambda: type(
+            "I", (), {"instrument": lambda self, tracer_provider: instrumented.append(tracer_provider)}
+        )()
+    })
+    monkeypatch.setitem(sys.modules, "openinference.instrumentation.langchain", fake_module)
+    _set_telemetry_settings(monkeypatch, providers=[
+        {"type": "phoenix", "endpoint": "http://localhost:6006/v1/traces", "instrument_langchain": True},
+    ])
+
+    general_provider, llm_provider = telemetry.setup_telemetry()
+
+    assert instrumented == [llm_provider]
+
+
+def test_setup_telemetry_does_not_instrument_langchain_when_nothing_asks_for_it(monkeypatch):
+    """If LangChainInstrumentor were imported/called without any entry
+    asking for it, this import failing (the fake module below is never
+    installed) would raise -- proving it wasn't touched."""
+    monkeypatch.setattr("telemetry_providers.phoenix.OTLPSpanExporter",
+                        lambda endpoint, headers: "exporter")
+    monkeypatch.setattr("telemetry_providers.phoenix.BatchSpanProcessor", lambda exporter: _FakeProcessor())
+    monkeypatch.delitem(sys.modules, "openinference.instrumentation.langchain", raising=False)
+    _set_telemetry_settings(monkeypatch, providers=[
+        {"type": "phoenix", "endpoint": "http://localhost:6006/v1/traces"},
+    ])
+
+    telemetry.setup_telemetry()  # must not raise ImportError
 
 
 def test_setup_telemetry_skips_an_entry_whose_credential_is_unresolvable(monkeypatch):

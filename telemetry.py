@@ -81,6 +81,14 @@ SERVICE_NAME = "myfirstagent"
 # TracerProvider's own multi-processor delivery.
 _file_providers: list = []
 
+# Persists across setup_telemetry() calls within one process, same
+# reasoning the old otlp.py-local flag had: LangChainInstrumentor().
+# instrument() isn't documented as idempotent, so a second call within
+# the same process (tests call setup_telemetry() many times; a real
+# deployment shouldn't ever call it twice, but nothing prevents it)
+# must not re-instrument.
+_langchain_instrumented = False
+
 
 def _raw_provider_entries() -> list[dict]:
     """Raw (unresolved) telemetry.providers entries. Reading this list
@@ -145,8 +153,15 @@ def setup_telemetry() -> tuple[TracerProvider | None, TracerProvider | None] | N
     if nothing configured needed that category (no caller currently
     uses the return value for anything but this module's own tests;
     agent.py's thin wrapper just forwards it)."""
-    global _file_providers
+    global _file_providers, _langchain_instrumented
     _file_providers = []
+    # Reset per call, same as _file_providers -- a fresh call builds a
+    # fresh llm_provider (if any), and that new provider legitimately
+    # needs its own instrumentation decision; the flag only exists to
+    # stop this ONE call from instrumenting twice if more than one entry
+    # asks for it (see the check further down), not to remember across
+    # separate setup_telemetry() calls that it already happened once.
+    _langchain_instrumented = False
 
     # Set before any provider is built, because the OTel SDK reads it
     # when it constructs the default Resource and never revisits it.
@@ -213,6 +228,30 @@ def setup_telemetry() -> tuple[TracerProvider | None, TracerProvider | None] | N
             _activate(entry, "general", provider_cls, general_provider)
         if "llm" in provider_cls.KIND:
             _activate(entry, "llm", provider_cls, llm_provider)
+
+    # Whether LangChain's auto-instrumentation attaches to the llm
+    # provider is a property of the LLM CATEGORY, not of any one
+    # provider class -- an llm-kind entry's own config asks for it
+    # (instrument_langchain: true), regardless of which adapter(s)
+    # actually attached processors to llm_provider above. Checked once
+    # here rather than inside each adapter's own initialize(): that was
+    # otlp.py's original design, and it meant a config with ONLY a
+    # phoenix entry (no otlp entry alongside it) could never trigger
+    # instrumentation at all, even though phoenix's entire purpose is
+    # inspecting the LLM call tree -- see otlp.py's module docstring for
+    # the full incident this fixes. Once instrumented, every processor
+    # attached to llm_provider (from any llm-kind entry) receives the
+    # resulting spans via the provider's own multi-processor delivery,
+    # not just the entry that happened to ask for it.
+    if llm_provider is not None and not _langchain_instrumented:
+        wants_langchain = any(
+            "llm" in discovered[entry["type"]].KIND and entry.get("instrument_langchain")
+            for entry in entries
+        )
+        if wants_langchain:
+            from openinference.instrumentation.langchain import LangChainInstrumentor
+            LangChainInstrumentor().instrument(tracer_provider=llm_provider)
+            _langchain_instrumented = True
 
     return general_provider, llm_provider
 
