@@ -1,42 +1,16 @@
-# Production-target settings.yml TEMPLATE (Oracle VM) -- committed,
-# generic, safe forever, as long as it stays this way. See the rule
-# below before adding anything to this file.
-#
-# CRITERION FOR WHAT MAY LIVE HERE (also in CLAUDE.md's Landmines):
-# only env-var names, placeholder/example resource identifiers, relative
-# paths, and structure -- never a real, this-deployment-specific value
-# (a real OCID, IP, hostname, or literal secret). The moment Phase 2+
-# needs THIS project's actual vault/secret/compartment OCIDs, those go
-# into a new gitignored file under local-infra/ instead (matching
-# local-infra/infrastructure.yaml's existing real-values convention) --
-# this file keeps a placeholder version, not the real one.
-#
-# Bridges to the exact same env vars docker_run.command already sets
-# (local-infra/infrastructure.yaml) -- zero behavior change is the
-# point of this specific file. This IS load-bearing once deployed: the
-# migrated code uses required=True for these keys (see
-# docs/standaloneplan/01-settings-migration.md's "Migration
-# methodology"), so a settings.yml with these values present is a hard
-# prerequisite for the container to start at all, not an optional
-# nicety.
-#
-# To actually deploy: add
-#   -e SETTINGS_FILE=/config/settings.yml -v <path-on-vm>/settings.yml:/config/settings.yml:ro
-# to docker_run.command, scp this file (or the local-infra/ real-values
-# version, once one exists) to the VM, then verify with
-# tools/check_data_persistence.py afterward -- don't just trust the
-# deploy succeeded.
+# Production-target settings file (Oracle VM). Real values must NEVER
+# go here (env-var names/placeholders only) -- see CLAUDE.md's
+# Landmines. A real OCID/IP/secret goes in a gitignored file under
+# local-infra/ instead. This file is load-bearing once deployed
+# (required=True keys) -- see
+# docs/standaloneplan/01-settings-migration.md for the full deploy
+# process and why.
 
 storage:
-  # ttl_hours is a sibling of path, not of news_cache_dir's
-  # trailsign-resolve node -- a node containing trailsign-resolve
-  # collapses entirely to the resolver's return value, so ttl_hours has
-  # to sit one level up or it would be silently discarded. Confirmed
-  # live, not assumed: Settings({"news_cache_dir": {"trailsign-resolve":
-  # ..., "ttl_hours": 48}}).resolved("news_cache_dir") returns a bare
-  # string, not a dict -- ttl_hours vanishes. See settings.yml's own
-  # comment for why this is nested at all (co-locates the retention
-  # setting with the directory it prunes).
+  # ttl_hours must stay a sibling of path, never nested inside path's
+  # trailsign-resolve node -- it would be silently discarded (see
+  # docs/standaloneplan/01-settings-migration.md's "Worth exposing"
+  # table, DEFAULT_TTL_HOURS row, for the confirmed-live gotcha).
   news_cache_dir:
     path:
       trailsign-resolve: environment-variable
@@ -53,17 +27,11 @@ storage:
   subscribers_db_file:
     trailsign-resolve: environment-variable
     name: SUBSCRIBERS_DB_FILE
-  # A plain tuning value, not a path -- same everywhere, no env-var
-  # bridge needed. See settings.yml's own comment for the reasoning.
   push_outcomes_ttl_days: 90
 
 # Bridges to the same DEEPSEEK_API_KEY env var docker-entrypoint.sh
-# already vault-fetches (via DEEPSEEK_API_KEY_SECRET_OCID) -- see
-# docs/standaloneplan/01-settings-migration.md's "Models" section, this
-# is that phase's worked example. Zero behavior change is the point: the
-# entrypoint's vault-fetch mechanism doesn't change, only how the running
-# process reads the resulting env var (Settings instead of implicitly via
-# ChatDeepSeek). See settings.yml's models section for what each key means.
+# already vault-fetches -- zero behavior change from before this was
+# migrated to Settings.
 models:
   main:
     url: https://api.deepseek.com
@@ -82,36 +50,13 @@ models:
     reasoning_effort: none
     request_timeout_seconds: 20
 
-# The news-fetching pipeline. ONE news_source: key for the whole file --
-# a second top-level `news_source:` mapping is a real bug this file had
-# 2026-09-02 to 2026-09-03: YAML duplicate-key handling silently kept
-# only the LAST one, which meant production would have deployed with
-# ZERO RSS sources (the newsapi/gnews/perigon block below shadowed the
-# entire rss list above it) -- caught before it ever reached a real
-# deploy, but confirmed live via `yaml.safe_load` showing only
-# {newsapi, gnews, perigon} as keys, `rss` silently gone. Don't
-# reintroduce this -- everything below is one single mapping.
-#
-# tick_seconds/default_interval_hours/request_delay_seconds apply
-# globally, regardless of which sources are configured below -- see
-# settings.yml's own comment on these three for what each one does.
-# Bridges to the same NEWSAPI_API_KEY/GNEWS_API_KEY/PERIGON_API_KEY env
-# vars docker-entrypoint.sh already vault-fetches (via
-# NEWSAPI_API_KEY_SECRET_OCID etc.) -- same worked-example pattern as
-# models.*'s DEEPSEEK_API_KEY. All three genuinely optional -- an entry
-# whose api-key can't resolve is dropped, not a crash (see
-# news_sources._raw_api_entries/_resolved_api_key) -- but production has
-# real keys for all three, so all three are live in news_source.api below
-# (with their interval_hours/daily_cap overrides), unlike settings.yml's
-# commented preview. `type` selects the news_adapters/*.py class that
-# handles each entry -- see news_sources.py's module docstring.
-#
-# RSS list byte-identical to settings.yml's news_source.rss -- MUST be
-# kept in sync with it; this is the file production actually reads
-# (SETTINGS_FILE=/app/settings.oracle.yml), so an edit only on the
-# settings.yml side silently drops production to zero RSS sources on the
-# next deploy (default=[] fails open, no crash -- see
-# docs/standaloneplan/01-settings-migration.md's "Migration methodology").
+# ONE news_source: key for the whole file -- a second top-level mapping
+# silently drops everything above it (real incident, see
+# docs/standaloneplan/01-settings-migration.md's "news_source.*"
+# section). newsapi/gnews/perigon bridge to the real vault-fetched keys;
+# production has all three live (unlike settings.yml's commented
+# preview). Keep the rss: list byte-identical to settings.yml's -- this
+# is the file production actually reads.
 news_source:
   tick_seconds: 900
   default_interval_hours: 4
@@ -234,10 +179,8 @@ categories:
   proposal_threshold: 5
   sighting_retention_days: 30
 
-# See settings.yml's own comments for what each of these controls. Bridges
-# to the same plain env var names docker-entrypoint.sh already vault-fetches
-# into (TELEGRAM_BOT_TOKEN_SECRET_OCID -> TELEGRAM_BOT_TOKEN, etc.) -- same
-# worked-example pattern as models.main.api-key/DEEPSEEK_API_KEY.
+# Bridges to the vault-fetched TELEGRAM_BOT_TOKEN/ADMIN_BOT_TOKEN/
+# ADMIN_CHAT_ID env vars docker-entrypoint.sh already sets.
 delivery:
   telegram:
     bot-token:
@@ -250,38 +193,14 @@ delivery:
       trailsign-resolve: environment-variable
       name: ADMIN_CHAT_ID
 
-# Pluggable telemetry providers (see telemetry.py, telemetry_providers/)
-# -- replaces the old telemetry.enabled/telemetry.logfire-api-key
-# boolean-gated shape. There is no more separate "enabled" flag: an
-# entry with an unresolvable credential is silently dropped (same
-# contract news_source.api's api-key resolution already has), so the
-# SAME operational lever the old LOGFIRE_ENABLED flag gave --
-# turning telemetry on/off via docker_run.command without a
-# settings-file edit or rebuild -- now works by adding/removing
-# LOGFIRE_API_KEY_SECRET_OCID (or the resolved LOGFIRE_API_KEY it
-# produces) from that command, not a second flag. Simpler than before:
-# local-infra/infrastructure.yaml's own history has an incident from
-# LOGFIRE_ENABLED and LOGFIRE_API_KEY_SECRET_OCID getting out of sync
-# (one set without the other); one lever instead of two closes that.
-#
-# ONE list, telemetry.providers -- not a separate list per category.
-# otlp's KIND is {"general","llm"}, so this single entry gets routed to
-# BOTH internally (telemetry.py builds two separate TracerProviders and
-# initializes a fresh OtlpProvider instance against each one, so the
-# two categories still get independent processors -- see telemetry.py's
-# own module docstring for the real incident, caught by code review
-# 2026-09-03, that an earlier two-separate-lists version of this schema
-# caused: the same Logfire entry had to be written out TWICE, once per
-# list, which is exactly the config duplication that produced a
-# double-export). One line here now gets both general app-events
-# (guardrails.py/news_classify.py/etc.'s _events.log(...) sites) and
-# the LLM-call trace tree (agent -> tool -> LLM, via
-# instrument_langchain) reaching this one Logfire project.
-#
-# endpoint is a literal value, computed once with
-# agent.logfire_traces_endpoint(token) from this project's real
-# LOGFIRE_API_KEY -- verified as the us region, see
-# docs/plans/observability-platform-plan.md.
+# Turning telemetry off is now "remove LOGFIRE_API_KEY_SECRET_OCID from
+# docker_run.command" (an unresolvable credential drops this entry
+# quietly) -- no separate enabled flag to keep in sync (see
+# docs/standaloneplan/01-settings-migration.md's "Telemetry providers"
+# sections for why the old two-lever design was a real incident risk).
+# One otlp entry here feeds both general-event logging and LLM-call
+# tracing -- don't duplicate it into a second entry, see the same doc
+# sections for why that caused a real double-export bug.
 telemetry:
   providers:
     - type: otlp

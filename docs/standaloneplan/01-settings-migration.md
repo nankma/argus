@@ -613,6 +613,199 @@ auth's `signer=`-based construction). When Phase 2 (models) or Phase 4
 doc is ready to use, not speculative (key namespaced to
 `trailsign-credential-sources` as of Trailsign v0.2.0).
 
+## Settings file comment cleanup (2026-09-03) — where the detail went
+
+The three settings files (`settings.yml`, `settings.oracle.yml`,
+`settings.int.yml`) had accumulated years-of-history-style comments —
+useful once, but not what someone configuring or deploying the file
+actually needs to read every time. Trimmed per file by audience:
+`settings.yml`'s comments are now just "what this value is for" + an
+example (its audience is someone setting up their own local copy);
+`settings.oracle.yml`/`settings.int.yml`'s comments are now just "why
+this specific value is set this way" (their audience is someone
+deciding whether it's safe to change something, not learning the
+subsystem). The design rationale, incident histories, and rejected
+alternatives that used to live inline moved here. Sections below not
+already covered elsewhere in this doc (telemetry's two-iteration
+redesign is in "Telemetry providers, take two/three" above; the
+`news_source.api` factory-pattern reshape is in "Migration order" §3;
+the `ttl_hours` nesting gotcha is in the "Worth exposing" table's
+`DEFAULT_TTL_HOURS` row) — this section only carries what was ONLY in
+the YAML comments before now.
+
+### `storage.*`
+
+`news_archive_dir` has no TTL of its own, deliberately — articles move
+here INSTEAD of being deleted from `news_cache_dir` once their cache
+TTL expires, so nothing prunes this directory by age; it stays a bare
+path (no `path:`/`ttl_hours:` nesting) since there's nothing to nest.
+Omitted entirely from `settings.yml` (archiving off is `news_cache.py`'s
+own `default=None`, a legitimate intentional state, not a missing
+required key) but present and live in `settings.oracle.yml`/
+`settings.int.yml`.
+
+`push_outcomes_ttl_days` deliberately outlives `categories.
+sighting_retention_days` (90 vs 30 days) — answering "was this normal?"
+after an incident means comparing against the weeks before it, and
+`push_outcomes` rows are tiny (`users_db.py`'s own comment), so there's
+no storage-cost reason to match the shorter window.
+
+### `news_source.*`
+
+**Real incident, 2026-09-02 to 2026-09-03: `settings.oracle.yml` and
+`settings.int.yml` each briefly had a SECOND top-level `news_source:`
+mapping** (the `newsapi`/`gnews`/`perigon` block was added as its own
+`news_source:` key further down the file, instead of nesting inside the
+existing one). YAML duplicate-key handling silently keeps only the LAST
+mapping — production would have deployed with ZERO RSS sources, the
+whole `rss:` list shadowed and gone. Caught before it ever reached a
+real deploy, confirmed live via `yaml.safe_load` showing only
+`{newsapi, gnews, perigon}` as keys, `rss` silently absent. Fixed by
+merging back into one mapping. This is why both files' comments say
+"ONE `news_source:` key for the whole file" — it's not stylistic, a
+second one is a silent, undetected-by-YAML data-loss bug.
+
+RSS sources (`news_source.rss`) are free, no API key, query-less — each
+returns its latest N items regardless of what's asked
+(`news_sources._fetch_rss`), so the whole list is pure data with zero
+credential/factory-pattern design needed, unlike the `api` list.
+`hackernews`/`arxiv` (free, real query/date-range logic, always-on) are
+wired in directly by `news_sources._always_on_sources()` rather than
+living in either `rss` or `api` — forcing them through a settings-driven
+list would add ceremony with no behavior to justify it (see "Migration
+order" §3 for the `api`-list adapter-pattern reasoning that does NOT
+apply to these two).
+
+`interval_hours`/`daily_cap` per `news_source.api[]` entry are tuned to
+each source's real budget, not arbitrary: `perigon`'s 8h/3-per-day
+matches its 150/month plan; `newsapi`'s 24h/1-per-day matches an
+individual-use judgment call recorded in
+`docs/plans/local-news-cache-plan.md`. `newsapi`/`perigon` are also both
+in `news_sources.RESTRICTED_SOURCES` (excluded from `agent.py`'s live
+`search_news`, ingest-only) — `newsapi`'s free tier is documented
+dev/test-only, not production (`docs/current/ai-news-sources.md`);
+`perigon`'s budget is already fully spoken for by the scheduled ingest
+job's own capped pulls. `gnews` is the one source with real headroom
+(100/day) and isn't restricted from live search either.
+
+The "an entry with an unresolvable `api-key` is silently dropped, not a
+crash" contract, and why resolving `news_source.api` as one list would
+have broken that, is covered under "Migration order" §3's second pass —
+`news_sources._raw_api_entries`/`_resolved_api_key` are the functions
+that implement the fix.
+
+### `models.*` — INT's guardrail model choice
+
+INT's `models.main` matches PROD exactly (DeepSeek direct) — it's
+`models.guardrail` that deliberately differs, routed through Together.ai
+instead: `deepseek-ai/DeepSeek-V4-Flash-0731` via Together, same model
+as `main`, tied on price ($0.14/$0.28 combined $0.42, identical to
+DeepSeek's own pricing for this model — not actually cheaper). The
+point isn't price: guardrail is where INT's real call volume lives
+(layer 2/4 + ingest classification, far more calls than `main` ever
+makes), and routing that through a SEPARATE Together account/budget
+means it can't drain or rate-limit-starve the main DeepSeek API key.
+
+**Two genuinely cheaper Together candidates were tried and rejected,
+2026-09-02 — don't re-try either without addressing what broke them:**
+- `openai/gpt-oss-20b` ($0.25 combined): passed a single-trial
+  `tools/measure_guardrails.py` sanity check (layer2 18/21, multi-intent
+  6/6, layer4 8/8) but failed hard under real INT load once deployed —
+  sustained `OpenAITimeoutError` on both ingest `classify_articles`
+  batches and live `test_api` messages (well past the initial
+  restart-ingest burst window, not explained by it), plus one live call
+  that extracted the wrong interest text entirely ("robotics" →
+  "final"). Read as a reasoning-style model generating more than a
+  router call needs — a single-trial pass wasn't enough signal; real
+  load caught what it didn't.
+- `arize-ai/qwen-2-1.5b-instruct` ($0.20 combined): failed the isolated
+  sanity check outright — layer2 2/21 (10%), multi-intent 1/6 (17%).
+  1.5B is too small for this task's nuance (bilingual, multi-field
+  extraction).
+
+**Also confirmed**: Together's `/v1/models` listing has NO reliable
+field for "actually callable serverless, not dedicated-endpoint-only" —
+nonzero pricing does NOT mean available. `meta-llama/Meta-Llama-3.1-8B-
+Instruct-Turbo` and 7 other cheap/"Turbo"-branded candidates
+(Qwen2.5-7B/72B-Turbo, Mistral-Small-24B, Llama-3.2-3B,
+Llama-3-8b-chat-hf, Meta-Llama-3-8B-Instruct, Ministral-3-14B,
+arcee-ai/trinity-mini) all returned "Unable to access non-serverless
+model ... create a dedicated endpoint" on a real call. Two more ARE
+callable but weren't viable either: `Llama-3.3-70B-Instruct-Turbo` works
+but costs $2.08 combined (5x main); `Qwen/Qwen3.5-9B` is callable and
+ties main's price, but its reply leaked a raw `</think>` tag into
+content — a reasoning-model tell, same risk class as gpt-oss-20b's
+failure, not tested further. **A single `ChatOpenAI(...).invoke()` probe
+call is enough to rule a candidate in/out on availability before
+spending on the full `measure_guardrails.py` suite** — do that first for
+any future candidate.
+
+### `push.*`
+
+`max_articles_per_topic`/`max_interests_per_push` bound how much one
+subscriber gets in one cycle — interests that don't fit wait for a
+later cycle, they aren't dropped (`news_push.py`'s own comments).
+`relevance_keep`/`novelty_relevance_keep` are absolute-count clamps
+(fraction of pool, floor, ceiling), not a fixed fraction, because a
+fixed fraction measurably breaks across different pool sizes and topic
+phrasings, and recall past a certain point stops being worth chasing —
+see `news_push.py`'s own comment for the three measurements that forced
+this shape. `near_duplicate_similarity` is the cosine-similarity
+threshold two articles collapse at (same wire story under two links, or
+syndication). `max_article_age_hours` is deliberately generous (168h) —
+a ceiling against absurdly stale content, not a freshness requirement.
+`unreachable_strikes` is consecutive undeliverable digests before push
+turns off for that subscriber.
+
+### `subscription.*` vs `push.*`
+
+Two different axes, kept in separate top-level sections on purpose:
+`subscription.*` is the subscriber's OWN cadence preference
+(`default_interval_hours`/`min_interval_hours`) and per-subscriber state
+(`pushed_link_retention_hours`, `max_interests`) — user-facing account
+settings. `push.*` is how the push JOB itself builds and paces one
+digest once a subscriber is due — mechanics, not preference.
+`pushed_link_retention_hours` is deliberately longer than
+`news_cache_dir`'s own cache TTL (`users_db.py`'s own comment) — the
+"already sent this link" dedup memory only needs to outlast whatever the
+cache TTL already bounds.
+
+### `categories.*`
+
+Kept as its own top-level section, isolated from `subscription.*`/
+`push.*`, because the category-taxonomy-proposal feature
+(`users_db.py`'s `categories`/`category_sightings` tables) is a
+genuinely separate concern from either subscriber preferences or push
+mechanics. `proposal_threshold` (sightings of an out-of-taxonomy label,
+inside the retention window, before an admin is asked to
+activate/merge/reject it) is a placeholder judgment call, not a measured
+value — revisit once there's a real sighting distribution to read
+(`users_db.py`'s own comment).
+
+### `delivery.telegram.*`
+
+Three keys, one bot's worth of identity plus the operator's own id:
+`bot-token` is the info bot's own token (what subscribers talk to);
+`admin-bot-token` is the SEPARATE second bot `admin_bot.py` runs
+(category proposal review, access-request approval) — two different
+Telegram bot identities by design, not one bot wearing two hats;
+`admin-chat-id` is the operator's own numeric Telegram user id, always
+allowed past the access-request gate (`bot.py`'s own docstring), and
+where `admin_bot.py`'s notifications land. All three `required=True` —
+a bot that can't authenticate to Telegram at all should fail loudly at
+startup, matching the old bracket-access (`os.environ["X"]`,
+KeyError-on-missing) semantics these replaced.
+
+### `test_api.*`
+
+`test_api.py`'s local HTTP debug endpoint (`POST /test_message`) ships
+in the image (Dockerfile's `COPY` list) and is enabled on both INT and
+PROD today (`local-infra/infrastructure.yaml`'s `docker_run.command`) —
+used by `tools/check_logfire.py` and manual live verification, not just
+local dev. `enabled` fails closed (server never starts) by default, same
+as the old `if not os.environ.get("ENABLE_TEST_API")`; `port` keeps its
+old 8765 default.
+
 ## Testing
 
 Already built, not just planned. Two layers:
