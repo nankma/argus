@@ -44,6 +44,27 @@ pass first, per that rule.
   (just added, 2026-09-03) goes away too or gets repointed at whatever
   the new retention mechanism is -- don't leave it orphaned.
 
+- [ ] **`push_outcomes` misrecords a partial-success push cycle as a full
+  failure.** Found 2026-09-03 while checking INT logs after the
+  newsapi/gnews/perigon live test: `news_push.run_push_cycle` sends one
+  message per interest, in sequence; if interest N succeeds and interest
+  N+1 then hits a real failure (confirmed case: `OpenAITimeoutError` on
+  the model call), the loop breaks before interest N's own
+  `_record(PUSH_DELIVERED)` call value ever gets recorded as the
+  cycle's outcome -- the one `push_outcomes` row for that cycle ends up
+  `model_error`, even though a real digest was already sent and archived
+  (confirmed via `message_archive`/`interest_push_state` both showing
+  the successful send). This means the "ratio alarm"/"consecutive-failure
+  alarm" (see the `push_outcomes`-to-log item below) can over-report
+  failures for a subscriber who actually received something. Fix:
+  record per-interest outcomes, not one outcome per cycle -- or at
+  minimum, fold a later interest's failure into the `detail` of an
+  otherwise-successful cycle (same pattern already used for `blocked`)
+  rather than overwriting `PUSH_DELIVERED` with `model_error`. Relevant
+  to (but distinct from) the item below -- worth deciding together, since
+  moving to a log naturally invites "one event per interest" instead of
+  "one event per cycle" anyway.
+
 - [ ] **Design: switch `search_news` from live source fetch to searching
   downloaded/ingested content.** Currently `search_news` fetches live,
   per query, from `news_sources.enabled_sources()` (excludes
