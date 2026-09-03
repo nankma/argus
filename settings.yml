@@ -1,68 +1,41 @@
 # Local-dev settings file -- committed, safe forever, working example.
-# CRITERION: only env-var names, placeholder identifiers, relative
-# paths, and structure -- never a real, this-deployment-specific value
-# (OCID, IP, hostname, literal secret). See CLAUDE.md's Landmines and
-# settings.oracle.yml's own header for the same rule applied to the
-# production-target file. This is what SETTINGS_FILE defaults to
-# (app_settings.py) if unset -- clone this repo, run it, works as-is;
-# edit freely for your own paths/values.
+# This is what SETTINGS_FILE defaults to (app_settings.py) if unset --
+# clone this repo, run it, works as-is; edit freely for your own
+# paths/values. Never put a real secret/OCID/IP/hostname in this file --
+# see CLAUDE.md's Landmines.
 #
-# Only sections that have actually been migrated exist here (uncommented
-# and live) -- see docs/standaloneplan/01-settings-migration.md for what
-# has and hasn't moved off raw os.environ yet.
+# Only sections that have actually been migrated exist here -- see
+# docs/standaloneplan/01-settings-migration.md for what hasn't moved off
+# raw os.environ yet.
 
 storage:
-  # ttl_hours nested inside news_cache_dir, not a sibling storage.*_ttl_*
-  # key -- co-locates the retention setting with the directory it prunes,
-  # same pattern as news_source.<name>.interval_hours living inside that
-  # source's own block. How long an article stays here before
-  # cleanup_expired removes it (or moves it to news_archive_dir, if
-  # that's configured) -- judged by fetched_at, not the source's own
-  # published_dt (see news_cache.py's own comment for why).
+  # Where fetched articles are cached, and how long they stay before
+  # cleanup_expired removes them (or moves them to news_archive_dir, if
+  # set).
   news_cache_dir:
     path: news_cache
     ttl_hours: 48
-  # Same nesting, for the same reason. The actual text delivered to a
-  # subscriber (distinct from push_outcomes' pass/fail status below).
+  # The actual message text delivered to a subscriber (an audit trail --
+  # distinct from push_outcomes' pass/fail status below).
   message_archive_dir:
     path: message_archive
     ttl_days: 7
   subscribers_db_file: subscribers.db
-  # news_archive_dir intentionally omitted -- archiving off, same as the
-  # pre-migration default (unset NEWS_ARCHIVE_DIR). default=None in code
-  # (news_cache.py), a legitimate state, not a required key. It has no
-  # TTL of its own -- articles move here INSTEAD of being deleted, so
-  # nothing prunes this directory by age. Stays a bare path (not
-  # path:/ttl_hours: nested) since there's nothing to nest.
+  # Set this to archive expired articles instead of deleting them (no
+  # ttl_hours -- nothing prunes this directory by age):
+  # news_archive_dir: news_archive
 
-  # How long the push_outcomes table (delivered/not_relevant/blocked/etc.,
-  # used for anomaly detection) keeps its rows -- a storage/retention
-  # concern like the two above, not push behavior itself, which is why
-  # this lives here rather than under subscription.*/push.*. Longer than
-  # the 30-day category-sightings window (categories.
-  # sighting_retention_days below): answering "was this normal?" after an
-  # incident means comparing against the weeks before it, and these rows
-  # are tiny (users_db.py's own comment). TODO.md has a design item to
-  # move push_outcomes to a log instead of a DB table -- if that lands,
-  # this setting moves or goes away with it.
+  # How long push_outcomes (per-push delivery status, used for anomaly
+  # detection) rows are kept.
   push_outcomes_ttl_days: 90
 
-# The AI connector -- generic across any provider speaking the OpenAI
-# /chat/completions wire format (agent.build_model_from_config's own
-# docstring). To point this deployment at a different provider/model
-# (Together.ai, Groq, Fireworks, a self-hosted vLLM server, ...), change
-# url/model/api-key below -- no code change, no new dependency. `main` is
-# the agent's own model; `guardrail` backs guardrails.py's layer 2 router
-# and layer 4 output check (docs/plans/model-portability-plan.md's Level
-# 2 per-stage routing) -- both point at the same model below by default,
-# since no second provider is configured in this example, but they're
-# independently swappable.
-#
-# reasoning_effort: "none" is a DeepSeek-specific workaround (thinking
-# mode rejects the forced tool_choice with_structured_output relies on --
-# see agent.build_model_from_config's docstring for the 2026-08-21
-# incident this fixes). Omit this key entirely for a provider that
-# doesn't need or doesn't accept it.
+# The AI connector -- works with any provider speaking the OpenAI
+# /chat/completions wire format (Together.ai, Groq, Fireworks, a
+# self-hosted vLLM server, ...). `main` is the agent's own model;
+# `guardrail` backs the router/output-check layers (guardrails.py) --
+# independently swappable, shown here pointed at the same model.
+# reasoning_effort/request_timeout_seconds are optional; omit
+# reasoning_effort for a provider that doesn't accept it.
 models:
   main:
     url: https://api.deepseek.com
@@ -84,42 +57,25 @@ models:
     request_timeout_seconds: 20
 
 # The news-fetching pipeline. ONE news_source: key for the whole file --
-# see the newsapi/gnews/perigon comment further down before adding
-# anything here; a second top-level `news_source:` mapping would silently
-# shadow this entire block (YAML duplicate-key behavior keeps only the
-# last one), not merge with it.
+# a second top-level `news_source:` mapping silently shadows this entire
+# block (YAML duplicate-key behavior), it does not merge with it.
 #
-# tick_seconds/default_interval_hours/request_delay_seconds apply
-# globally, regardless of which sources are configured below --
-# tick_seconds is bot.py's INGEST_TICK_SECONDS (how often the scheduler
-# even checks whether anything's due, not how often a source actually
-# gets pulled); default_interval_hours is news_ingest.py's fallback pull
-# interval for any source with no per-source interval_hours override
-# (see newsapi/perigon below for what an override looks like);
-# request_delay_seconds is the delay between consecutive same-source
-# requests (GNews's own documented 1 req/sec free-tier limit, applied
-# generally since other sources' limits aren't always documented).
+# tick_seconds: how often the scheduler checks whether anything's due.
+# default_interval_hours: fallback pull interval for a source with no
+# per-source override. request_delay_seconds: delay between consecutive
+# same-source requests.
 news_source:
   tick_seconds: 900
   default_interval_hours: 4
   request_delay_seconds: 1.1
 
-  # RSS news sources -- free, no API key, query-less (each returns its
-  # latest N items regardless of what's asked, see news_sources._fetch_rss).
-  # Add/remove/edit a feed by editing this list, no code change --
-  # news_sources._rss_sources_from_settings reads it. default=[] in code:
-  # an empty list here is a legitimate (if sparse) state, not an error.
-  # hackernews/arxiv (free, always-on) are NOT here -- wired in directly
-  # by news_sources._always_on_sources, see its own docstring for why.
-  # newsapi/gnews/perigon (credential-gated) live in news_source.api
-  # below instead, one entry per source.
-  #
-  # THIS SAME LIST MUST BE KEPT IN settings.oracle.yml TOO (byte-identical,
-  # no secrets involved either way) -- production reads settings.oracle.yml
-  # only, never this file. An edit here alone silently drops production to
-  # zero RSS sources on the next deploy, no crash, no error (default=[]
-  # fails open by design) -- see docs/standaloneplan/01-settings-migration.md's
-  # "Migration methodology" for why this atomicity matters.
+  # Free, no-key RSS feeds -- add/remove/edit a feed by editing this
+  # list, no code change needed. Example entry:
+  #   - key: some_source
+  #     display_name: Some Source
+  #     url: https://example.com/feed.xml
+  # Keep this list identical to settings.oracle.yml's -- production
+  # reads that file, not this one.
   rss:
     # --- AI/ML publications ---------------------------------------------
     - key: openai_blog
@@ -197,55 +153,14 @@ news_source:
       display_name: TechRadar
       url: https://www.techradar.com/rss
 
-  # api -- unlike everything above, these are genuinely OPTIONAL,
-  # credential-gated sources: [{key, type, api-key, interval_hours,
-  # daily_cap}, ...], one entry per source. `type` selects which
-  # news_adapters/*.py class (its own TYPE attribute) handles this entry;
-  # `key` is this source's own registry identity, distinct from `type` so
-  # two differently-keyed sources could someday share one adapter type
-  # (e.g. two NewsAPI accounts under different keys). An entry with an
-  # unresolvable api-key (e.g. an unset env var) is silently dropped --
-  # that ONE source is skipped, same as an unset env var always did --
-  # without taking any OTHER configured entry down with it (see
-  # news_sources._raw_api_entries's own docstring for the trailsign
-  # finding this design had to account for: resolving the whole list in
-  # one call would raise for everything the moment any single entry's
-  # credential fails to resolve).
-  #
-  # Uncomment only the ones you actually have a key for; DO NOT uncomment
-  # one with a placeholder/missing env var "just to have it visible" --
-  # unlike storage.*/models.* (required=True, must always resolve), a
-  # trailsign-resolve node that's PRESENT but points at an unset env var
-  # raises SettingsError the moment it's checked, even though the entry
-  # is still dropped gracefully once caught. Omitting the entry entirely
-  # is the only way to express "I don't have this one".
-  #
-  # hackernews/arxiv are NOT listed here -- free, no credential, no
-  # override, always registered directly by news_sources.py itself (see
-  # news_sources._always_on_sources). Only credential-gated sources go
-  # in this list; a `type` that has no matching class under news_adapters/
-  # fails the whole process at startup (validate_configured_types), so
-  # don't add an entry here without a corresponding news_adapters/*.py
-  # file already shipped.
-  #
-  # This stays nested under the SAME news_source: key as tick_seconds/
-  # rss above (this indentation is exactly where it'd paste in) -- never
-  # add a second top-level `news_source:` mapping, YAML would keep only
-  # the last one and silently drop everything above it.
-  #
-  # interval_hours/daily_cap override news_source.default_interval_hours
-  # (above) per source -- e.g. perigon's 8h/3-per-day matches its
-  # 150/month budget, newsapi's 24h/1-per-day matches the individual-use
-  # judgment recorded in docs/plans/local-news-cache-plan.md. Omit either
-  # field on an entry to just use the global default / no cap.
-  #
-  # newsapi's free tier is documented as development/testing only, not
-  # production (docs/current/ai-news-sources.md) -- also restricted from
-  # agent.py's live search_news regardless (RESTRICTED_SOURCES), only used
-  # by the scheduled ingest job. perigon's budget is small (150/month) and
-  # already spoken for by news_ingest.py's own capped pulls -- also
-  # RESTRICTED_SOURCES. gnews is the one with real headroom (100/day) and
-  # isn't restricted from live search either.
+  # Optional, credential-gated sources: one entry per source, `type`
+  # selects the news_adapters/*.py class that handles it, `key` is this
+  # source's own registry identity. interval_hours/daily_cap override
+  # news_source.default_interval_hours per source; omit either to use
+  # the global default / no cap. An entry whose api-key can't resolve
+  # (e.g. an unset env var) is silently skipped, so leave a source
+  # entirely out of this list rather than uncommenting it with a
+  # placeholder you don't intend to fill in.
   #
   # api:
   #   - key: newsapi
@@ -268,28 +183,17 @@ news_source:
   #     interval_hours: 8
   #     daily_cap: 3
 
-# Push job mechanics (bot.py's tick_seconds, news_push.py's own
-# content-selection tuning) -- distinct from subscription.* below, which
-# is the subscriber's own cadence preference, not how the push job
-# builds/paces a digest.
-#
-# max_articles_per_topic/max_interests_per_push bound how much one
-# subscriber gets in one cycle (see news_push.py's own comments --
-# interests that don't fit wait for a later cycle, they aren't dropped).
-# relevance_keep/novelty_relevance_keep are the absolute-count
-# clamps (fraction of pool, floor, ceiling) news_push.py's relevance
-# filter uses instead of a fixed fraction -- see news_push.py's own long
-# comment for the three measurements that forced this shape (a fixed
-# fraction breaks across pool sizes and topic phrasings, and recall past
-# a point stops being worth chasing). near_duplicate_similarity is the
-# cosine-similarity threshold two articles collapse at (same wire story
-# under two links, or syndication). max_article_age_hours is a ceiling
-# on an article's own publish date regardless of when we fetched it
-# (deliberately generous -- excludes absurdly stale content, not meant
-# to enforce freshness). max_html_attempts is the retry budget before
-# giving up on valid Telegram HTML from the model. unreachable_strikes
-# is consecutive undeliverable digests before push turns off for that
-# subscriber.
+# Push job mechanics -- how the push job builds/paces one digest, as
+# opposed to subscription.* below (the subscriber's own cadence
+# preference). tick_seconds: scheduler cadence. max_articles_per_topic/
+# max_interests_per_push: how much one subscriber gets in one cycle.
+# relevance_keep/novelty_relevance_keep: {fraction, min, max} clamps on
+# how many candidate articles survive the relevance filter.
+# near_duplicate_similarity: cosine-similarity threshold two articles
+# collapse at. max_article_age_hours: ceiling on an article's own
+# publish date. max_html_attempts: retry budget for valid Telegram
+# HTML. unreachable_strikes: consecutive failed digests before push
+# turns off for that subscriber.
 push:
   tick_seconds: 900
   max_articles_per_topic: 5
@@ -307,45 +211,29 @@ push:
     min: 40
     max: 100
 
-# Per-subscriber account/subscription settings (users_db.py).
-# default_interval_hours/min_interval_hours are the subscriber-facing
-# push-frequency default and floor -- a subscription-level preference,
-# not push mechanics (that's push.* above). pushed_link_retention_hours
-# is how long the "already sent this link" dedup memory lasts per
-# subscriber (see users_db.py's own comment -- deliberately longer than
-# news_cache.py's own cache TTL, since the dedup memory only needs to
-# outlast whatever the cache TTL already bounds).
+# Per-subscriber account settings. default_interval_hours/
+# min_interval_hours: push-frequency default and floor a subscriber can
+# set. pushed_link_retention_hours: how long the "already sent this
+# link" dedup memory lasts. max_interests: per-subscriber interest cap.
 subscription:
   default_interval_hours: 24
   min_interval_hours: 1
   pushed_link_retention_hours: 72
   max_interests: 10
 
-# The category-taxonomy-proposal feature specifically (users_db.py's
-# categories/category_sightings tables) -- an isolated feature, kept
-# separate from subscription.*/push.* above rather than folded into
-# either. proposal_threshold is how many sightings of an out-of-taxonomy
-# label inside the retention window before an admin is asked to
-# activate/merge/reject it (see users_db.py's own comment: a placeholder,
-# not a measured value, revisit once there's a real distribution to read).
+# The category-taxonomy-proposal feature. proposal_threshold: sightings
+# of an out-of-taxonomy label needed before an admin is asked to
+# activate/merge/reject it. sighting_retention_days: how far back those
+# sightings count.
 categories:
   proposal_threshold: 5
   sighting_retention_days: 30
 
-# Delivery channel config -- currently just Telegram (bot.py/admin_bot.py/
-# combined_bot.py all read these three independently, each via its own
-# get_settings().resolved() call, same "no shared helper" shape the old
-# os.environ[...] reads had -- see docs/standaloneplan/01-settings-migration.md).
-# All three required=True: a bot that can't authenticate to Telegram at
-# all should fail loudly at startup, not limp along -- same bracket-access
-# (os.environ["X"], KeyError-on-missing) semantics the old reads had.
-#
-# bot-token is the info bot's own token (what subscribers talk to);
-# admin-bot-token is the SEPARATE second bot admin_bot.py runs (category
-# proposal review, access-request approval); admin-chat-id is the
-# operator's own numeric Telegram user id -- always allowed past the
-# access-request gate (bot.py's own docstring), and where admin_bot.py's
-# notifications land.
+# Delivery channel config -- currently just Telegram. bot-token: the
+# info bot's own token (what subscribers talk to). admin-bot-token: the
+# SEPARATE second bot admin_bot.py runs (category proposal review,
+# access-request approval). admin-chat-id: the operator's own numeric
+# Telegram user id.
 delivery:
   telegram:
     bot-token:
@@ -358,39 +246,17 @@ delivery:
       trailsign-resolve: environment-variable
       name: ADMIN_CHAT_ID
 
-# Pluggable telemetry providers (see telemetry.py, telemetry_providers/)
-# -- ONE list, telemetry.providers, empty/absent by default, same "no
-# entry means off" contract news_source.api has (validate_configured_
-# types fails the whole process at startup if a configured type has no
-# matching class under telemetry_providers/). Which category(ies) an
-# entry actually feeds -- general app-event logging (guardrails.py/
-# news_classify.py/etc.'s _events.log(...) call sites) vs. llm-call
-# tracing via auto-instrumentation -- comes from the discovered
-# provider class's own KIND, not from a separate list a deployer picks;
-# otlp's KIND is {"general","llm"}, so one otlp entry (as below) feeds
-# both from a single config line -- see telemetry.py's own module
-# docstring for why an earlier two-separate-lists version of this
-# schema was wrong (it forced the same entry to be duplicated once per
-# list, which is what caused a real double-export bug, caught by code
-# review 2026-09-03).
+# Pluggable telemetry providers (telemetry.py, telemetry_providers/) --
+# one list, empty/absent by default (telemetry off). Each entry's `type`
+# selects a provider class, whose own KIND decides whether it receives
+# general app-event logging, LLM-call tracing, or both -- e.g. otlp
+# below feeds both from one entry. instrument_langchain additionally
+# attaches LangChain's auto-instrumentation for that entry.
 #
-# Commented out here on purpose, unlike settings.oracle.yml's live
-# entry -- there is no more "enabled" boolean gate to keep this safe
-# by default the way the old telemetry.enabled/LOGFIRE_ENABLED flag did.
-# LOGFIRE_API_KEY is present in this project's development environment
-# (see docs/plans/observability-platform-plan.md), so an UNcommented
-# otlp entry here would start every local script/test run exporting
-# real spans the moment that env var resolves -- exactly the failure
-# mode the old enabled-flag design existed to prevent. Uncomment and
-# fill in your own endpoint/token to test telemetry locally.
-#
-# endpoint is a literal value, not derived from the token at runtime
-# the way it used to be (see agent.logfire_traces_endpoint) -- compute
-# it once with that function and paste the result in, per provider/
-# region. instrument_langchain attaches LangChain's auto-instrumentation
-# to the llm provider specifically (a separate internal TracerProvider
-# from general's -- see telemetry.py's own module docstring), never the
-# general one, regardless of this being one shared config entry.
+# Left commented out here -- uncomment and fill in your own
+# endpoint/token to test telemetry locally. endpoint is computed once
+# per provider/region (see agent.logfire_traces_endpoint for Logfire's
+# own token-to-endpoint tool) and pasted in as a literal value.
 #
 # telemetry:
 #   providers:
@@ -402,13 +268,10 @@ delivery:
 #           name: LOGFIRE_API_KEY
 #       instrument_langchain: true
 
-# test_api.py's local HTTP debug endpoint (POST /test_message) -- ships in
-# the image (see Dockerfile's COPY list) and is enabled on both INT and
-# PROD today (local-infra/infrastructure.yaml's docker_run.command), used
-# by tools/check_logfire.py and manual live verification. Both optional:
-# `enabled` fails closed (server never starts) same as the old
-# `if not os.environ.get("ENABLE_TEST_API")` did; `port` keeps its old
-# 8765 default.
+# test_api.py's local HTTP debug endpoint (POST /test_message) -- a
+# curl-friendly way to exercise the bot's pipeline without a real
+# Telegram client. Both optional: enabled defaults to off (server never
+# starts); port defaults to 8765.
 test_api:
   enabled:
     trailsign-resolve: environment-variable

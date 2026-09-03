@@ -1,21 +1,11 @@
-# Local INT-environment settings.yml TEMPLATE -- committed, generic, safe
-# forever, as long as it stays this way. Same criterion as settings.yml/
-# settings.oracle.yml (also in CLAUDE.md's Landmines): only env-var
-# names, placeholder/example identifiers, relative paths, and structure --
-# never a real, this-deployment-specific value. Real values (the local
-# INT machine's IP, the INT-only Telegram bot tokens, the real
-# TOGETHER_API_KEY) live in local-infra/infrastructure.yaml (gitignored).
-#
-# What this file is for: INT shares the SAME baked-in image as
-# production, but must NOT share production's settings.oracle.yml --
-# editing that file's models.* would repoint production at whatever INT
-# is testing. This is a separate file, baked into the image alongside
-# settings.oracle.yml (see Dockerfile's COPY list), selected via
-# -e SETTINGS_FILE=/app/settings.int.yml on the INT container only.
-#
-# storage.* mirrors settings.oracle.yml's shape exactly (same env-var
-# names, since INT's docker_run.command already sets them the same way
-# prod's does) -- only models.* differs.
+# Local INT-environment settings file -- same real-values-forbidden
+# criterion as settings.yml/settings.oracle.yml (CLAUDE.md's Landmines).
+# A separate file from settings.oracle.yml on purpose: editing that
+# file's models.* to test something would repoint PRODUCTION at it too.
+# Selected via -e SETTINGS_FILE=/app/settings.int.yml on the INT
+# container only. storage.*/delivery.*/etc. mirror settings.oracle.yml's
+# shape exactly -- only models.*/telemetry.* deliberately differ, see
+# each section below for why.
 
 storage:
   news_cache_dir:
@@ -36,57 +26,15 @@ storage:
     name: SUBSCRIBERS_DB_FILE
   push_outcomes_ttl_days: 90
 
-# main: same DeepSeek config as settings.oracle.yml -- unchanged, this is
-# the model that matters for actual reply quality, kept identical to
-# production on purpose. Guardrail must never cost more than this per
-# token -- that ruled out several candidates below on price alone.
-#
-# guardrail: deepseek-ai/DeepSeek-V4-Flash-0731, but via Together.ai
-# rather than DeepSeek's own API -- same model as main, tied on price
-# ($0.14/$0.28, combined $0.42, identical to DeepSeek's own pricing for
-# this model), not actually cheaper. The real point: guardrail is where
-# INT's call volume lives (layer 2/4 + ingest classification, see
-# agent.build_model_from_settings's docstring -- far more calls than the
-# main model ever makes), and routing that volume through a SEPARATE
-# Together account/budget means it can't drain or rate-limit-starve the
-# main DeepSeek API key. Chosen after two genuinely cheaper Together
-# candidates both failed real verification (below) -- this is the
-# fallback that's actually reliable, not the first choice on price.
-#
-# TWO CHEAPER CANDIDATES TRIED AND REJECTED, 2026-09-02 -- don't re-try
-# either without addressing what broke them:
-#
-# - openai/gpt-oss-20b ($0.25 combined): passed a single-trial
-#   tools/measure_guardrails.py sanity check (layer2 18/21, multi-intent
-#   6/6, layer4 8/8) but failed hard under real INT load once deployed --
-#   sustained OpenAITimeoutError on both ingest classify_articles batches
-#   and live test_api messages (well past the initial restart-ingest-
-#   burst window, not explained by it), plus one live call that extracted
-#   the wrong interest text entirely ("robotics" -> "final"). Read as a
-#   reasoning-style model generating more than a router call needs,
-#   showing up as both timeouts and occasional garbled structured output
-#   -- a single-trial pass was not enough signal; real load caught what
-#   it didn't.
-# - arize-ai/qwen-2-1.5b-instruct ($0.20 combined): failed the isolated
-#   sanity check outright -- layer2 2/21 (10%), multi-intent 1/6 (17%).
-#   1.5B is too small for this task's nuance (bilingual, multi-field
-#   extraction).
-#
-# Also confirmed: Together's /v1/models listing has NO reliable field for
-# "actually callable serverless, not dedicated-endpoint-only" -- nonzero
-# pricing does NOT mean available. meta-llama/Meta-Llama-3.1-8B-Instruct-
-# Turbo and 7 other cheap/"Turbo"-branded candidates all returned "Unable
-# to access non-serverless model ... create a dedicated endpoint" on a
-# real call (Qwen2.5-7B/72B-Turbo, Mistral-Small-24B, Llama-3.2-3B,
-# Llama-3-8b-chat-hf, Meta-Llama-3-8B-Instruct, Ministral-3-14B,
-# arcee-ai/trinity-mini). Two more ARE callable but weren't viable
-# either: Llama-3.3-70B-Instruct-Turbo works but costs $2.08 combined (5x
-# main); Qwen/Qwen3.5-9B is callable and ties main's price, but its reply
-# leaked a raw "</think>" tag into content -- a reasoning-model tell,
-# same risk class as gpt-oss-20b's failure, not tested further. A single
-# ChatOpenAI(...).invoke() probe call is enough to rule a candidate in/
-# out on availability before spending on the full measure_guardrails.py
-# suite -- do that first for any future candidate.
+# main: identical to production on purpose (the model that matters for
+# actual reply quality). guardrail: routed through a SEPARATE Together.ai
+# account instead of DeepSeek direct, deliberately -- so INT's high
+# guardrail call volume can't drain or rate-limit-starve the main
+# DeepSeek API key. Two cheaper Together candidates were tried and
+# rejected (real failures under load, not just a price choice) -- don't
+# swap this model without reading
+# docs/standaloneplan/01-settings-migration.md's "models.*" section
+# first.
 models:
   main:
     url: https://api.deepseek.com
@@ -104,39 +52,20 @@ models:
       name: TOGETHER_API_KEY
     request_timeout_seconds: 20
 
-# The news-fetching pipeline. ONE news_source: key for the whole file --
-# this file had a real bug 2026-09-02 to 2026-09-03 where a second
-# top-level `news_source:` mapping (the newsapi/gnews/perigon block that
-# used to be further down) silently shadowed this entire rss list --
-# YAML duplicate-key handling keeps only the LAST mapping. Confirmed live
-# via yaml.safe_load showing only {newsapi, gnews, perigon} as keys, rss
-# silently gone -- meaning the INT container deployed with that bug had
-# NO RSS sources despite this list being right here in the file. Fixed
-# by merging everything into one mapping; don't reintroduce a second
-# `news_source:` key.
-#
-# RSS list byte-identical to settings.yml/settings.oracle.yml's
-# news_source.rss -- without it, INT falls back to default=[]
-# (news_sources.py) and loses every RSS source, which would make INT
-# nearly useless for testing the real news pipeline. Keep in sync with
-# the other two files' lists.
+# ONE news_source: key for the whole file -- a second top-level mapping
+# silently drops everything above it (real incident, see
+# docs/standaloneplan/01-settings-migration.md's "news_source.*"
+# section). Keep the rss: list byte-identical to the other two files'.
 news_source:
   tick_seconds: 900
   default_interval_hours: 4
   request_delay_seconds: 1.1
 
-  # newsapi/gnews/perigon ran here TEMPORARILY, 2026-09-02 to 2026-09-03,
-  # as a one-day live test of the just-shipped NewsSourceAdapter/
-  # news_source.api migration, using the same real keys PROD has (see
-  # local-infra/infrastructure.yaml's own history on where those came
-  # from). Test confirmed working (real newsapi/gnews pulls, perigon's
-  # expected 403, a real push digest delivered) and the block was removed
-  # once INT was stopped at the end of the window -- this was never meant
-  # to be a standing INT config, matching how INT never had these three
-  # sources before this test. If it needs to come back (e.g. for another
-  # round of live testing), see git history for the exact api: list shape
-  # (settings.oracle.yml's own api: block is the same shape, permanently
-  # live, and a ready template).
+  # No api: block here (unlike settings.oracle.yml's live one) --
+  # newsapi/gnews/perigon aren't a standing INT config. They ran here
+  # temporarily for a one-day live test (see local-infra/infrastructure.yaml's
+  # history for what that confirmed); settings.oracle.yml's api: block is
+  # the ready-to-copy shape if they need to come back.
 
   rss:
     - key: openai_blog
@@ -234,11 +163,8 @@ categories:
   proposal_threshold: 5
   sighting_retention_days: 30
 
-# See settings.yml's own comments for what each of these controls. Bridges
-# to the same plain env var names -- unlike settings.oracle.yml's PROD
-# deploy, INT's docker_run.command sets these as plain literal values
-# directly (no vault/*_SECRET_OCID indirection), but the env var NAMES
-# this file bridges to are identical either way.
+# Same env var names as settings.oracle.yml, but INT's docker_run.command
+# sets them as plain literal values, not via vault/*_SECRET_OCID.
 delivery:
   telegram:
     bot-token:
@@ -251,41 +177,17 @@ delivery:
       trailsign-resolve: environment-variable
       name: ADMIN_CHAT_ID
 
-# No telemetry.providers section here, deliberately -- same "absent
-# means off" contract news_source.api/news_source.rss already have when
-# a deployer configures nothing (default=[]). INT's docker_run.command
-# has never set LOGFIRE_API_KEY -- not an oversight: sharing
-# production's Logfire project/service_name across two live instances
-# would defeat the dead-man's-switch alerts and commingle trace data
-# (see local-infra/infrastructure.yaml's own note on this). If INT ever
-# needs its own telemetry, give it its OWN Logfire project, not PROD's.
-#
-# TEMPORARY, added 2026-09-03: a deliberate live test of the just-shipped
-# pluggable telemetry_providers/ architecture, using the two providers
-# that don't touch PROD's Logfire project at all -- file (writes to the
-# persistent /data volume, no external dependency) and phoenix (a
-# self-hosted Phoenix container run on the dev machine specifically for
-# this test, NOT the old retired Phoenix VM -- see
-# telemetry_providers/phoenix.py's own docstring for why this needs no
-# arize-phoenix-otel dependency). REMOVE this whole telemetry: block once
-# the test window ends -- same "never meant to be a standing INT config"
-# reasoning as the newsapi/gnews/perigon test block that used to be
-# here (see git history), not a permanent INT telemetry setup.
-#
-# endpoint is the dev machine's LAN IP (192.168.0.26 as of this test --
-# same subnet as INT's own 192.168.0.10, confirmed reachable), not
-# localhost -- "localhost" from inside INT's own container would mean
-# INT's own machine, not the dev machine running Phoenix. Verify this
-# is still reachable from INT's actual machine before trusting it, not
-# just from the dev machine itself (Windows Firewall rules can differ
-# by source even on the same subnet).
-#
-# instrument_langchain: true on the phoenix entry -- without it, nothing
-# ever attaches LangChain's auto-instrumentation to the llm provider, so
-# Phoenix would receive zero spans despite being otherwise correctly
-# configured (see telemetry.py's setup_telemetry() and otlp.py's own
-# module docstring for the real gap this closes -- it used to be an
-# otlp-only config key).
+# Not PROD's Logfire project -- sharing it would defeat PROD's
+# dead-man's-switch alerts and commingle trace data. TEMPORARY, added
+# 2026-09-03 for a live test of the pluggable telemetry_providers/
+# architecture: file (local, no external dependency) + phoenix (a
+# self-hosted container on the dev machine). REMOVE this block once the
+# test window ends -- not a standing INT config; see
+# local-infra/infrastructure.yaml's deploy notes and
+# docs/standaloneplan/01-settings-migration.md's "Telemetry providers"
+# sections if this needs to come back. endpoint is the dev machine's LAN
+# IP, not localhost. instrument_langchain: true is required on the
+# phoenix entry or it silently receives zero spans.
 telemetry:
   providers:
     - type: file
