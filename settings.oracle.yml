@@ -28,15 +28,28 @@
 # deploy succeeded.
 
 storage:
+  # ttl_hours is a sibling of path, not of news_cache_dir's
+  # trailsign-resolve node -- a node containing trailsign-resolve
+  # collapses entirely to the resolver's return value, so ttl_hours has
+  # to sit one level up or it would be silently discarded. Confirmed
+  # live, not assumed: Settings({"news_cache_dir": {"trailsign-resolve":
+  # ..., "ttl_hours": 48}}).resolved("news_cache_dir") returns a bare
+  # string, not a dict -- ttl_hours vanishes. See settings.yml's own
+  # comment for why this is nested at all (co-locates the retention
+  # setting with the directory it prunes).
   news_cache_dir:
-    trailsign-resolve: environment-variable
-    name: NEWS_CACHE_DIR
+    path:
+      trailsign-resolve: environment-variable
+      name: NEWS_CACHE_DIR
+    ttl_hours: 48
   news_archive_dir:
     trailsign-resolve: environment-variable
     name: NEWS_ARCHIVE_DIR
   message_archive_dir:
-    trailsign-resolve: environment-variable
-    name: MESSAGE_ARCHIVE_DIR
+    path:
+      trailsign-resolve: environment-variable
+      name: MESSAGE_ARCHIVE_DIR
+    ttl_days: 7
   subscribers_db_file:
     trailsign-resolve: environment-variable
     name: SUBSCRIBERS_DB_FILE
@@ -187,6 +200,23 @@ news_source:
       url: https://www.techradar.com/rss
 
 # See settings.yml's own comments for what each of these controls.
+push:
+  tick_seconds: 900
+  max_articles_per_topic: 5
+  max_interests_per_push: 5
+  max_html_attempts: 3
+  near_duplicate_similarity: 0.95
+  max_article_age_hours: 168
+  unreachable_strikes: 3
+  relevance_keep:
+    fraction: 0.10
+    min: 20
+    max: 50
+  novelty_relevance_keep:
+    fraction: 0.20
+    min: 40
+    max: 100
+
 subscription:
   default_interval_hours: 24
   min_interval_hours: 1

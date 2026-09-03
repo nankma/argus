@@ -28,9 +28,9 @@ _events: Logger = LogfireLogger("argus.message_archive")
 # required=True, no default -- archiving is always on, so an absent
 # key here is a deployment mistake, not a legitimate "unset" state. See
 # docs/standaloneplan/01-settings-migration.md's "Migration methodology".
-ARCHIVE_DIR = get_settings().resolved("storage.message_archive_dir", required=True)
+ARCHIVE_DIR = get_settings().resolved("storage.message_archive_dir.path", required=True)
 
-DEFAULT_TTL_DAYS = 7
+DEFAULT_TTL_DAYS = get_settings().resolved("storage.message_archive_dir.ttl_days", default=7)
 
 # strftime("%Y%m%dT%H%M%S%f") is always exactly this many characters
 # (4+2+2+1+2+2+2+6) -- a fixed-width prefix lets prune_message_archive

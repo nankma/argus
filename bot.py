@@ -55,7 +55,7 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 # push_interval_hours (users_db.MIN_PUSH_INTERVAL_HOURS floors that at 1h),
 # just fine-grained enough that a due subscriber isn't kept waiting long
 # past their actual interval.
-PUSH_TICK_SECONDS = 900
+PUSH_TICK_SECONDS = get_settings().resolved("push.tick_seconds", default=900)
 
 # Same tick shape as PUSH_TICK_SECONDS -- check frequently, let each
 # source's own interval (news_source.<name>.interval_hours in Settings,

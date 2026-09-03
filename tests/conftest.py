@@ -15,8 +15,8 @@ from trailsign import Settings
 # fallback in the modules themselves.
 app_settings.reset_settings_for_tests(Settings({
     "storage": {
-        "news_cache_dir": "news_cache",
-        "message_archive_dir": "message_archive",
+        "news_cache_dir": {"path": "news_cache", "ttl_hours": 48},
+        "message_archive_dir": {"path": "message_archive", "ttl_days": 7},
         "subscribers_db_file": "subscribers.db",
     },
     "models": {

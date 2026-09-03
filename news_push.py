@@ -50,6 +50,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import agent
+from app_settings import get_settings
 import guardrails
 import message_archive
 import news_cache
@@ -68,9 +69,9 @@ from opentelemetry import trace
 # would otherwise receive 30 messages a day. Interests that don't fit
 # aren't dropped, they wait: interests_by_staleness puts the
 # longest-un-pushed first, so the queue drains over successive cycles.
-MAX_INTERESTS_PER_PUSH = 5
+MAX_INTERESTS_PER_PUSH = get_settings().resolved("push.max_interests_per_push", default=5)
 
-MAX_ARTICLES_PER_TOPIC = 5
+MAX_ARTICLES_PER_TOPIC = get_settings().resolved("push.max_articles_per_topic", default=5)
 
 # Whether a push includes the experimental "novelty extra" -- a single,
 # clearly-separate closing note ("by the way, we noticed something
@@ -114,7 +115,7 @@ NOVELTY_KEYNESS_THRESHOLD = -5.0
 # _emit_html_validation_attempt), so the cost of a couple of wasted
 # retries on the rare cycle that needs them is cheap relative to genuinely
 # broken formatting reaching a subscriber.
-MAX_HTML_ATTEMPTS = 3
+MAX_HTML_ATTEMPTS = get_settings().resolved("push.max_html_attempts", default=3)
 
 # _filter_by_relevance keeps at most this many of a topic's pool, ranked
 # by similarity to the topic's retrieval query -- not a fixed fraction
@@ -164,9 +165,9 @@ MAX_HTML_ATTEMPTS = 3
 # write_push_digest's single LLM judgment call. All three numbers are
 # first-cut, not re-validated end to end -- adjust freely; they're
 # independent named constants specifically so that's cheap.
-RELEVANCE_KEEP_FRACTION = 0.10
-RELEVANCE_KEEP_MIN = 20
-RELEVANCE_KEEP_MAX = 50
+RELEVANCE_KEEP_FRACTION = get_settings().resolved("push.relevance_keep.fraction", default=0.10)
+RELEVANCE_KEEP_MIN = get_settings().resolved("push.relevance_keep.min", default=20)
+RELEVANCE_KEEP_MAX = get_settings().resolved("push.relevance_keep.max", default=50)
 
 # A separate, wider clamp used ONLY for the novelty-extra search (see
 # _pick_novelty_extra and its call site below), not the regular digest.
@@ -185,9 +186,9 @@ RELEVANCE_KEEP_MAX = 50
 # it to clear the SAME strict bar as a regular candidate would defeat
 # the point -- this only needs to prove "still related to topic", not
 # "would have made the regular cut".
-NOVELTY_RELEVANCE_KEEP_FRACTION = 0.20
-NOVELTY_RELEVANCE_KEEP_MIN = 40
-NOVELTY_RELEVANCE_KEEP_MAX = 100
+NOVELTY_RELEVANCE_KEEP_FRACTION = get_settings().resolved("push.novelty_relevance_keep.fraction", default=0.20)
+NOVELTY_RELEVANCE_KEEP_MIN = get_settings().resolved("push.novelty_relevance_keep.min", default=40)
+NOVELTY_RELEVANCE_KEEP_MAX = get_settings().resolved("push.novelty_relevance_keep.max", default=100)
 
 # The relevance-filtered pool is capped here again before the regular
 # recency cut and novelty-extra search run -- matches RELEVANCE_KEEP_MAX
@@ -208,7 +209,7 @@ CANDIDATE_POOL_SIZE = RELEVANCE_KEEP_MAX
 # same-titled non-duplicates (BBC's "Tech Now"/"Tech Life" programme
 # titles, a different episode every time) indistinguishable by title
 # alone -- only content similarity tells them apart.
-NEAR_DUPLICATE_SIMILARITY = 0.95
+NEAR_DUPLICATE_SIMILARITY = get_settings().resolved("push.near_duplicate_similarity", default=0.95)
 
 # Ceiling on how old an article's own publication date may be to still be
 # pushed, regardless of when we downloaded it. Needed as of 2026-08-19,
@@ -225,7 +226,7 @@ NEAR_DUPLICATE_SIMILARITY = 0.95
 # already does that. arXiv's own indexing runs ~3 days behind
 # (docs/current/ai-news-sources.md), and those papers are legitimately worth
 # sending, so a tighter bound would silently drop a real source.
-MAX_ARTICLE_AGE_HOURS = 168
+MAX_ARTICLE_AGE_HOURS = get_settings().resolved("push.max_article_age_hours", default=168)
 
 _PUSH_DIGEST_PROMPT = (
     "You are a technology industry analyst writing a periodic news digest "
@@ -953,7 +954,7 @@ def _classify_send_failure(exc: Exception) -> str:
 # expensive mistake of the two: they simply stop receiving news, with no
 # error to notice. Three consecutive failures with no successful delivery
 # between them is not a blip.
-UNREACHABLE_STRIKES = 3
+UNREACHABLE_STRIKES = get_settings().resolved("push.unreachable_strikes", default=3)
 
 
 def _strike_unreachable_subscriber(chat_id: int, now: datetime) -> None:
