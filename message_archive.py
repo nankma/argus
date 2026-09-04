@@ -19,7 +19,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import users_db
+import subscriber_ops
 from app_settings import get_settings
 from telemetry import EventLogger, get_event_logger
 from telemetry_providers import Level
@@ -36,7 +36,7 @@ DEFAULT_TTL_DAYS = get_settings().resolved("storage.message_archive_dir.ttl_days
 # strftime("%Y%m%dT%H%M%S%f") is always exactly this many characters
 # (4+2+2+1+2+2+2+6) -- a fixed-width prefix lets prune_message_archive
 # recover the timestamp by slicing, not by splitting on a delimiter.
-# Splitting would be wrong: users_db.external_id's own values contain
+# Splitting would be wrong: subscriber_ops.external_id's own values contain
 # underscores ("sub_"/"anon_" + hex), so "up to the first _" would cut
 # the timestamp short for some recipients and not others.
 _TIMESTAMP_LEN = 21
@@ -45,13 +45,13 @@ _TIMESTAMP_LEN = 21
 def _archive_path(chat_id: int, now: datetime) -> Path:
     timestamp = now.strftime("%Y%m%dT%H%M%S%f")
     assert len(timestamp) == _TIMESTAMP_LEN
-    return Path(ARCHIVE_DIR) / f"{timestamp}_{users_db.external_id(chat_id)}.json"
+    return Path(ARCHIVE_DIR) / f"{timestamp}_{subscriber_ops.external_id(chat_id)}.json"
 
 
 def archive_message(chat_id: int, kind: str, text: str, topic: str | None = None,
                      now: datetime | None = None) -> None:
     """Writes one JSON file per sent message: timestamp, recipient (opaque
-    id via users_db.external_id -- same reasoning as news_push._record's
+    id via subscriber_ops.external_id -- same reasoning as news_push._record's
     span attribute: chat_id is a real Telegram identifier and this file
     may be inspected more casually than the DB), kind
     ('push_digest' | 'chat_reply'), topic (the subscriber's interest for
@@ -68,7 +68,7 @@ def archive_message(chat_id: int, kind: str, text: str, topic: str | None = None
     now = now or datetime.now(timezone.utc)
     record = {
         "timestamp": now.isoformat(),
-        "recipient": users_db.external_id(chat_id),
+        "recipient": subscriber_ops.external_id(chat_id),
         "kind": kind,
         "topic": topic,
         "text": text,

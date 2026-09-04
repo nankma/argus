@@ -262,7 +262,7 @@ def run_cases(chat_id: int, timeout: int) -> list[dict]:
     # abbreviations into an unambiguous English phrase), but that
     # expansion is itself an LLM call and NOT deterministic call to call
     # -- two different smoke runs normalized it to "Large Language Model"
-    # and "LLM Large Language Models" respectively. users_db.remove_
+    # and "LLM Large Language Models" respectively. subscriber_ops.remove_
     # interest only does an exact (case-insensitive) match with no fuzzy
     # word-overlap check (unlike add_interest) and dispatch_settings never
     # runs a remove target through normalization the way an add target
@@ -311,7 +311,7 @@ def main() -> int:
 
     # A FIXED id, reused every run. The clock-derived one it replaced made
     # a fresh subscriber on every invocation and never removed it -- see
-    # users_db.mark_test_account for what that cost.
+    # subscriber_ops.mark_test_account for what that cost.
     #
     # Reuse means each run starts from the previous run's state rather than
     # a blank one, which is a feature: that is how a returning subscriber's

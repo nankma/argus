@@ -3,10 +3,14 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from sqlalchemy import text
 from telegram.constants import ParseMode
 
 import admin_bot
-import users_db
+import category_ops
+import interest_cache_ops
+import storage
+import subscriber_ops
 
 
 def _make_callback_update(from_id, chat_id, action):
@@ -35,28 +39,28 @@ def _patch_bot(monkeypatch):
 
 def test_handle_decision_approves(isolated_subscribers_db, monkeypatch):
     sent = _patch_bot(monkeypatch)
-    users_db.request_access(4, "dave", "Dave")
+    subscriber_ops.request_access(4, "dave", "Dave")
     update = _make_callback_update(from_id=999, chat_id=4, action="approve")
     asyncio.run(admin_bot.handle_decision(update, _make_context()))
-    assert users_db.get_status(4) == users_db.APPROVED
+    assert subscriber_ops.get_status(4) == subscriber_ops.APPROVED
     update.callback_query.edit_message_text.assert_called_once()
     sent.assert_called_once()
 
 
 def test_handle_decision_denies(isolated_subscribers_db, monkeypatch):
     _patch_bot(monkeypatch)
-    users_db.request_access(5, "erin", "Erin")
+    subscriber_ops.request_access(5, "erin", "Erin")
     update = _make_callback_update(from_id=999, chat_id=5, action="deny")
     asyncio.run(admin_bot.handle_decision(update, _make_context()))
-    assert users_db.get_status(5) == users_db.DENIED
+    assert subscriber_ops.get_status(5) == subscriber_ops.DENIED
 
 
 def test_handle_decision_rejects_non_admin(isolated_subscribers_db, monkeypatch):
     sent = _patch_bot(monkeypatch)
-    users_db.request_access(6, "frank", "Frank")
+    subscriber_ops.request_access(6, "frank", "Frank")
     update = _make_callback_update(from_id=111, chat_id=6, action="approve")
     asyncio.run(admin_bot.handle_decision(update, _make_context(admin_chat_id=999)))
-    assert users_db.get_status(6) == users_db.PENDING
+    assert subscriber_ops.get_status(6) == subscriber_ops.PENDING
     update.callback_query.answer.assert_called_once_with("Not authorized.", show_alert=True)
     sent.assert_not_called()
 
@@ -110,7 +114,7 @@ def test_merge_keyboard_offers_only_the_given_targets():
 
 def test_every_callback_fits_telegram_s_limit():
     """64 bytes, and the merge variant packs two names into one payload."""
-    long_name = "A" * 32          # users_db.MAX_CATEGORY_NAME_LENGTH
+    long_name = "A" * 32          # category_ops.MAX_CATEGORY_NAME_LENGTH
     keyboard = admin_bot._merge_target_keyboard(long_name, ["Consumer", "Regulation"])
 
     for row in keyboard.inline_keyboard:
@@ -145,7 +149,7 @@ def _make_category_callback_update(from_id, data, message_text="Original proposa
 
 def _propose(name, now=None):
     now = now or datetime(2026, 8, 20, tzinfo=timezone.utc)
-    users_db.record_category_sighting(name, now, "https://e/1", "A story")
+    category_ops.record_category_sighting(name, now, "https://e/1", "A story")
 
 
 def test_category_decision_rejects_non_admin(isolated_subscribers_db):
@@ -156,7 +160,7 @@ def test_category_decision_rejects_non_admin(isolated_subscribers_db):
 
     update.callback_query.answer.assert_called_once_with("Not authorized.", show_alert=True)
     update.callback_query.edit_message_text.assert_not_called()
-    assert dict(users_db.get_active_categories()).get("Healthcare") is None
+    assert dict(category_ops.get_active_categories()).get("Healthcare") is None
 
 
 def test_category_decision_activate_flips_status_and_edits_the_message(isolated_subscribers_db):
@@ -165,7 +169,7 @@ def test_category_decision_activate_flips_status_and_edits_the_message(isolated_
 
     asyncio.run(admin_bot.handle_category_decision(update, _make_context()))
 
-    assert "Healthcare" in dict(users_db.get_active_categories())
+    assert "Healthcare" in dict(category_ops.get_active_categories())
     update.callback_query.answer.assert_called_once_with()
     update.callback_query.edit_message_text.assert_called_once_with(
         "Original proposal text.\n\nActivated.", parse_mode=ParseMode.HTML,
@@ -180,7 +184,7 @@ def test_category_decision_activate_twice_reports_no_change_and_does_not_reactiv
     no-op; the handler must say so rather than implying it worked twice."""
     _propose("Healthcare")
     now = datetime(2026, 8, 20, tzinfo=timezone.utc)
-    users_db.activate_category("Healthcare", "admin:1", now)
+    category_ops.activate_category("Healthcare", "admin:1", now)
     update = _make_category_callback_update(from_id=999, data="cat:activate:Healthcare")
 
     asyncio.run(admin_bot.handle_category_decision(update, _make_context()))
@@ -197,9 +201,9 @@ def test_category_decision_reject_flips_status(isolated_subscribers_db):
 
     asyncio.run(admin_bot.handle_category_decision(update, _make_context()))
 
-    with users_db._connect() as conn:
+    with storage.get_storage()._engine.begin() as conn:
         status = conn.execute(
-            "SELECT status FROM categories WHERE name = 'Healthcare'"
+            text("SELECT status FROM categories WHERE name = 'Healthcare'")
         ).fetchone()[0]
     assert status == "rejected"
     update.callback_query.edit_message_text.assert_called_once_with(
@@ -211,7 +215,7 @@ def test_category_decision_reject_flips_status(isolated_subscribers_db):
 def test_category_decision_reject_twice_reports_no_change(isolated_subscribers_db):
     _propose("Healthcare")
     now = datetime(2026, 8, 20, tzinfo=timezone.utc)
-    users_db.reject_category("Healthcare", "admin:1", now)
+    category_ops.reject_category("Healthcare", "admin:1", now)
     update = _make_category_callback_update(from_id=999, data="cat:reject:Healthcare")
 
     asyncio.run(admin_bot.handle_category_decision(update, _make_context()))
@@ -238,23 +242,23 @@ def test_category_decision_merge_shows_the_target_keyboard_without_deciding(
     update.callback_query.edit_message_reply_markup.assert_called_once()
     keyboard = update.callback_query.edit_message_reply_markup.call_args[0][0]
     data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-    assert data == [f"cat:into:Healthcare:{name}" for name, _ in users_db.get_active_categories()]
-    with users_db._connect() as conn:
+    assert data == [f"cat:into:Healthcare:{name}" for name, _ in category_ops.get_active_categories()]
+    with storage.get_storage()._engine.begin() as conn:
         status = conn.execute(
-            "SELECT status FROM categories WHERE name = 'Healthcare'"
+            text("SELECT status FROM categories WHERE name = 'Healthcare'")
         ).fetchone()[0]
     assert status == "proposed", "picking 'Merge into...' must not decide anything by itself"
 
 
 def test_category_decision_into_merges_and_rewrites_interests(isolated_subscribers_db):
     _propose("Healthcare")
-    users_db.set_interest_categories("hospitals", ["Healthcare"])
+    interest_cache_ops.set_interest_categories("hospitals", ["Healthcare"])
     update = _make_category_callback_update(from_id=999, data="cat:into:Healthcare:AI")
 
     asyncio.run(admin_bot.handle_category_decision(update, _make_context()))
 
-    assert users_db.resolve_category_name("Healthcare") == "AI"
-    assert users_db.get_cached_interest_categories(["hospitals"]) == {"hospitals": ["AI"]}
+    assert category_ops.resolve_category_name("Healthcare") == "AI"
+    assert interest_cache_ops.get_cached_interest_categories(["hospitals"]) == {"hospitals": ["AI"]}
     update.callback_query.edit_message_text.assert_called_once_with(
         "Original proposal text.\n\nMerged into AI.", parse_mode=ParseMode.HTML,
         reply_markup=None,
@@ -267,9 +271,9 @@ def test_category_decision_into_a_non_active_target_reports_failure(isolated_sub
 
     asyncio.run(admin_bot.handle_category_decision(update, _make_context()))
 
-    with users_db._connect() as conn:
+    with storage.get_storage()._engine.begin() as conn:
         status = conn.execute(
-            "SELECT status FROM categories WHERE name = 'Healthcare'"
+            text("SELECT status FROM categories WHERE name = 'Healthcare'")
         ).fetchone()[0]
     assert status == "proposed", "a refused merge must not change status"
     update.callback_query.edit_message_text.assert_called_once_with(
@@ -289,9 +293,9 @@ def test_category_decision_unknown_action_is_rejected_without_touching_the_db(
 
     update.callback_query.answer.assert_called_once_with("Unknown action.", show_alert=True)
     update.callback_query.edit_message_text.assert_not_called()
-    with users_db._connect() as conn:
+    with storage.get_storage()._engine.begin() as conn:
         status = conn.execute(
-            "SELECT status FROM categories WHERE name = 'Healthcare'"
+            text("SELECT status FROM categories WHERE name = 'Healthcare'")
         ).fetchone()[0]
     assert status == "proposed"
 

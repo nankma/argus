@@ -36,7 +36,7 @@ nothing left for tools to do.
 "New" separates two things that were previously conflated, and the
 distinction is load-bearing -- see select_candidate_articles:
 
-- FILTERING is done by users_db's pushed_links alone. "Already seen" means
+- FILTERING is done by subscriber_ops's pushed_links alone. "Already seen" means
   "we actually sent this to this subscriber", nothing else.
 - RANKING is done by published_dt, newest first, with a maximum-age gate.
   A publish date decides what's most worth showing, never what's eligible.
@@ -59,13 +59,16 @@ import news_embed
 import news_keyness
 import news_sources
 import telegram_html
-import users_db
+import category_ops
+import interest_cache_ops
+import push_outcome_ops
+import subscriber_ops
 from opentelemetry import trace
 
 # How many messages one push cycle may send to one subscriber -- one per
 # interest, so this is also "how many interests get served this cycle".
 #
-# Bounded because a subscriber at users_db.MAX_INTERESTS on a 8h interval
+# Bounded because a subscriber at subscriber_ops.MAX_INTERESTS on a 8h interval
 # would otherwise receive 30 messages a day. Interests that don't fit
 # aren't dropped, they wait: interests_by_staleness puts the
 # longest-un-pushed first, so the queue drains over successive cycles.
@@ -253,7 +256,7 @@ _PUSH_DIGEST_PROMPT = (
 
 def resolve_interest_categories(model, interests: list[str]) -> dict[str, list[str]]:
     """Stage-1 setup: maps each interest to its category tags, using
-    users_db's persistent cache and classifying only what's missing --
+    interest_cache_ops's persistent cache and classifying only what's missing --
     interest text is stable vocabulary (unlike article content), so this
     should be a cache hit for any interest that's been pushed before.
 
@@ -275,14 +278,14 @@ def resolve_interest_categories(model, interests: list[str]) -> dict[str, list[s
     empty answer a standing condition rather than a one-cycle blip, on
     either side of how select_candidate_articles handles it -- see that
     function's own docstring."""
-    resolved = users_db.get_cached_interest_categories(interests)
+    resolved = interest_cache_ops.get_cached_interest_categories(interests)
     missing = [i for i in interests if i not in resolved]
     if missing:
-        taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+        taxonomy = news_classify.Taxonomy.from_rows(category_ops.get_active_categories())
         newly_classified = news_classify.classify_interests(model, missing, taxonomy)
         failed = [i for i in missing if i not in newly_classified]
         for interest, categories in newly_classified.items():
-            users_db.set_interest_categories(interest, categories)
+            interest_cache_ops.set_interest_categories(interest, categories)
             resolved[interest] = categories
         if failed:
             print(f"[news_push] could not classify {len(failed)} interest(s), "
@@ -347,7 +350,7 @@ def select_candidate_articles(
     neither classifies into any of the 13 tech-industry categories.
 
     Since 2026-08-20 the cache distinguishes "the classifier found nothing
-    applicable" (users_db.UNCLASSIFIABLE) from "never classified" (None).
+    applicable" (category_ops.UNCLASSIFIABLE) from "never classified" (None).
     This function deliberately still treats them alike -- neither has a
     category that can match a topic, so both are excluded the same way --
     but the distinction now exists in the data for anything that needs it,
@@ -572,7 +575,7 @@ def _resolve_query_text(topic: str) -> str:
     failed and was never retried. Never calls the LLM itself: this runs
     on every push cycle, and generation is deliberately a write-time,
     cached, once-per-interest cost, not a read-time one."""
-    return users_db.get_interest_query_expansion(topic) or topic
+    return interest_cache_ops.get_interest_query_expansion(topic) or topic
 
 
 def _filter_by_relevance(
@@ -701,7 +704,7 @@ def _pick_novelty_extra(remainder: list[dict], categories: set[str] | list[str])
 
     `categories` is the topic's own category set (from topic_categories
     in select_candidate_articles), used to look up news_keyness's
-    precomputed per-category table (users_db.get_category_keyness) --
+    precomputed per-category table (interest_cache_ops.get_category_keyness) --
     merged across every category in the set, keeping the lower (more
     foreign) score for any term scored under more than one."""
     if not remainder:
@@ -709,7 +712,7 @@ def _pick_novelty_extra(remainder: list[dict], categories: set[str] | list[str])
 
     keyness: dict[str, float] = {}
     for category in categories:
-        for term, score in users_db.get_category_keyness(category).items():
+        for term, score in interest_cache_ops.get_category_keyness(category).items():
             if term not in keyness or score < keyness[term]:
                 keyness[term] = score
 
@@ -734,7 +737,7 @@ def write_push_digest(model, articles: list[dict], topic: str | None = None,
     that turns a stage-1-filtered candidate list into a Telegram HTML
     digest, applying stage-2 (content) filtering itself per the prompt
     above. `language`, when set, is the subscriber's stored reply-language
-    preference (users_db.get_language) -- pushes go through this module's
+    preference (subscriber_ops.get_language) -- pushes go through this module's
     own prompt rather than agent.py's dynamic_prompt middleware, so the
     preference has to be threaded in here too, not just in _compose_prompt.
 
@@ -942,8 +945,8 @@ def _classify_send_failure(exc: Exception) -> str:
     wrongly. Wrong in the safe direction, deliberately."""
     text = str(exc).lower()
     if any(marker in text for marker in _UNREACHABLE_CHAT_MARKERS):
-        return users_db.PUSH_CHAT_NOT_FOUND
-    return users_db.PUSH_CYCLE_FAILED
+        return push_outcome_ops.PUSH_CHAT_NOT_FOUND
+    return push_outcome_ops.PUSH_CYCLE_FAILED
 
 
 # Consecutive undeliverable digests before push is turned off for that
@@ -973,19 +976,19 @@ def _strike_unreachable_subscriber(chat_id: int, now: datetime) -> None:
     discovering their settings were deleted.
 
     Re-enabling does NOT reset the strike count -- only a delivered digest
-    does (see users_db.consecutive_chat_not_found). So a subscriber who
+    does (see push_outcome_ops.consecutive_chat_not_found). So a subscriber who
     turns push back on while still unreachable is disabled again after a
     single further failure rather than after three. That is deliberate: a
     transient outage records `cycle_failed` and accrues no strikes at all,
     so one more `chat_not_found` really does mean still unreachable, and
     granting a fresh allowance would just pay for three more undeliverable
     digests."""
-    strikes = users_db.consecutive_chat_not_found(chat_id)
+    strikes = push_outcome_ops.consecutive_chat_not_found(chat_id)
     if strikes < UNREACHABLE_STRIKES:
         return
-    users_db.set_push_enabled(chat_id, False)
+    subscriber_ops.set_push_enabled(chat_id, False)
     detail = f"undeliverable {strikes} cycles running"
-    _record(chat_id, users_db.PUSH_DISABLED,
+    _record(chat_id, push_outcome_ops.PUSH_DISABLED,
             f"{detail} -- push turned off (they can turn it back on)",
             now, detail=detail)
 
@@ -1012,19 +1015,19 @@ def _record(chat_id: int, outcome: str, message: str, now: datetime,
     where the alerting engine cannot see them. A no-op when no tracer
     provider is configured, which is every test and CI run."""
     print(f"[news_push] chat_id={chat_id}: {message}")
-    users_db.record_push_outcome(chat_id, outcome, now, detail=detail)
+    push_outcome_ops.record_push_outcome(chat_id, outcome, now, detail=detail)
     with _tracer.start_as_current_span("push_outcome") as span:
         # Flat, low-cardinality attributes: an alert query filters on
         # `outcome` and counts, so it must not have to parse prose.
         span.set_attribute("push.outcome", outcome)
         # The opaque id, not chat_id: the row and the log line keep the
         # real Telegram identifier (they never leave the VM), but a span
-        # does leave. See users_db.external_id.
-        span.set_attribute("push.subscriber", users_db.external_id(chat_id))
+        # does leave. See subscriber_ops.external_id.
+        span.set_attribute("push.subscriber", subscriber_ops.external_id(chat_id))
         # Whether an LLM was paid for this cycle -- criterion 3's
         # denominator, computed here rather than by re-deriving the outcome
         # set inside every alert query.
-        span.set_attribute("push.generated", outcome in users_db.PUSH_GENERATED_OUTCOMES)
+        span.set_attribute("push.generated", outcome in push_outcome_ops.PUSH_GENERATED_OUTCOMES)
         if detail:
             span.set_attribute("push.detail", detail)
 
@@ -1055,7 +1058,7 @@ def _emit_html_validation_attempt(chat_id: int, topic: str, attempt: int, reason
     print(f"[news_push] chat_id={chat_id} topic={topic!r}: HTML validation attempt {attempt} "
           f"{'passed' if reason is None else f'failed: {reason}'}")
     with _tracer.start_as_current_span("html_validation_attempt") as span:
-        span.set_attribute("push.subscriber", users_db.external_id(chat_id))
+        span.set_attribute("push.subscriber", subscriber_ops.external_id(chat_id))
         span.set_attribute("topic", topic)
         span.set_attribute("attempt", attempt)
         span.set_attribute("valid", reason is None)
@@ -1101,7 +1104,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
     for N due subscribers in the same tick.
 
     Real incident, 2026-08-09, two parts: (1) a subscriber reported never
-    receiving a push despite users_db showing a completed cycle -- there
+    receiving a push despite push_outcome_ops showing a completed cycle -- there
     was no way to confirm from logs alone whether `send` actually ran,
     since nothing was ever printed either way; (2) fixing that alone
     turned out insufficient -- the container's stdout was block-buffered
@@ -1117,12 +1120,12 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
     now = now or datetime.now(timezone.utc)
     # Bounded here rather than on a timer of its own: this is the only job
     # that writes the table, so it is the only one that can grow it.
-    users_db.prune_push_outcomes(now)
+    push_outcome_ops.prune_push_outcomes(now)
     # Same reasoning, same cadence -- one maintenance pass per cycle
     # rather than a glob+stat per message sent. See message_archive's
     # own module docstring for why this exists at all.
     message_archive.prune_message_archive(now)
-    subscribers = users_db.list_push_enabled_subscribers()
+    subscribers = subscriber_ops.list_push_enabled_subscribers()
     print(f"[news_push] tick at {now.isoformat()}: {len(subscribers)} push-enabled subscriber(s)")
     _emit_heartbeat(len(subscribers))
     cached_articles = news_cache.read_all()
@@ -1130,7 +1133,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
         chat_id = subscriber["chat_id"]
         interests = subscriber["interests"]
         if not interests:
-            _record(chat_id, users_db.PUSH_NO_INTERESTS,
+            _record(chat_id, push_outcome_ops.PUSH_NO_INTERESTS,
                     "push enabled but no interests set -- skipping", now)
             continue
         last_push_at = subscriber["last_push_at"]
@@ -1180,7 +1183,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
             sent = 0
             blocked = 0
             send_failure: tuple[str, str] | None = None
-            for topic in users_db.interests_by_staleness(chat_id, interests):
+            for topic in subscriber_ops.interests_by_staleness(chat_id, interests):
                 if sent >= MAX_INTERESTS_PER_PUSH:
                     break
                 new_articles = select_candidate_articles(
@@ -1287,7 +1290,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                 # candidate the model left out stays eligible for a later
                 # digest -- see links_actually_sent.
                 delivered.extend(links_actually_sent(digest, new_articles))
-                users_db.mark_interest_pushed(chat_id, topic, now)
+                subscriber_ops.mark_interest_pushed(chat_id, topic, now)
                 sent += 1
 
             if send_failure is not None:
@@ -1295,7 +1298,7 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                 _record(chat_id, outcome,
                         f"{sent} message(s) sent, then delivery failed with {detail}",
                         now, detail=detail)
-                if outcome == users_db.PUSH_CHAT_NOT_FOUND:
+                if outcome == push_outcome_ops.PUSH_CHAT_NOT_FOUND:
                     _strike_unreachable_subscriber(chat_id, now)
             elif sent:
                 # One outcome per subscriber per cycle, NOT one per message.
@@ -1314,22 +1317,22 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                 # this only fixes whether a human investigating later has
                 # something to go on.
                 detail = f"{sent} interest(s)" + (f", {blocked} blocked" if blocked else "")
-                _record(chat_id, users_db.PUSH_DELIVERED,
+                _record(chat_id, push_outcome_ops.PUSH_DELIVERED,
                         f"sent {sent} message(s), one per interest", now, detail=detail)
             elif blocked:
-                _record(chat_id, users_db.PUSH_BLOCKED,
+                _record(chat_id, push_outcome_ops.PUSH_BLOCKED,
                         f"{blocked} digest(s) blocked by output guardrail, none sent", now)
             elif delivered is not None:
-                _record(chat_id, users_db.PUSH_NOT_RELEVANT,
+                _record(chat_id, push_outcome_ops.PUSH_NOT_RELEVANT,
                         "candidates found but none judged relevant -- not sending", now)
             else:
                 # Nothing anywhere had new articles. last_push_at still
                 # advances so the next check is a full interval away
                 # instead of re-checking every tick.
-                _record(chat_id, users_db.PUSH_NOTHING_NEW,
+                _record(chat_id, push_outcome_ops.PUSH_NOTHING_NEW,
                         "due, but no new articles -- advancing last_push_at only", now)
 
-            users_db.record_push(chat_id, delivered or [], now)
+            subscriber_ops.record_push(chat_id, delivered or [], now)
         except _ModelStageError as exc:
             # A 402, a rate limit, a provider outage. Unlike everything
             # else here this is never about one subscriber -- if the model
@@ -1337,15 +1340,15 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
             # why criterion 2 alerts on a single occurrence rather than on
             # a threshold.
             detail = repr(exc.__cause__ or exc)
-            _record(chat_id, users_db.PUSH_MODEL_ERROR,
+            _record(chat_id, push_outcome_ops.PUSH_MODEL_ERROR,
                     f"model call failed with {detail}", now, detail=detail)
             if delivered is not None:
-                users_db.record_push(chat_id, delivered, now)
+                subscriber_ops.record_push(chat_id, delivered, now)
             continue
         except Exception as exc:
             detail = repr(exc)
-            _record(chat_id, users_db.PUSH_CYCLE_FAILED,
+            _record(chat_id, push_outcome_ops.PUSH_CYCLE_FAILED,
                     f"cycle failed with {detail}", now, detail=detail)
             if delivered is not None:
-                users_db.record_push(chat_id, delivered, now)
+                subscriber_ops.record_push(chat_id, delivered, now)
             continue

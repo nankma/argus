@@ -5,7 +5,7 @@ separate bot/token deliberately: approval controls never appear on the same
 surface a stranger could message, and every message/button tap here is
 still re-checked against ADMIN_CHAT_ID regardless.
 
-Shares subscribers.db with bot.py (see users_db.py) — both processes must
+Shares subscribers.db with bot.py (see subscriber_ops.py) — both processes must
 run against the same file, so co-locate them (same container/host, or a
 shared volume once this is containerized — see docs/plans/deployment-plan.md).
 
@@ -25,7 +25,9 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from app_settings import get_settings
 from ptb_error_handler import register_error_handler
-import users_db
+import category_ops
+import storage
+import subscriber_ops
 
 
 async def reject_non_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -44,7 +46,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     action, chat_id_str = query.data.split(":")
     chat_id = int(chat_id_str)
     approved = action == "approve"
-    users_db.decide(chat_id, approved)
+    subscriber_ops.decide(chat_id, approved)
 
     await query.answer()
     await query.edit_message_text(query.message.text + f"\n\n{'Approved' if approved else 'Denied'}.")
@@ -131,7 +133,7 @@ async def handle_category_decision(update: Update, context: ContextTypes.DEFAULT
     action, name = parts[1], parts[2]
     by = f"admin:{query.from_user.id}"
     now = datetime.now(timezone.utc)
-    active = [n for n, _ in users_db.get_active_categories()]
+    active = [n for n, _ in category_ops.get_active_categories()]
 
     if action == "merge":
         await query.answer()
@@ -143,14 +145,14 @@ async def handle_category_decision(update: Update, context: ContextTypes.DEFAULT
         # double-tapping, is ordinary. The DB operations are guarded by
         # `AND status = 'proposed'`, so the second press changes nothing --
         # this just says so instead of implying it worked twice.
-        decided = users_db.activate_category(name, by, now)
+        decided = category_ops.activate_category(name, by, now)
         outcome = "Activated." if decided else "Already decided -- no change."
     elif action == "reject":
-        decided = users_db.reject_category(name, by, now)
+        decided = category_ops.reject_category(name, by, now)
         outcome = "Rejected." if decided else "Already decided -- no change."
     elif action == "into":
         target = parts[3]
-        outcome = (f"Merged into {target}." if users_db.merge_category(name, target, by, now)
+        outcome = (f"Merged into {target}." if category_ops.merge_category(name, target, by, now)
                    else f"Could not merge into {target} -- it isn't active.")
     else:
         await query.answer("Unknown action.", show_alert=True)
@@ -173,7 +175,8 @@ async def handle_category_decision(update: Update, context: ContextTypes.DEFAULT
 
 
 def main():
-    users_db.init_db()
+    storage.init_db()
+    category_ops.bootstrap()
     app = Application.builder().token(get_settings().resolved("delivery.telegram.admin-bot-token", required=True)).build()
     app.bot_data["admin_chat_id"] = int(get_settings().resolved("delivery.telegram.admin-chat-id", required=True))
     app.bot_data["info_bot_token"] = get_settings().resolved("delivery.telegram.bot-token", required=True)

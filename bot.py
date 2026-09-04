@@ -10,7 +10,7 @@ registration, the polling loop).
 
 Access is gated by an approval workflow (see docs/plans/bot-features-plan.md item
 1): ADMIN_CHAT_ID is always allowed; anyone else's first message registers
-a pending request in the shared subscribers DB (users_db.py) and notifies
+a pending request in the shared subscribers DB (subscriber_ops.py) and notifies
 the admin via admin_bot.py — a separate bot/token — with Approve/Deny
 buttons attached to the message.
 
@@ -42,7 +42,9 @@ import news_ingest
 import news_push
 import telegram_html
 import test_api
-import users_db
+import category_ops
+import storage
+import subscriber_ops
 from ptb_error_handler import register_error_handler
 from telemetry import EventLogger, get_event_logger
 from telemetry_providers import Level
@@ -53,7 +55,7 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 
 # How often the periodic-push scheduler checks who's due (see
 # register_push_job below) -- independent of any individual subscriber's
-# push_interval_hours (users_db.MIN_PUSH_INTERVAL_HOURS floors that at 1h),
+# push_interval_hours (subscriber_ops.MIN_PUSH_INTERVAL_HOURS floors that at 1h),
 # just fine-grained enough that a due subscriber isn't kept waiting long
 # past their actual interval.
 PUSH_TICK_SECONDS = get_settings().resolved("push.tick_seconds", default=900)
@@ -215,18 +217,18 @@ async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     if chat_id == context.bot_data["admin_chat_id"]:
         return True
 
-    status = users_db.get_status(chat_id)
-    if status == users_db.APPROVED:
+    status = subscriber_ops.get_status(chat_id)
+    if status == subscriber_ops.APPROVED:
         return True
-    if status == users_db.PENDING:
+    if status == subscriber_ops.PENDING:
         await update.message.reply_text("Your access request is still pending approval.")
         return False
-    if status == users_db.DENIED:
+    if status == subscriber_ops.DENIED:
         await update.message.reply_text("Access denied.")
         return False
 
     user = update.effective_user
-    users_db.request_access(chat_id, user.username, user.first_name)
+    subscriber_ops.request_access(chat_id, user.username, user.first_name)
     await update.message.reply_text(
         "This bot is private. Your access request was sent to the owner — "
         "you'll be notified once it's reviewed."
@@ -291,7 +293,7 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/interests -- show current interests. /interests <comma, separated,
     topics> -- set them. /interests clear -- clear them. Stored per-chat
-    in users_db.py; injected into the agent's context on future messages
+    via subscriber_ops.py; injected into the agent's context on future messages
     (see handle_message) so it can prioritize a subscriber's own topics
     when their question is general -- see docs/plans/bot-features-plan.md."""
     if not await check_access(update, context):
@@ -301,7 +303,7 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
     text_after_command = update.message.text.partition(" ")[2].strip()
 
     if not text_after_command:
-        interests = users_db.get_interests(chat_id)
+        interests = subscriber_ops.get_interests(chat_id)
         if interests:
             await update.message.reply_text("Your interests: " + ", ".join(interests))
         else:
@@ -311,7 +313,7 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
         return
 
     if text_after_command.lower() == "clear":
-        users_db.set_interests(chat_id, [])
+        subscriber_ops.set_interests(chat_id, [])
         await update.message.reply_text("Interests cleared.")
         return
 
@@ -321,14 +323,14 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
     # for nothing. Same reasoning as dispatch_settings.
     raw = [t.strip() for t in text_after_command.split(",") if t.strip()]
     # This command writes the list wholesale rather than going through
-    # users_db.add_interest, so it has to enforce the cap itself -- without
+    # subscriber_ops.add_interest, so it has to enforce the cap itself -- without
     # this, "/interests a, b, c, ..." is a way straight past it. Refused
     # rather than truncated, so the subscriber picks which ones survive
     # instead of the parser picking for them.
-    if len(raw) > users_db.MAX_INTERESTS:
+    if len(raw) > subscriber_ops.MAX_INTERESTS:
         await update.message.reply_text(
             f"That's {len(raw)} interests, and the maximum is "
-            f"{users_db.MAX_INTERESTS}. Send a shorter list."
+            f"{subscriber_ops.MAX_INTERESTS}. Send a shorter list."
         )
         return
     model = context.bot_data.get("guard_model")
@@ -342,7 +344,7 @@ async def handle_interests_command(update: Update, context: ContextTypes.DEFAULT
             (news_classify.normalize_interest(model, t, alongside=peers) or t)
             if model else t
         )
-    users_db.set_interests(chat_id, interests)
+    subscriber_ops.set_interests(chat_id, interests)
     await update.message.reply_text("Interests updated: " + ", ".join(interests))
 
 
@@ -361,7 +363,7 @@ async def handle_language_command(update: Update, context: ContextTypes.DEFAULT_
     text_after_command = update.message.text.partition(" ")[2].strip()
 
     if not text_after_command:
-        language = users_db.get_language(chat_id)
+        language = subscriber_ops.get_language(chat_id)
         if language:
             await update.message.reply_text(f"Your reply language is set to: {language}")
         else:
@@ -372,11 +374,11 @@ async def handle_language_command(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if text_after_command.lower() == "clear":
-        users_db.set_language(chat_id, None)
+        subscriber_ops.set_language(chat_id, None)
         await update.message.reply_text("Reply language cleared -- back to matching your message's language.")
         return
 
-    users_db.set_language(chat_id, text_after_command)
+    subscriber_ops.set_language(chat_id, text_after_command)
     await update.message.reply_text(f"Reply language set to: {text_after_command}")
 
 
@@ -410,7 +412,7 @@ async def _route_b_reply(chat_id: int, classification, guard_model, category: st
     # confirmation is written in the language it just set. Layer 4 only
     # runs on this path: a plain English template isn't model output, so
     # there's nothing to check when no translation happened.
-    language = users_db.get_language(chat_id)
+    language = subscriber_ops.get_language(chat_id)
     if language:
         reply = await asyncio.to_thread(_translate_confirmation, guard_model, reply, language)
         # Same safety nets Route A applies to its own model-generated text
@@ -691,7 +693,7 @@ def register_push_job(app: Application) -> None:
     main() and combined_bot.py's, so standalone and combined deployment
     both get push. `first=10` just avoids doing real work in the same
     instant as startup; the actual per-subscriber due-check is time-based
-    (users_db's push_interval_hours / last_push_at), not this delay."""
+    (subscriber_ops's push_interval_hours / last_push_at), not this delay."""
     app.job_queue.run_repeating(_push_job, interval=PUSH_TICK_SECONDS, first=10)
 
 
@@ -725,17 +727,17 @@ async def review_category_proposals(model, admin_bot_token: str, admin_chat_id: 
     message when a retry succeeds, and a duplicate is visible while a lost
     proposal is not."""
     now = now or datetime.now(timezone.utc)
-    ready = users_db.categories_ready_for_review(now)
+    ready = category_ops.categories_ready_for_review(now)
     if not ready:
         return 0
 
-    rows = users_db.get_active_categories()
+    rows = category_ops.get_active_categories()
     active = [name for name, _ in rows]
     taxonomy = news_classify.Taxonomy.from_rows(rows)
     bot = Bot(token=admin_bot_token)
     raised = 0
     for name, hits in ready:
-        examples = users_db.category_examples(name)
+        examples = category_ops.category_examples(name)
         draft = await asyncio.to_thread(
             news_classify.draft_category_description,
             model, name, [title for title, _ in examples], taxonomy,
@@ -752,7 +754,7 @@ async def review_category_proposals(model, admin_bot_token: str, admin_chat_id: 
                           "name": name},
                          level=Level.WARN, exc=exc)
             continue
-        users_db.mark_category_alerted(name, now, draft)
+        category_ops.mark_category_alerted(name, now, draft)
         raised += 1
     print(f"[news_ingest] raised {raised} category proposal(s) with the admin")
     return raised
@@ -779,7 +781,8 @@ async def _stop_test_api(app: Application) -> None:
 
 def main():
     setup_telemetry()
-    users_db.init_db()
+    storage.init_db()
+    category_ops.bootstrap()
     token = get_settings().resolved("delivery.telegram.bot-token", required=True)
     # Two independently-configured models -- see docs/plans/model-portability-plan.md
     # Level 2. `models.main`/`models.guardrail` in settings.yml both point
@@ -810,8 +813,8 @@ def main():
     # Idempotent -- safe to run every startup. Only the admin gets
     # search_news access to news_sources.RESTRICTED_SOURCES (NewsAPI,
     # Perigon) by default; granting it to anyone else is a plain DB update
-    # (users_db.set_restricted_sources_enabled), not a new code path.
-    users_db.set_restricted_sources_enabled(app.bot_data["admin_chat_id"], True)
+    # (subscriber_ops.set_restricted_sources_enabled), not a new code path.
+    subscriber_ops.set_restricted_sources_enabled(app.bot_data["admin_chat_id"], True)
     app.add_handler(CommandHandler(["start", "help"], handle_start_command))
     app.add_handler(CommandHandler("interests", handle_interests_command))
     app.add_handler(CommandHandler("language", handle_language_command))

@@ -9,7 +9,12 @@ import news_cache
 import news_embed
 import news_push
 import news_sources
-import users_db
+import category_ops
+import interest_cache_ops
+import push_outcome_ops
+import storage
+import subscriber_ops
+from sqlalchemy import text
 from tests.fakes import FakeEmbedder, FakeToolCallingModel
 
 
@@ -169,8 +174,8 @@ def test_select_candidate_articles_explicit_empty_mapping_also_gets_nothing(isol
     """Pins the other way an interest can land with no categories to match
     against: a topic present in the dict but explicitly mapped to [] --
     e.g. an interest that once mapped to a category later retired and
-    never re-mapped (see users_db._migrate_split_policy's docstring and
-    test_users_db.test_policy_split_does_not_touch_pre_existing_interest_category_mappings
+    never re-mapped (see storage/sqlite/category.py's migrate_split_policy
+    docstring and test_category_ops.test_policy_split_does_not_touch_pre_existing_interest_category_mappings
     -- no code path currently produces this for Policy specifically, but
     nothing would stop it for a category retired in the future). Both this
     and the "topic absent from the dict" case above hit the same
@@ -323,12 +328,12 @@ def test_a_near_duplicate_within_one_topic_stays_eligible_for_another(isolated_s
 
 # --- query text resolution (2026-08-25) -------------------------------------
 # The retrieval query used against news_embed is not always the bare topic
-# string -- a cached, generated definition (users_db.interest_query_expansions,
+# string -- a cached, generated definition (interest_cache_ops.interest_query_expansions,
 # populated once by agent.py's _add_one_interest) measurably outranks the
 # bare phrase. See news_classify.expand_interest_for_retrieval.
 
 def test_resolve_query_text_uses_the_cached_expansion_when_present(isolated_subscribers_db):
-    users_db.set_interest_query_expansion("AI coding", "a rich generated definition")
+    interest_cache_ops.set_interest_query_expansion("AI coding", "a rich generated definition")
     assert news_push._resolve_query_text("AI coding") == "a rich generated definition"
 
 
@@ -591,11 +596,11 @@ def test_novelty_extra_picks_lowest_keyness_when_no_keyword_hits(isolated_subscr
     """With no keyword hit anywhere in the remainder, the novelty extra
     goes to the article whose own vocabulary is most "foreign" to the AI
     category per the precomputed keyness table (as news_ingest.py would
-    have written via users_db.set_category_keyness) -- and only because
+    have written via interest_cache_ops.set_category_keyness) -- and only because
     it clears NOVELTY_KEYNESS_THRESHOLD; "robot" (keyness +50, strongly
     topic-typical) must NOT be picked just for being the next-best thing
     in a 2-item remainder."""
-    users_db.set_category_keyness("AI", {"openai": 300.0, "robot": 50.0, "quantum": -40.0})
+    interest_cache_ops.set_category_keyness("AI", {"openai": 300.0, "robot": 50.0, "quantum": -40.0})
     recency = ["ai daily roundup", "ai weekly digest", "openai announces new update"]
     remainder = [
         "ai robot demo at conference",                # keyness +50, does not qualify
@@ -621,7 +626,7 @@ def test_novelty_extra_keyword_hit_outranks_keyness_score(isolated_subscribers_d
     """Both signals qualify in the same remainder -- the keyword hit wins
     the single novelty-extra slot even though a different article scores
     lower (more topic-foreign) on keyness alone."""
-    users_db.set_category_keyness("AI", {"quantum": -40.0})
+    interest_cache_ops.set_category_keyness("AI", {"quantum": -40.0})
     recency = ["ai daily roundup", "ai weekly digest", "ai chip earnings today"]
     remainder = [
         "ai research touches on quantum computing",  # lowest keyness, no keyword hit
@@ -647,7 +652,7 @@ def test_novelty_extra_below_threshold_does_not_qualify(isolated_subscribers_db,
     exact product correction that motivated the threshold: an earlier
     design picked whatever was least-bad in the pool regardless of how
     weak the signal actually was."""
-    users_db.set_category_keyness("AI", {"mild": -1.0})  # negative, but not below -5.0
+    interest_cache_ops.set_category_keyness("AI", {"mild": -1.0})  # negative, but not below -5.0
     recency = ["ai daily roundup", "ai weekly digest", "ai chip earnings today"]
     remainder = ["ai coverage with a mild angle to it"]
     titles_newest_first = recency + remainder
@@ -894,7 +899,7 @@ def test_novelty_extra_admits_a_candidate_the_regular_relevance_filter_would_hav
 
 
 def test_resolve_interest_categories_uses_cache_when_available(monkeypatch):
-    monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {"AI": ["AI"]})
+    monkeypatch.setattr(interest_cache_ops, "get_cached_interest_categories", lambda interests: {"AI": ["AI"]})
     classify = MagicMock()
     monkeypatch.setattr(news_push.news_classify, "classify_interests", classify)
 
@@ -905,10 +910,10 @@ def test_resolve_interest_categories_uses_cache_when_available(monkeypatch):
 
 
 def test_resolve_interest_categories_classifies_and_caches_misses(monkeypatch, isolated_subscribers_db):
-    monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
+    monkeypatch.setattr(interest_cache_ops, "get_cached_interest_categories", lambda interests: {})
     monkeypatch.setattr(news_push.news_classify, "classify_interests", lambda model, interests, taxonomy: {"AAOI": ["Stock"]})
     set_categories = MagicMock()
-    monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
+    monkeypatch.setattr(interest_cache_ops, "set_interest_categories", set_categories)
 
     result = news_push.resolve_interest_categories("fake-model", ["AAOI"])
 
@@ -920,11 +925,11 @@ def test_resolve_interest_categories_caches_a_genuinely_empty_result(monkeypatch
     """The model answered "no category applies". That is a real answer and
     belongs in the cache -- re-classifying it every cycle would just re-pay
     for the same conclusion."""
-    monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
+    monkeypatch.setattr(interest_cache_ops, "get_cached_interest_categories", lambda interests: {})
     monkeypatch.setattr(news_push.news_classify, "classify_interests",
                         lambda model, interests, taxonomy: {"Some obscure ticker": []})
     set_categories = MagicMock()
-    monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
+    monkeypatch.setattr(interest_cache_ops, "set_interest_categories", set_categories)
 
     result = news_push.resolve_interest_categories("fake-model", ["Some obscure ticker"])
 
@@ -939,11 +944,11 @@ def test_resolve_interest_categories_does_not_cache_a_failure(monkeypatch, isola
     entirely unfiltered news. On the live DB this had poisoned "AI",
     "Bitcoin" and "機器人科技" among others -- "AI" cached as [] despite AI
     being one of the 13 categories."""
-    monkeypatch.setattr(users_db, "get_cached_interest_categories", lambda interests: {})
+    monkeypatch.setattr(interest_cache_ops, "get_cached_interest_categories", lambda interests: {})
     monkeypatch.setattr(news_push.news_classify, "classify_interests",
                         lambda model, interests, taxonomy: {})
     set_categories = MagicMock()
-    monkeypatch.setattr(users_db, "set_interest_categories", set_categories)
+    monkeypatch.setattr(interest_cache_ops, "set_interest_categories", set_categories)
 
     result = news_push.resolve_interest_categories("fake-model", ["AI"])
 
@@ -1179,9 +1184,9 @@ def _stub_cache_and_categories(monkeypatch, cached_articles=(), topic_categories
 
 
 def test_run_push_cycle_skips_subscriber_with_no_interests(monkeypatch, isolated_subscribers_db):
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(1, interests=[])])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(1, interests=[])])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     send = AsyncMock()
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=send))
@@ -1193,9 +1198,9 @@ def test_run_push_cycle_skips_subscriber_with_no_interests(monkeypatch, isolated
 def test_run_push_cycle_skips_subscriber_not_due(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     recently_pushed = _subscriber(2, last_push_at=now - timedelta(hours=1), interval=24)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [recently_pushed])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [recently_pushed])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     select = MagicMock()
     monkeypatch.setattr(news_push, "select_candidate_articles", select)
     send = AsyncMock()
@@ -1209,9 +1214,9 @@ def test_run_push_cycle_skips_subscriber_not_due(monkeypatch, isolated_subscribe
 
 def test_run_push_cycle_sends_and_records_when_new_articles_found(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(3)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(3)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
@@ -1234,9 +1239,9 @@ def test_run_push_cycle_only_records_articles_the_digest_actually_cited(
     dropped candidate was never seen by the subscriber, so it must stay
     eligible for a later digest rather than being retired unread."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(9)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(9)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     candidates = [
         {**_article("https://example.com/used"), "topic": "AI"},
         {**_article("https://example.com/dropped"), "topic": "AI"},
@@ -1257,9 +1262,9 @@ def test_run_push_cycle_only_records_articles_the_digest_actually_cited(
 def test_run_push_cycle_passes_subscriber_language_to_digest(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
-        users_db, "list_push_enabled_subscribers", lambda: [_subscriber(8, language="French")]
+        subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(8, language="French")]
     )
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
@@ -1283,8 +1288,8 @@ def test_run_push_cycle_retries_once_on_invalid_html_then_sends_the_valid_reply(
     monkeypatch, isolated_subscribers_db
 ):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(20)])
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(20)])
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     new_articles = [{**_article("https://example.com/a"), "topic": "AI"}]
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
@@ -1327,8 +1332,8 @@ def test_run_push_cycle_reports_every_attempt_and_still_sends_after_max_attempts
     monkeypatch, isolated_subscribers_db
 ):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(21)])
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(21)])
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     new_articles = [{**_article("https://example.com/a"), "topic": "AI"}]
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
@@ -1380,10 +1385,10 @@ def test_run_push_cycle_threads_chat_id_and_topic_correctly_across_subscribers(
     subscriber/topic rather than continuing across the cycle."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
-        users_db, "list_push_enabled_subscribers",
+        subscriber_ops, "list_push_enabled_subscribers",
         lambda: [_subscriber(30, interests=("AI",)), _subscriber(40, interests=("Space",))],
     )
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     _stub_cache_and_categories(monkeypatch)
 
     def select(cached, topics, *args, **kwargs):
@@ -1416,11 +1421,11 @@ def test_run_push_cycle_threads_chat_id_and_topic_correctly_across_subscribers(
 def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
-        users_db,
+        subscriber_ops,
         "list_push_enabled_subscribers",
         lambda: [_subscriber(9, restricted_sources_enabled=True), _subscriber(10, restricted_sources_enabled=False)],
     )
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     _stub_cache_and_categories(monkeypatch)
     select = MagicMock(return_value=[])
     monkeypatch.setattr(news_push, "select_candidate_articles", select)
@@ -1434,9 +1439,9 @@ def test_run_push_cycle_passes_subscribers_own_restricted_sources_flag(monkeypat
 def test_run_push_cycle_reads_cache_once_and_reuses_across_subscribers(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
-        users_db, "list_push_enabled_subscribers", lambda: [_subscriber(11), _subscriber(12)]
+        subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(11), _subscriber(12)]
     )
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     read_all = MagicMock(return_value=[])
     monkeypatch.setattr(news_cache, "read_all", read_all)
     monkeypatch.setattr(news_push, "resolve_interest_categories", lambda model, interests: {})
@@ -1449,9 +1454,9 @@ def test_run_push_cycle_reads_cache_once_and_reuses_across_subscribers(monkeypat
 
 def test_run_push_cycle_no_new_articles_records_without_sending(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(4)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(4)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
     send = AsyncMock()
@@ -1476,9 +1481,9 @@ def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch, isolat
     correctly; only this one didn't, while its comment claimed it matched
     them."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(13)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(13)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
@@ -1493,9 +1498,9 @@ def test_run_push_cycle_empty_digest_records_without_sending(monkeypatch, isolat
 
 def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(5)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(5)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     new_articles = [{**_article("https://example.com/new"), "topic": "AI"}]
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=new_articles))
@@ -1515,10 +1520,10 @@ def test_run_push_cycle_blocked_by_output_guardrail_does_not_send(monkeypatch, i
 def test_run_push_cycle_isolates_one_subscribers_failure(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
-        users_db, "list_push_enabled_subscribers", lambda: [_subscriber(6), _subscriber(7)]
+        subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(6), _subscriber(7)]
     )
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     _stub_cache_and_categories(monkeypatch)
 
     call_count = {"n": 0}
@@ -1602,9 +1607,9 @@ def _cycle_with(monkeypatch, chat_id=1, subscriber=None, digest=None,
     about which OUTCOME was recorded; pass your own MagicMock when the
     test is about whether last_push_at advanced."""
     now = now or datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers",
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers",
                         lambda: [subscriber or _subscriber(chat_id)])
-    monkeypatch.setattr(users_db, "record_push", record_push or MagicMock())
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push or MagicMock())
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(return_value=[{**_article("https://example.com/new"), "topic": "AI"}]))
@@ -1618,12 +1623,12 @@ def _cycle_with(monkeypatch, chat_id=1, subscriber=None, digest=None,
 
 def test_run_push_cycle_records_delivered(monkeypatch, isolated_subscribers_db):
     _cycle_with(monkeypatch, chat_id=11)
-    assert users_db.recent_outcomes_for(11) == [users_db.PUSH_DELIVERED]
+    assert push_outcome_ops.recent_outcomes_for(11) == [push_outcome_ops.PUSH_DELIVERED]
 
 
 def test_a_truly_empty_digest_records_not_relevant(monkeypatch, isolated_subscribers_db):
     _cycle_with(monkeypatch, chat_id=51, digest="")
-    assert users_db.recent_outcomes_for(51) == [users_db.PUSH_NOT_RELEVANT]
+    assert push_outcome_ops.recent_outcomes_for(51) == [push_outcome_ops.PUSH_NOT_RELEVANT]
 
 
 def test_a_non_empty_digest_with_no_real_link_is_treated_as_not_relevant(
@@ -1641,13 +1646,13 @@ def test_a_non_empty_digest_with_no_real_link_is_treated_as_not_relevant(
     _cycle_with(monkeypatch, chat_id=52, send=send,
                digest="No genuinely relevant stories emerged from the candidates this cycle.")
 
-    assert users_db.recent_outcomes_for(52) == [users_db.PUSH_NOT_RELEVANT]
+    assert push_outcome_ops.recent_outcomes_for(52) == [push_outcome_ops.PUSH_NOT_RELEVANT]
     send.assert_not_called()
 
 
 def test_run_push_cycle_records_blocked_digest_as_its_own_outcome(monkeypatch, isolated_subscribers_db):
     _cycle_with(monkeypatch, chat_id=12, on_topic=False)
-    assert users_db.recent_outcomes_for(12) == [users_db.PUSH_BLOCKED]
+    assert push_outcome_ops.recent_outcomes_for(12) == [push_outcome_ops.PUSH_BLOCKED]
 
 
 def test_run_push_cycle_records_chat_not_found_when_delivery_is_refused(monkeypatch, isolated_subscribers_db):
@@ -1656,21 +1661,21 @@ def test_run_push_cycle_records_chat_not_found_when_delivery_is_refused(monkeypa
     1 keys on exactly this."""
     send = AsyncMock(side_effect=Exception("Chat not found"))
     _cycle_with(monkeypatch, chat_id=13, send=send)
-    assert users_db.recent_outcomes_for(13) == [users_db.PUSH_CHAT_NOT_FOUND]
+    assert push_outcome_ops.recent_outcomes_for(13) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
 
 
 def test_run_push_cycle_records_blocked_user_as_chat_not_found(monkeypatch, isolated_subscribers_db):
     send = AsyncMock(side_effect=Exception("Forbidden: bot was blocked by the user"))
     _cycle_with(monkeypatch, chat_id=14, send=send)
-    assert users_db.recent_outcomes_for(14) == [users_db.PUSH_CHAT_NOT_FOUND]
+    assert push_outcome_ops.recent_outcomes_for(14) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
 
 
 def test_run_push_cycle_records_model_error_when_an_llm_call_raises(monkeypatch, isolated_subscribers_db):
     """A 402 comes out of write_push_digest, not out of the send. Classified
     by which call raised rather than by what the message says, so a
     provider rewording its errors cannot silence criterion 2."""
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(15)])
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(15)])
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(return_value=[{**_article("https://example.com/new"), "topic": "AI"}]))
@@ -1679,27 +1684,27 @@ def test_run_push_cycle_records_model_error_when_an_llm_call_raises(monkeypatch,
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert users_db.recent_outcomes_for(15) == [users_db.PUSH_MODEL_ERROR]
+    assert push_outcome_ops.recent_outcomes_for(15) == [push_outcome_ops.PUSH_MODEL_ERROR]
 
 
 def test_run_push_cycle_records_a_non_model_failure_as_cycle_failed(monkeypatch, isolated_subscribers_db):
     """select_candidate_articles is local filtering, not an LLM call. If it
     raises, that is a bug in our code -- it must not inflate the model-error
     count and page someone about the provider."""
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(16)])
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(16)])
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(side_effect=KeyError("published_dt")))
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert users_db.recent_outcomes_for(16) == [users_db.PUSH_CYCLE_FAILED]
+    assert push_outcome_ops.recent_outcomes_for(16) == [push_outcome_ops.PUSH_CYCLE_FAILED]
 
 
 def test_run_push_cycle_records_nothing_new_without_calling_the_model(monkeypatch, isolated_subscribers_db):
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(17)])
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(17)])
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
     write = MagicMock()
@@ -1707,37 +1712,37 @@ def test_run_push_cycle_records_nothing_new_without_calling_the_model(monkeypatc
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert users_db.recent_outcomes_for(17) == [users_db.PUSH_NOTHING_NEW]
+    assert push_outcome_ops.recent_outcomes_for(17) == [push_outcome_ops.PUSH_NOTHING_NEW]
     write.assert_not_called()
 
 
 def test_run_push_cycle_records_no_interests(monkeypatch, isolated_subscribers_db):
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers",
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers",
                         lambda: [_subscriber(18, interests=[])])
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock()))
 
-    assert users_db.recent_outcomes_for(18) == [users_db.PUSH_NO_INTERESTS]
+    assert push_outcome_ops.recent_outcomes_for(18) == [push_outcome_ops.PUSH_NO_INTERESTS]
 
 
 def test_run_push_cycle_does_not_record_a_not_due_subscriber(monkeypatch, isolated_subscribers_db):
     """Every subscriber is 'not due' on almost every tick. Recording it
     would bury the outcomes that carry signal under ~96 rows a day each."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers",
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers",
                         lambda: [_subscriber(19, last_push_at=now - timedelta(hours=1), interval=24)])
-    monkeypatch.setattr(users_db, "record_push", MagicMock())
+    monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
 
-    assert users_db.recent_outcomes_for(19) == []
+    assert push_outcome_ops.recent_outcomes_for(19) == []
 
 
 def test_classify_send_failure_falls_back_to_cycle_failed():
     """Wrong in the safe direction: an unrecognised delivery error must not
     be read as 'this chat is dead', because criterion 1 disables
     subscribers on that verdict."""
-    assert news_push._classify_send_failure(Exception("Timed out")) == users_db.PUSH_CYCLE_FAILED
-    assert news_push._classify_send_failure(Exception("Chat not found")) == users_db.PUSH_CHAT_NOT_FOUND
+    assert news_push._classify_send_failure(Exception("Timed out")) == push_outcome_ops.PUSH_CYCLE_FAILED
+    assert news_push._classify_send_failure(Exception("Chat not found")) == push_outcome_ops.PUSH_CHAT_NOT_FOUND
 
 
 # --- capping an undeliverable subscriber ----------------------------------
@@ -1758,7 +1763,7 @@ def test_delivery_failure_advances_last_push_at(monkeypatch, isolated_subscriber
     """(A). Without this the subscriber is due again in PUSH_TICK_SECONDS
     and pays for another digest, having already paid for this one."""
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     now = _cycle_with(monkeypatch, chat_id=21, send=_failing_send(),
                       record_push=record_push)
 
@@ -1778,37 +1783,37 @@ def test_three_consecutive_chat_not_found_turns_push_off(monkeypatch, isolated_s
     # Set explicitly: get_push_enabled returns False for a row that does not
     # exist, so without this the assertion below would pass without the
     # subscriber ever having been turned off.
-    users_db.set_push_enabled(23, True)
+    subscriber_ops.set_push_enabled(23, True)
     for _ in range(news_push.UNREACHABLE_STRIKES):
         _cycle_with(monkeypatch, chat_id=23, send=_failing_send(),
                     record_push=MagicMock())
 
-    assert users_db.recent_outcomes_for(23)[0] == users_db.PUSH_DISABLED
-    assert users_db.get_push_enabled(23) is False
+    assert push_outcome_ops.recent_outcomes_for(23)[0] == push_outcome_ops.PUSH_DISABLED
+    assert subscriber_ops.get_push_enabled(23) is False
 
 
 def test_two_consecutive_chat_not_found_leaves_push_on(monkeypatch, isolated_subscribers_db):
     """Turning a real subscriber off is the more expensive mistake: they
     just stop getting news, with nothing to notice."""
-    users_db.set_push_enabled(23, True)
+    subscriber_ops.set_push_enabled(23, True)
     for _ in range(news_push.UNREACHABLE_STRIKES - 1):
         _cycle_with(monkeypatch, chat_id=23, send=_failing_send(),
                     record_push=MagicMock())
 
-    assert users_db.PUSH_DISABLED not in users_db.recent_outcomes_for(23)
-    assert users_db.get_push_enabled(23) is True
+    assert push_outcome_ops.PUSH_DISABLED not in push_outcome_ops.recent_outcomes_for(23)
+    assert subscriber_ops.get_push_enabled(23) is True
 
 
 def test_a_successful_delivery_clears_the_strikes(monkeypatch, isolated_subscribers_db):
     """Delivery is the only positive proof the chat is reachable, so it is
     the only thing that resets the count."""
-    users_db.set_push_enabled(24, True)
+    subscriber_ops.set_push_enabled(24, True)
     _cycle_with(monkeypatch, chat_id=24, send=_failing_send(), record_push=MagicMock())
     _cycle_with(monkeypatch, chat_id=24, send=_failing_send(), record_push=MagicMock())
     _cycle_with(monkeypatch, chat_id=24, record_push=MagicMock())          # delivered
     _cycle_with(monkeypatch, chat_id=24, send=_failing_send(), record_push=MagicMock())
 
-    assert users_db.get_push_enabled(24) is True
+    assert subscriber_ops.get_push_enabled(24) is True
 
 
 def test_a_quiet_cycle_between_failures_does_not_clear_the_strikes(monkeypatch, isolated_subscribers_db):
@@ -1816,12 +1821,12 @@ def test_a_quiet_cycle_between_failures_does_not_clear_the_strikes(monkeypatch, 
     send, so it is evidence of nothing -- if it reset the count, a dead chat
     that happens to have a quiet cycle every third tick would bill digests
     forever and never strike out."""
-    users_db.set_push_enabled(25, True)
+    subscriber_ops.set_push_enabled(25, True)
     _cycle_with(monkeypatch, chat_id=25, send=_failing_send(), record_push=MagicMock())
     _cycle_with(monkeypatch, chat_id=25, send=_failing_send(), record_push=MagicMock())
 
     # a cycle with no candidate articles: no send is attempted at all
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(25)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(25)])
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles", MagicMock(return_value=[]))
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
@@ -1829,31 +1834,31 @@ def test_a_quiet_cycle_between_failures_does_not_clear_the_strikes(monkeypatch, 
 
     _cycle_with(monkeypatch, chat_id=25, send=_failing_send(), record_push=MagicMock())
 
-    assert users_db.get_push_enabled(25) is False
+    assert subscriber_ops.get_push_enabled(25) is False
 
 
 def test_model_error_before_generation_does_not_advance_last_push_at(monkeypatch, isolated_subscribers_db):
     """Nothing was generated, so nothing was billed -- there is no reason to
     make the subscriber wait a full interval for a transient provider blip."""
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(26)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(26)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     monkeypatch.setattr(news_cache, "read_all", lambda: [])
     monkeypatch.setattr(news_push, "resolve_interest_categories",
                         MagicMock(side_effect=RuntimeError("402 Insufficient Balance")))
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert users_db.recent_outcomes_for(26) == [users_db.PUSH_MODEL_ERROR]
+    assert push_outcome_ops.recent_outcomes_for(26) == [push_outcome_ops.PUSH_MODEL_ERROR]
     record_push.assert_not_called()
 
 
 def test_model_error_after_generation_does_advance_last_push_at(monkeypatch, isolated_subscribers_db):
     """The guardrail check is an LLM call too, and by the time it runs the
     digest has already been written and billed."""
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(27)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(27)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(return_value=[{**_article("https://example.com/new"), "topic": "AI"}]))
@@ -1864,7 +1869,7 @@ def test_model_error_after_generation_does_advance_last_push_at(monkeypatch, iso
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert users_db.recent_outcomes_for(27) == [users_db.PUSH_MODEL_ERROR]
+    assert push_outcome_ops.recent_outcomes_for(27) == [push_outcome_ops.PUSH_MODEL_ERROR]
     record_push.assert_called_once()
 
 
@@ -1872,13 +1877,13 @@ def test_striking_out_leaves_the_subscriber_and_their_settings_intact(monkeypatc
     """Only push_enabled is cleared. A user who blocked the bot and later
     unblocks it turns push back on, rather than finding their interests
     gone."""
-    users_db.set_interests(28, ["AI", "Robotics"])
-    users_db.set_push_enabled(28, True)
+    subscriber_ops.set_interests(28, ["AI", "Robotics"])
+    subscriber_ops.set_push_enabled(28, True)
     for _ in range(news_push.UNREACHABLE_STRIKES):
         _cycle_with(monkeypatch, chat_id=28, send=_failing_send(), record_push=MagicMock())
 
-    assert users_db.get_push_enabled(28) is False
-    assert users_db.get_interests(28) == ["AI", "Robotics"]
+    assert subscriber_ops.get_push_enabled(28) is False
+    assert subscriber_ops.get_interests(28) == ["AI", "Robotics"]
 
 
 # --- heartbeat -------------------------------------------------------------
@@ -1891,7 +1896,7 @@ def test_push_tick_emits_a_heartbeat_even_when_nobody_is_due(monkeypatch, isolat
     perfectly healthy idle system as dead. See
     docs/plans/observability-platform-plan.md."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers",
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers",
                         lambda: [_subscriber(31, last_push_at=now - timedelta(hours=1), interval=24)])
     beats = []
     monkeypatch.setattr(news_push, "_emit_heartbeat", lambda n: beats.append(n))
@@ -1904,7 +1909,7 @@ def test_push_tick_emits_a_heartbeat_even_when_nobody_is_due(monkeypatch, isolat
 def test_push_tick_heartbeat_carries_the_subscriber_count(monkeypatch, isolated_subscribers_db):
     """Not just a pulse: the count is the number whose quiet growth was the
     2026-08-21 incident, so the liveness span answers that too."""
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers",
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers",
                         lambda: [_subscriber(32, interests=[]), _subscriber(33, interests=[])])
     beats = []
     monkeypatch.setattr(news_push, "_emit_heartbeat", lambda n: beats.append(n))
@@ -1933,9 +1938,9 @@ def test_a_failure_after_a_successful_send_still_retires_what_was_delivered(
     Simulated by making the outcome insert raise, which is the first thing
     that runs after a successful send."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(41)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(41)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(return_value=[{**_article("https://example.com/new"), "topic": "AI"}]))
@@ -1948,7 +1953,7 @@ def test_a_failure_after_a_successful_send_still_retires_what_was_delivered(
     # permanently failing writer also breaks the error handler's own
     # _record call and aborts the whole tick -- a separate weakness, noted
     # in docs/plans/incident-monitoring-plan.md, not what this pins.
-    monkeypatch.setattr(users_db, "record_push_outcome",
+    monkeypatch.setattr(push_outcome_ops, "record_push_outcome",
                         MagicMock(side_effect=[RuntimeError("database is locked"), None]))
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
@@ -1960,9 +1965,9 @@ def test_a_failure_before_the_send_retires_nothing(monkeypatch, isolated_subscri
     """The other side of the same rule: a digest that was generated but
     never delivered must not retire its articles, or they are lost unread."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [_subscriber(42)])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(42)])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     _stub_cache_and_categories(monkeypatch)
     monkeypatch.setattr(news_push, "select_candidate_articles",
                         MagicMock(return_value=[{**_article("https://example.com/new"), "topic": "AI"}]))
@@ -1996,7 +2001,7 @@ def test_emit_html_validation_attempt_carries_attempt_and_validity(monkeypatch, 
 
     news_push._emit_html_validation_attempt(55, "AI", 3, "unescaped & at '&T'")
 
-    assert recorded["push.subscriber"] == users_db.external_id(55)
+    assert recorded["push.subscriber"] == subscriber_ops.external_id(55)
     assert recorded["topic"] == "AI"
     assert recorded["attempt"] == 3
     assert recorded["valid"] is False
@@ -2054,7 +2059,7 @@ def test_record_emits_a_span_an_alert_can_query(monkeypatch, isolated_subscriber
 
     `push.generated` is computed here rather than left for each alert query
     to re-derive the outcome set: the ratio's denominator has one
-    definition, in users_db, and a query that reimplements it would drift
+    definition, in push_outcome_ops, and a query that reimplements it would drift
     from it silently."""
     recorded = {}
 
@@ -2070,14 +2075,14 @@ def test_record_emits_a_span_an_alert_can_query(monkeypatch, isolated_subscriber
                         lambda name: FakeSpan())
     now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
 
-    news_push._record(55, users_db.PUSH_CHAT_NOT_FOUND, "gone", now, detail="BadRequest")
+    news_push._record(55, push_outcome_ops.PUSH_CHAT_NOT_FOUND, "gone", now, detail="BadRequest")
 
-    assert recorded["push.outcome"] == users_db.PUSH_CHAT_NOT_FOUND
+    assert recorded["push.outcome"] == push_outcome_ops.PUSH_CHAT_NOT_FOUND
     assert recorded["push.generated"] is True   # billed: digest written before the send
     assert recorded["push.detail"] == "BadRequest"
     # The opaque id, never the Telegram one -- a span leaves this machine.
     assert "push.chat_id" not in recorded
-    assert recorded["push.subscriber"] == users_db.external_id(55)
+    assert recorded["push.subscriber"] == subscriber_ops.external_id(55)
     # The raw chat_id itself must never be the recorded value -- NOT the
     # same check as "the substring '55' never appears anywhere in the
     # opaque id": that one is flaky by construction, since external_id's
@@ -2105,7 +2110,7 @@ def test_record_marks_a_cycle_that_cost_nothing_as_not_generated(monkeypatch, is
     monkeypatch.setattr(news_push._tracer, "start_as_current_span",
                         lambda name: FakeSpan())
 
-    news_push._record(56, users_db.PUSH_NOTHING_NEW, "quiet",
+    news_push._record(56, push_outcome_ops.PUSH_NOTHING_NEW, "quiet",
                       datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc))
 
     assert recorded["push.generated"] is False
@@ -2126,8 +2131,8 @@ def _per_topic_cycle(monkeypatch, chat_id, articles_by_topic, subscriber=None,
     per-interest loop is actually exercised rather than collapsing onto one."""
     now = now or datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     sub = subscriber or _subscriber(chat_id, interests=list(articles_by_topic))
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [sub])
-    monkeypatch.setattr(users_db, "record_push", record_push or MagicMock())
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [sub])
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push or MagicMock())
     _stub_cache_and_categories(monkeypatch)
 
     def fake_select(cached, topics, cats, since, already_pushed, **kwargs):
@@ -2170,7 +2175,7 @@ def test_several_messages_still_record_one_outcome(monkeypatch, isolated_subscri
         "Optics": ["https://e.com/optics"],
     })
 
-    assert users_db.recent_outcomes_for(41) == [users_db.PUSH_DELIVERED]
+    assert push_outcome_ops.recent_outcomes_for(41) == [push_outcome_ops.PUSH_DELIVERED]
 
 
 def test_an_interest_with_nothing_new_does_not_consume_a_slot(
@@ -2230,7 +2235,7 @@ def test_only_interests_actually_sent_are_marked_pushed(
 ):
     _per_topic_cycle(monkeypatch, 45, {"AI": ["https://e.com/ai"], "Quiet": []})
 
-    ordered = users_db.interests_by_staleness(45, ["AI", "Quiet"])
+    ordered = subscriber_ops.interests_by_staleness(45, ["AI", "Quiet"])
     assert ordered == ["Quiet", "AI"], "the un-served interest must still lead"
 
 
@@ -2250,7 +2255,7 @@ def test_a_send_failure_keeps_what_was_already_delivered(
 
     assert send.await_count == 2, "the third interest must not be attempted"
     assert record_push.call_args.args[1] == ["https://e.com/ai"]
-    assert users_db.recent_outcomes_for(46) == [users_db.PUSH_CHAT_NOT_FOUND]
+    assert push_outcome_ops.recent_outcomes_for(46) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
 
 
 def test_every_interest_blocked_records_blocked_not_delivered(
@@ -2260,7 +2265,7 @@ def test_every_interest_blocked_records_blocked_not_delivered(
         "AI": ["https://e.com/ai"], "Robotics": ["https://e.com/robots"],
     }, on_topic=False)
 
-    assert users_db.recent_outcomes_for(47) == [users_db.PUSH_BLOCKED]
+    assert push_outcome_ops.recent_outcomes_for(47) == [push_outcome_ops.PUSH_BLOCKED]
 
 
 def test_no_interest_having_anything_new_records_nothing_new(
@@ -2268,7 +2273,7 @@ def test_no_interest_having_anything_new_records_nothing_new(
 ):
     _per_topic_cycle(monkeypatch, 48, {"AI": [], "Robotics": []})
 
-    assert users_db.recent_outcomes_for(48) == [users_db.PUSH_NOTHING_NEW]
+    assert push_outcome_ops.recent_outcomes_for(48) == [push_outcome_ops.PUSH_NOTHING_NEW]
 
 
 def test_a_partial_block_is_visible_in_the_delivered_detail(
@@ -2281,9 +2286,9 @@ def test_a_partial_block_is_visible_in_the_delivered_detail(
     succeeding."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     sub = _subscriber(49, interests=["AI", "Robotics"])
-    monkeypatch.setattr(users_db, "list_push_enabled_subscribers", lambda: [sub])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [sub])
     record_push = MagicMock()
-    monkeypatch.setattr(users_db, "record_push", record_push)
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
     _stub_cache_and_categories(monkeypatch)
 
     by_topic = {"AI": ["https://e.com/ai"], "Robotics": ["https://e.com/robots"]}
@@ -2304,11 +2309,11 @@ def test_a_partial_block_is_visible_in_the_delivered_detail(
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
 
-    assert users_db.recent_outcomes_for(49) == [users_db.PUSH_DELIVERED]
+    assert push_outcome_ops.recent_outcomes_for(49) == [push_outcome_ops.PUSH_DELIVERED]
     record_push.assert_called_once()  # not one call per interest
     # The detail column, not just the outcome name, must show the block.
-    with users_db._connect() as conn:
+    with storage.get_storage()._engine.begin() as conn:
         row = conn.execute(
-            "SELECT detail FROM push_outcomes WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
-            (49,)).fetchone()
+            text("SELECT detail FROM push_outcomes WHERE chat_id = :chat_id ORDER BY id DESC LIMIT 1"),
+            {"chat_id": 49}).fetchone()
     assert row[0] == "1 interest(s), 1 blocked"

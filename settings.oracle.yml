@@ -24,9 +24,15 @@ storage:
       trailsign-resolve: environment-variable
       name: MESSAGE_ARCHIVE_DIR
     ttl_days: 7
-  subscribers_db_file:
-    trailsign-resolve: environment-variable
-    name: SUBSCRIBERS_DB_FILE
+  # PROD stays sqlite -- the Postgres backend (storage/postgres/) is
+  # proven on INT only so far, see docs/plans/data-layer-plan.md's
+  # "Seam built" section for the trigger to revisit.
+  database:
+    type: sqlite
+    sqlite:
+      path:
+        trailsign-resolve: environment-variable
+        name: SUBSCRIBERS_DB_FILE
   push_outcomes_ttl_days: 90
 
 # Bridges to the same DEEPSEEK_API_KEY env var docker-entrypoint.sh

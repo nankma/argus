@@ -56,6 +56,7 @@ Status table.
 | `model-portability-plan.md` | Swapping/routing LLM models, the guardrail-measurement harness |
 | `multi-channel-plan.md` | Adding LINE — on hold |
 | `security-plan.md` | The numbered security findings and their status |
+| `taxonomy-and-admin-plan.md` | DB-backed category taxonomy, admin-in-the-loop growth, the admin console |
 | `telemetry-and-testing-plan.md` | Test infrastructure, CI, Phoenix, what's covered vs. not |
 
 ## `docs/current/` — what actually exists, right now

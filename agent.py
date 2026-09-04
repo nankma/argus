@@ -14,7 +14,7 @@ news_query research/formatting instructions -- the only kind of turn that
 still reaches this agent loop, since settings categories are dispatched
 directly by dispatch_settings below, see that doc's settings-dispatch
 refactor) + layer 3 (the calling user's stored interests and language
-preference, read fresh from users_db.py) are composed by _compose_prompt()
+preference, read fresh from subscriber_ops) are composed by _compose_prompt()
 on every model call via LangChain's `dynamic_prompt` middleware -- see that
 doc for the research behind this shape and why it doesn't need a
 hand-built LangGraph graph.
@@ -36,7 +36,9 @@ from app_settings import get_settings
 import telemetry
 import news_classify
 import news_sources
-import users_db
+import api_budget_ops
+import interest_cache_ops
+import subscriber_ops
 
 NOTES_FILE = "notes.jsonl"
 
@@ -203,14 +205,14 @@ def _compose_prompt(request) -> str:
 
     chat_id = context.get("chat_id")
     if chat_id is not None:
-        interests = users_db.get_interests(chat_id)
+        interests = subscriber_ops.get_interests(chat_id)
         if interests:
             parts.append(
                 f"This user's stated interests: {', '.join(interests)}. "
                 "Prioritize these when their request is general, but still "
                 "answer whatever they specifically asked."
             )
-        language = users_db.get_language(chat_id)
+        language = subscriber_ops.get_language(chat_id)
         if language:
             parts.append(
                 f"This user has set a preferred reply language: {language}. "
@@ -255,8 +257,8 @@ def search_news(query: str, runtime: ToolRuntime, max_results_per_source: int = 
     # pulls (docs/plans/local-news-cache-plan.md); calling them again here, live,
     # on every matching query from every user would exhaust both almost
     # immediately. Gate is per-user, not admin-only in code -- see
-    # users_db.get_restricted_sources_enabled.
-    include_restricted = users_db.get_restricted_sources_enabled(chat_id)
+    # subscriber_ops.get_restricted_sources_enabled.
+    include_restricted = subscriber_ops.get_restricted_sources_enabled(chat_id)
     sources = news_sources.enabled_sources(include_restricted=include_restricted)
     today = datetime.now(timezone.utc).date().isoformat()
     lines = []
@@ -272,13 +274,13 @@ def search_news(query: str, runtime: ToolRuntime, max_results_per_source: int = 
             # own scheduled pulls consume/enforce a daily budget
             # (try_consume_api_budget), but this on-demand path never
             # recorded anything at all -- an admin's chat queries against
-            # Perigon/NewsAPI were completely invisible to
-            # users_db.api_budget. record_api_call is deliberately
+            # Perigon/NewsAPI were completely invisible to the
+            # api_budget table. record_api_call is deliberately
             # non-enforcing (unlike try_consume_api_budget): this path
             # isn't subject to news_ingest.py's cap, only counted
-            # alongside it for combined visibility (users_db.
+            # alongside it for combined visibility (api_budget_ops.
             # get_api_budget_history/get_total_api_calls).
-            users_db.record_api_call(name, today)
+            api_budget_ops.record_api_call(name, today)
         total += len(articles)
         for a in articles:
             published = a.get("published") or "date unknown"
@@ -299,7 +301,7 @@ TOOLS = [save_note, search_news]
 # an agent loop to reason about, so bot.py's process_message calls this
 # directly instead of going through build_agent/run_agent for these
 # categories. Deterministic and model-free by design (the doc's own stated
-# goal): every branch here is a plain users_db write plus a template
+# goal): every branch here is a plain subscriber_ops write plus a template
 # string, fully unit-testable with no fake model needed. The one exception
 # a caller has to handle separately is translation -- this always returns
 # the English confirmation; bot.py translates it if the user has a
@@ -350,7 +352,7 @@ def _add_one_interest(chat_id: int, topic: str, model, known: list[str]) -> str:
             if detail.is_umbrella:
                 narrower = detail.narrower_examples[:3]
         # Generated once per NEWLY-SEEN interest string and cached
-        # globally (users_db.interest_query_expansions), not per
+        # globally (interest_cache_ops), not per
         # subscriber -- checked here regardless of whether THIS
         # subscriber's own add below succeeds, since the cache exists to
         # serve every future subscriber who adds the same topic, not just
@@ -359,13 +361,13 @@ def _add_one_interest(chat_id: int, topic: str, model, known: list[str]) -> str:
         # when nothing is cached; see expand_interest_for_retrieval's own
         # docstring for why the bare string is a measurably worse
         # retrieval query.
-        if users_db.get_interest_query_expansion(topic) is None:
+        if interest_cache_ops.get_interest_query_expansion(topic) is None:
             expansion = news_classify.expand_interest_for_retrieval(model, topic)
             if expansion is not None:
-                users_db.set_interest_query_expansion(topic, expansion)
+                interest_cache_ops.set_interest_query_expansion(topic, expansion)
     before = list(known)
     try:
-        after = users_db.add_interest(chat_id, topic)
+        after = subscriber_ops.add_interest(chat_id, topic)
     except ValueError as exc:
         # At the cap. Said plainly and with the way out, rather than
         # accepting the message and silently not storing it. `known` is
@@ -435,7 +437,7 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
         # neither was in the database yet when the message arrived -- the
         # same reason `before` was passed at all, extended to cover
         # same-message context, not just prior interests.
-        known = users_db.get_interests(chat_id)
+        known = subscriber_ops.get_interests(chat_id)
         replies = []
         for topic in topics:
             replies.append(_add_one_interest(chat_id, topic, model, known))
@@ -447,8 +449,8 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
             return "Didn't catch what you wanted to remove -- try naming a topic."
         replies = []
         for topic in topics:
-            before = users_db.get_interests(chat_id)
-            after = users_db.remove_interest(chat_id, topic)
+            before = subscriber_ops.get_interests(chat_id)
+            after = subscriber_ops.remove_interest(chat_id, topic)
             if len(after) == len(before):
                 replies.append(f"{topic} wasn't in your interests, so there was nothing to remove.")
             else:
@@ -456,26 +458,26 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
         return "\n\n".join(replies)
 
     if category == "start_push":
-        users_db.set_push_enabled(chat_id, True)
+        subscriber_ops.set_push_enabled(chat_id, True)
         if classification.push_interval_hours is not None:
             try:
-                users_db.set_push_interval_hours(chat_id, classification.push_interval_hours)
+                subscriber_ops.set_push_interval_hours(chat_id, classification.push_interval_hours)
             except ValueError as exc:
                 return f"Turned on periodic news push, but couldn't set that interval: {exc}"
-        hours = users_db.get_push_interval_hours(chat_id)
+        hours = subscriber_ops.get_push_interval_hours(chat_id)
         return f"Turned on periodic news push, every {hours} hour(s)."
 
     if category == "stop_push":
-        users_db.set_push_enabled(chat_id, False)
+        subscriber_ops.set_push_enabled(chat_id, False)
         return "Turned off periodic news push."
 
     if category == "set_language":
         if classification.language is None:
-            current = users_db.get_language(chat_id)
+            current = subscriber_ops.get_language(chat_id)
             if current:
                 return f"Your reply language is currently set to {current}."
             return "No reply language is set -- I match whichever language you write in."
-        users_db.set_language(chat_id, classification.language)
+        subscriber_ops.set_language(chat_id, classification.language)
         return f"Done -- I'll reply to you in {classification.language} from now on."
 
     raise ValueError(f"dispatch_settings called with a non-Route-B category: {category!r}")

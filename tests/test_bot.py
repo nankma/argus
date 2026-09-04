@@ -10,7 +10,8 @@ from telegram.error import BadRequest
 import bot
 import guardrails
 import telegram_html
-import users_db
+import category_ops
+import subscriber_ops
 from bot import (
     TELEGRAM_MESSAGE_LIMIT,
     _normalize_markdown_bold,
@@ -238,15 +239,15 @@ def test_check_access_allows_admin(isolated_subscribers_db, monkeypatch):
 
 def test_check_access_allows_approved_user(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot, "notify_admin", AsyncMock())
-    users_db.request_access(1, "alice", "Alice")
-    users_db.decide(1, approved=True)
+    subscriber_ops.request_access(1, "alice", "Alice")
+    subscriber_ops.decide(1, approved=True)
     update = _make_update(chat_id=1)
     assert asyncio.run(bot.check_access(update, _make_context())) is True
 
 
 def test_check_access_blocks_pending_user(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot, "notify_admin", AsyncMock())
-    users_db.request_access(2, "bob", "Bob")
+    subscriber_ops.request_access(2, "bob", "Bob")
     update = _make_update(chat_id=2)
     assert asyncio.run(bot.check_access(update, _make_context())) is False
     reply = update.message.reply_text.call_args[0][0]
@@ -255,8 +256,8 @@ def test_check_access_blocks_pending_user(isolated_subscribers_db, monkeypatch):
 
 def test_check_access_blocks_denied_user(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot, "notify_admin", AsyncMock())
-    users_db.request_access(3, "carol", "Carol")
-    users_db.decide(3, approved=False)
+    subscriber_ops.request_access(3, "carol", "Carol")
+    subscriber_ops.decide(3, approved=False)
     update = _make_update(chat_id=3)
     assert asyncio.run(bot.check_access(update, _make_context())) is False
     reply = update.message.reply_text.call_args[0][0]
@@ -268,7 +269,7 @@ def test_check_access_registers_new_request_and_notifies_admin(isolated_subscrib
     monkeypatch.setattr(bot, "notify_admin", notify)
     update = _make_update(chat_id=4, username="dave", first_name="Dave")
     assert asyncio.run(bot.check_access(update, _make_context())) is False
-    assert users_db.get_status(4) == users_db.PENDING
+    assert subscriber_ops.get_status(4) == subscriber_ops.PENDING
     notify.assert_called_once()
 
 
@@ -287,14 +288,14 @@ def test_handle_start_command_new_user_registers_request_only(isolated_subscribe
 
     asyncio.run(bot.handle_start_command(update, context))
 
-    assert users_db.get_status(5) == users_db.PENDING
+    assert subscriber_ops.get_status(5) == subscriber_ops.PENDING
     notify.assert_called_once()
     update.message.reply_text.assert_called_once()  # only check_access's own reply
 
 
 def test_handle_start_command_approved_user_gets_capabilities_message(isolated_subscribers_db):
-    users_db.request_access(6, "frank", "Frank")
-    users_db.decide(6, approved=True)
+    subscriber_ops.request_access(6, "frank", "Frank")
+    subscriber_ops.decide(6, approved=True)
     update = _make_update(chat_id=6, text="/start")
     context = _make_context(admin_chat_id=999)
 
@@ -307,7 +308,7 @@ def test_handle_start_command_approved_user_gets_capabilities_message(isolated_s
 
 def test_handle_start_command_pending_user_blocked(isolated_subscribers_db, monkeypatch):
     monkeypatch.setattr(bot, "notify_admin", AsyncMock())
-    users_db.request_access(7, "grace", "Grace")
+    subscriber_ops.request_access(7, "grace", "Grace")
     update = _make_update(chat_id=7, text="/start")
     context = _make_context(admin_chat_id=999)
 
@@ -389,7 +390,7 @@ def test_handle_message_normalizes_stray_markdown_before_sending(isolated_subscr
     # a plain (untranslated) template is our own fixed string and can't
     # contain stray markdown in the first place.
     _bypass_guardrails(monkeypatch, category="set_interest", topics=["AI"])
-    users_db.set_language(999, "Traditional Chinese")
+    subscriber_ops.set_language(999, "Traditional Chinese")
     monkeypatch.setattr(bot, "_translate_confirmation", MagicMock(return_value="已將 **AI** 加入你的興趣清單"))
     update = _make_update(chat_id=999, text="Add AI to my interests")
     context = _make_context(admin_chat_id=999)
@@ -502,7 +503,7 @@ def test_handle_message_dispatches_route_b_without_calling_run_agent(isolated_su
     # template isn't model output, so layer 4 has nothing to check either.
     translate_mock.assert_not_called()
     is_output_on_topic_mock.assert_not_called()
-    assert users_db.get_interests(999) == ["robotics"]
+    assert subscriber_ops.get_interests(999) == ["robotics"]
     args, _kwargs = update.message.reply_text.call_args
     assert "robotics" in args[0]
 
@@ -510,7 +511,7 @@ def test_handle_message_dispatches_route_b_without_calling_run_agent(isolated_su
 def test_handle_message_checks_output_guardrail_on_translated_route_b_reply(isolated_subscribers_db, monkeypatch):
     # Layer 4 only runs on Route B when the confirmation was actually
     # translated (real model output) -- here a fresh set_language change
-    # means users_db.get_language reflects the new value right after
+    # means subscriber_ops.get_language reflects the new value right after
     # dispatch_settings runs, so translation (and therefore the check)
     # happens even though there was no prior preference.
     _bypass_guardrails(monkeypatch, category="set_language", language="French")
@@ -554,7 +555,7 @@ def test_handle_message_route_b_blocked_by_output_guardrail_on_translated_reply(
     # preference so translation (and therefore the check) actually runs
     # on the Route B path itself.
     _bypass_guardrails(monkeypatch, category="set_interest", topics=["robotics"])
-    users_db.set_language(999, "French")
+    subscriber_ops.set_language(999, "French")
     monkeypatch.setattr(bot.guardrails, "is_output_on_topic", MagicMock(return_value=False))
     monkeypatch.setattr(bot, "_translate_confirmation", MagicMock(return_value="Ajouté robotics à vos intérêts."))
     update = _make_update(chat_id=999, text="Add robotics to my interests")
@@ -563,7 +564,7 @@ def test_handle_message_route_b_blocked_by_output_guardrail_on_translated_reply(
 
     asyncio.run(bot.handle_message(update, context))
 
-    assert users_db.get_interests(999) == ["robotics"]  # dispatch_settings' write already committed
+    assert subscriber_ops.get_interests(999) == ["robotics"]  # dispatch_settings' write already committed
     update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML)
 
 
@@ -589,7 +590,7 @@ def test_handle_message_multi_category_dispatches_both_and_joins_replies(isolate
 
     asyncio.run(bot.handle_message(update, context))
 
-    assert users_db.get_interests(999) == ["robotics"]
+    assert subscriber_ops.get_interests(999) == ["robotics"]
     run_agent_mock.assert_called_once()
     args, _kwargs = update.message.reply_text.call_args
     assert "Added robotics" in args[0]
@@ -646,7 +647,7 @@ def test_handle_message_multi_category_blocks_whole_reply_if_any_segment_blocked
 
     asyncio.run(bot.handle_message(update, context))
 
-    assert users_db.get_interests(999) == ["robotics"]  # Route B's write already committed
+    assert subscriber_ops.get_interests(999) == ["robotics"]  # Route B's write already committed
     update.message.reply_text.assert_called_once_with(bot.guardrails.REDIRECT_MESSAGE, parse_mode=bot.ParseMode.HTML)
 
 
@@ -693,13 +694,13 @@ def test_handle_interests_command_sets_interests(isolated_subscribers_db):
 
     asyncio.run(bot.handle_interests_command(update, context))
 
-    assert users_db.get_interests(999) == ["AI", "robotics", "semiconductors"]
+    assert subscriber_ops.get_interests(999) == ["AI", "robotics", "semiconductors"]
     reply = update.message.reply_text.call_args[0][0]
     assert "AI, robotics, semiconductors" in reply
 
 
 def test_handle_interests_command_shows_set_interests(isolated_subscribers_db):
-    users_db.set_interests(999, ["AI"])
+    subscriber_ops.set_interests(999, ["AI"])
     update = _make_update(chat_id=999, text="/interests")
     context = _make_context(admin_chat_id=999)
 
@@ -710,13 +711,13 @@ def test_handle_interests_command_shows_set_interests(isolated_subscribers_db):
 
 
 def test_handle_interests_command_clears(isolated_subscribers_db):
-    users_db.set_interests(999, ["AI"])
+    subscriber_ops.set_interests(999, ["AI"])
     update = _make_update(chat_id=999, text="/interests clear")
     context = _make_context(admin_chat_id=999)
 
     asyncio.run(bot.handle_interests_command(update, context))
 
-    assert users_db.get_interests(999) == []
+    assert subscriber_ops.get_interests(999) == []
     reply = update.message.reply_text.call_args[0][0]
     assert "cleared" in reply.lower()
 
@@ -729,7 +730,7 @@ def test_handle_interests_command_requires_access(isolated_subscribers_db, monke
 
     asyncio.run(bot.handle_interests_command(update, context))
 
-    assert users_db.get_interests(555) == []  # never set, the request was blocked
+    assert subscriber_ops.get_interests(555) == []  # never set, the request was blocked
 
 
 def test_handle_language_command_shows_unset_state(isolated_subscribers_db):
@@ -748,13 +749,13 @@ def test_handle_language_command_sets_language(isolated_subscribers_db):
 
     asyncio.run(bot.handle_language_command(update, context))
 
-    assert users_db.get_language(999) == "Spanish"
+    assert subscriber_ops.get_language(999) == "Spanish"
     reply = update.message.reply_text.call_args[0][0]
     assert "Spanish" in reply
 
 
 def test_handle_language_command_shows_set_language(isolated_subscribers_db):
-    users_db.set_language(999, "Spanish")
+    subscriber_ops.set_language(999, "Spanish")
     update = _make_update(chat_id=999, text="/language")
     context = _make_context(admin_chat_id=999)
 
@@ -765,13 +766,13 @@ def test_handle_language_command_shows_set_language(isolated_subscribers_db):
 
 
 def test_handle_language_command_clears(isolated_subscribers_db):
-    users_db.set_language(999, "Spanish")
+    subscriber_ops.set_language(999, "Spanish")
     update = _make_update(chat_id=999, text="/language clear")
     context = _make_context(admin_chat_id=999)
 
     asyncio.run(bot.handle_language_command(update, context))
 
-    assert users_db.get_language(999) is None
+    assert subscriber_ops.get_language(999) is None
     reply = update.message.reply_text.call_args[0][0]
     assert "cleared" in reply.lower()
 
@@ -784,16 +785,16 @@ def test_handle_language_command_requires_access(isolated_subscribers_db, monkey
 
     asyncio.run(bot.handle_language_command(update, context))
 
-    assert users_db.get_language(555) is None  # never set, the request was blocked
+    assert subscriber_ops.get_language(555) is None  # never set, the request was blocked
 
 
 def test_handle_message_sends_raw_user_text_unmodified(isolated_subscribers_db, monkeypatch):
     # Interests are no longer prepended onto the message text in bot.py --
-    # they're read fresh from users_db inside agent.py's dynamic-prompt
+    # they're read fresh from subscriber_ops inside agent.py's dynamic-prompt
     # middleware (layer 3), keyed off the chat_id passed via context. See
     # test_handle_message_passes_chat_id_and_category_to_run_agent above.
     _bypass_guardrails(monkeypatch)
-    users_db.set_interests(999, ["AI", "robotics"])
+    subscriber_ops.set_interests(999, ["AI", "robotics"])
     update = _make_update(chat_id=999, text="What's new?")
     context = _make_context(admin_chat_id=999)
     context.bot_data["agent"] = "fake-agent"
@@ -960,7 +961,7 @@ def test_register_ingest_job_schedules_one_repeating_job():
 
 def _seed_proposal(name, now, hits=5):
     for i in range(hits):
-        users_db.record_category_sighting(name, now, f"https://e/{i}", f"{name} story {i}")
+        category_ops.record_category_sighting(name, now, f"https://e/{i}", f"{name} story {i}")
 
 
 def _patch_events_span(monkeypatch):
@@ -1009,7 +1010,7 @@ def test_a_failed_send_leaves_the_proposal_raisable(monkeypatch, isolated_subscr
     span = _patch_events_span(monkeypatch)
 
     assert asyncio.run(bot.review_category_proposals("m", "tok", 42, now=now)) == 0
-    assert users_db.categories_ready_for_review(now) != [], "still eligible next cycle"
+    assert category_ops.categories_ready_for_review(now) != [], "still eligible next cycle"
     assert span.attrs["logfire.level_num"] == Level.WARN
     assert span.attrs["name"] == "Healthcare"
     assert len(span.exceptions) == 1
@@ -1058,7 +1059,7 @@ def test_interests_command_stores_the_translated_form(monkeypatch, isolated_subs
 
     asyncio.run(bot.handle_interests_command(update, _make_context(admin_chat_id=999)))
 
-    assert users_db.get_interests(999) == ["Optical Communications", "AAOI Applied Optoelectronics"]
+    assert subscriber_ops.get_interests(999) == ["Optical Communications", "AAOI Applied Optoelectronics"]
     assert "Optical Communications" in update.message.reply_text.call_args[0][0]
 
 
@@ -1092,7 +1093,7 @@ def test_interests_command_keeps_the_original_when_translation_fails(
         _make_update(chat_id=999, text="/interests 光通訊"),
         _make_context(admin_chat_id=999)))
 
-    assert users_db.get_interests(999) == ["光通訊"], "stored, just not translated"
+    assert subscriber_ops.get_interests(999) == ["光通訊"], "stored, just not translated"
 
 
 # --- unknown commands must never be silent --------------------------------
@@ -1106,8 +1107,8 @@ def test_interests_command_keeps_the_original_when_translation_fails(
 
 
 def test_unknown_command_gets_a_reply_instead_of_silence(isolated_subscribers_db):
-    users_db.request_access(70, "gina", "Gina")
-    users_db.decide(70, approved=True)
+    subscriber_ops.request_access(70, "gina", "Gina")
+    subscriber_ops.decide(70, approved=True)
     update = _make_update(chat_id=70, text="/wat")
     context = _make_context(admin_chat_id=999)
 
@@ -1159,22 +1160,22 @@ def test_interests_command_enforces_the_cap(isolated_subscribers_db):
     """This command writes the list wholesale rather than going through
     add_interest, so without its own check it is a way straight past the
     cap."""
-    too_many = ", ".join(f"topic{i}" for i in range(users_db.MAX_INTERESTS + 1))
+    too_many = ", ".join(f"topic{i}" for i in range(subscriber_ops.MAX_INTERESTS + 1))
     update = _make_update(chat_id=999, text="/interests " + too_many)
     context = _make_context(admin_chat_id=999)
 
     asyncio.run(bot.handle_interests_command(update, context))
 
     reply = update.message.reply_text.call_args[0][0]
-    assert str(users_db.MAX_INTERESTS) in reply
-    assert users_db.get_interests(999) == []
+    assert str(subscriber_ops.MAX_INTERESTS) in reply
+    assert subscriber_ops.get_interests(999) == []
 
 
 def test_interests_command_allows_exactly_the_cap(isolated_subscribers_db):
-    at_cap = ", ".join(f"topic{i}" for i in range(users_db.MAX_INTERESTS))
+    at_cap = ", ".join(f"topic{i}" for i in range(subscriber_ops.MAX_INTERESTS))
     update = _make_update(chat_id=999, text="/interests " + at_cap)
     context = _make_context(admin_chat_id=999)
 
     asyncio.run(bot.handle_interests_command(update, context))
 
-    assert len(users_db.get_interests(999)) == users_db.MAX_INTERESTS
+    assert len(subscriber_ops.get_interests(999)) == subscriber_ops.MAX_INTERESTS

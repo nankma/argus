@@ -50,8 +50,8 @@ deployment" are the same thing.
 | 1 | **Settings** | **Design built and extracted.** Now its own project, [Trailsign](https://pypi.org/project/trailsign/) (`github.com/nankma/trailsign`) — the design turned out to be genuinely content-independent, not specific to this bot. **This repo's own adoption of it is separate ongoing work — see [`01-settings-migration.md`](01-settings-migration.md)** for the full env-var inventory, migration order, and current per-subsystem status (storage paths done 2026-09-01; models/news-source keys/Telegram-admin/telemetry not yet). |
 | 2 | **Push / delivery target** | Not started |
 | 3 | **Management surface** | Not started |
-| 4 | **Telemetry / logging** | Not started |
-| 5 | **Storage / persistence** | Not started |
+| 4 | **Telemetry / logging** | **Built and shipped, 2026-09-03** — `telemetry.py` + `telemetry_providers/`, a pluggable-adapter registry (`otlp`, `file`, `phoenix` today) selected via one `telemetry.providers[]` settings list, each entry's `KIND` deciding whether it receives general events, LLM tracing, or both. Took a different shape than the two-independent-settings sketch below (`telemetry.events`/`telemetry.tracing`) — see `01-settings-migration.md`'s "Telemetry providers, take three" section for why one KIND-routed list won out. |
+| 5 | **Storage / persistence** | **Seam built, 2026-09-03** — see `docs/plans/data-layer-plan.md`'s Status row 1. Subscriber/category/push-outcome/api-budget/interest-cache/source-state data (not `message_archive.py`/`news_cache.py`, which stay filesystem-based). SQLite default + a real `PostgresStorage`, not yet proven against a live Postgres or switched on for any deployment. |
 
 Seams 2–5 below are rough — the level of detail this project's own
 `writing-system-design-docs` skill calls "written only once that part's
@@ -64,7 +64,7 @@ seam 1.
 |---|---|---|---|
 | 2 | Push / delivery target | `bot.py`/`combined_bot.py`/`news_push.py` call the Telegram `Bot` API directly — no seam at all | A delivery-target interface (Telegram, Email, later LINE/...), each a factory-constructed adaptor off resolved settings, same registry shape as `news_sources.py` — one or more active at once |
 | 3 | Management surface | `admin_bot.py` — Telegram-only | Telegram admin bot and/or a local (`localhost`-only) web page, each independently on/off — not a single either/or switch |
-| 4 | Telemetry / logging | `logfire_logger.py`'s `LogfireLogger` conflates structured event logging (already behind a `Logger` Protocol) with owning OTel span-exporter setup (hardcoded to Logfire's OTLP endpoint) | Split into two independent settings: `telemetry.events` (the `Logger` Protocol — file-based default, Logfire, or anything else) and `telemetry.tracing` (a pluggable OTel `SpanExporter` — file-based default, Logfire/Phoenix/anywhere OTLP as options). A file `SpanExporter` isn't new territory: the OTel SDK already defines that interface and ships `ConsoleSpanExporter` as a reference |
+| 4 | Telemetry / logging | **Done, 2026-09-03.** `telemetry.py` (coordinator) + `telemetry_providers/` (adapter registry, `TelemetryProvider` Protocol with `TYPE`/`KIND`/`SPAN_BASED`) — a file-based default (`FileProvider`, JSON-line events, no account needed) plus OTLP/Logfire and Phoenix as pluggable options, all selected from one `telemetry.providers[]` settings list. The originally-sketched two-independent-settings split (`telemetry.events`/`telemetry.tracing`) was tried and replaced: a provider that can handle both general events and LLM tracing (e.g. `otlp`) now declares that once via its `KIND`, routed automatically to two internally-isolated `TracerProvider`s, rather than being configured twice. See `01-settings-migration.md`'s "Telemetry providers, take three" section for the full design history (including a real double-export bug the two-list version had) |
 | 5 | Storage / persistence | `users_db.py` (subscribers, interests, push settings), `message_archive.py`, `news_cache.py` — all hardcoded to SQLite/local filesystem | A storage-backend Protocol, SQLite as the zero-ops default, Postgres/MySQL/Mongo/etc. as pluggable alternatives |
 
 ## Rough phasing (confirmed 2026-08-31, seam 1 design completed 2026-09-01)
@@ -80,11 +80,17 @@ seam 1.
    not boilerplate caution).
 3. **Finish the telemetry seam and whatever else is needed to actually
    run standalone.**
-   - File-based `Logger` implementation (the no-account default for
-     `telemetry.events`).
-   - File-based `SpanExporter` for `telemetry.tracing` — a small
-     implementation of the OTel SDK's own extension point, writing
-     JSON-line spans instead of exporting OTLP.
+   - ~~File-based `Logger` implementation (the no-account default for
+     `telemetry.events`).~~ **Done, 2026-09-03** — `telemetry_providers/file.py`'s
+     `FileProvider` (`type: file` in `telemetry.providers[]`), writes
+     JSON-line events, no account/network needed.
+   - ~~File-based `SpanExporter` for `telemetry.tracing`.~~ Folded into
+     the same `FileProvider` above rather than built separately — it
+     covers general-event logging (`KIND={"general"}`), which is the
+     no-account default this phase needed; a genuinely file-based OTel
+     *span* exporter (as opposed to event log lines) hasn't been built
+     and isn't currently planned, since `file`'s existing shape already
+     satisfies "standalone, no telemetry account required."
    - Standalone-readiness audit: a grep sweep for anything else that
      silently assumes the current cloud deployment — same shape as this
      project's own Phoenix-retirement sweep. Candidates already visible:
@@ -217,8 +223,11 @@ should copy that shape rather than invent a new one.
 - `docs/plans/model-portability-plan.md` — AI provider swapping, already
   built, reused as-is.
 - `docs/plans/observability-platform-plan.md` / `docs/current/telemetry-catalog.md`
-  — describe the current Logfire-specific state that Phase 3 changes;
-  update both once a telemetry backend seam actually exists.
+  / `docs/current/infrastructure.md` — already updated (2026-09-03) to
+  describe the `telemetry.py`/`telemetry_providers/` seam now that it
+  exists, alongside the still-current Logfire-specific alerting detail
+  (Phase 3's seam is pluggable; PROD's own `settings.oracle.yml` still
+  only configures the `otlp` provider).
 - `docs/plans/deployment-plan.md` / `docs/current/infrastructure.md` —
   describe the current single-cloud-deployment topology; Phase 3 is what
   eventually makes those "the PROD topology" rather than "the only

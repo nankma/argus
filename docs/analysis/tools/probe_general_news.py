@@ -53,7 +53,7 @@ sys.path.insert(0, os.path.abspath(
 
 import news_classify
 import news_sources
-import users_db
+import category_ops
 from tools.claude_cli_model import ClaudeCLIModel
 
 # The bundle under consideration. Deliberately the general-news half only:
@@ -97,7 +97,7 @@ def main():
     if not articles:
         sys.exit("no articles fetched")
 
-    taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+    taxonomy = news_classify.Taxonomy.from_rows(category_ops.get_active_categories())
     print(f"\nclassifying {len(articles)} articles against the current "
           f"{len(taxonomy.names)} active categories")
     print(f"  ({', '.join(taxonomy.names)})\n")

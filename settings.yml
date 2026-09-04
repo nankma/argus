@@ -20,7 +20,22 @@ storage:
   message_archive_dir:
     path: message_archive
     ttl_days: 7
-  subscribers_db_file: subscribers.db
+  # Pluggable storage backend (storage/) -- `type` selects
+  # SqliteStorage (default, zero-ops) or PostgresStorage; only the
+  # matching sub-block below is read. See
+  # docs/plans/data-layer-plan.md's "Seam built" section.
+  database:
+    type: sqlite
+    sqlite:
+      path: subscribers.db
+    # postgres:
+    #   host: localhost
+    #   port: 5432
+    #   dbname: myfirstagent
+    #   user: myfirstagent
+    #   password:
+    #     trailsign-resolve: environment-variable
+    #     name: POSTGRES_PASSWORD
   # Set this to archive expired articles instead of deleting them (no
   # ttl_hours -- nothing prunes this directory by age):
   # news_archive_dir: news_archive

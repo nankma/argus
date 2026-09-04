@@ -12,7 +12,7 @@ model" question) -- docs/plans/model-portability-plan.md's cheaper per-stage
 routing can swap this later without a redesign.
 
 The taxonomy is no longer defined here. It lives in the `categories`
-table (see users_db.SEED_CATEGORIES for what a fresh database starts
+table (see category_ops.SEED_CATEGORIES for what a fresh database starts
 with, and docs/plans/taxonomy-and-admin-plan.md for the design), and is
 passed in as a Taxonomy so this module keeps no database dependency. It
 is explicitly revisable: the whole point of moving it was that changing
@@ -38,7 +38,7 @@ class Taxonomy:
     no database dependency and its tests can hand it a two-category
     taxonomy instead of standing up SQLite -- the same reasoning as
     build_agent taking its model as a parameter (see CLAUDE.md). Callers
-    build it from users_db.get_active_categories().
+    build it from category_ops.get_active_categories().
 
     Frozen because the prompt text is derived from it: a taxonomy that
     changed underneath a batch would mean the prompt and the validation set
@@ -127,7 +127,7 @@ def classify_interests(model, interests: list[str], taxonomy: Taxonomy) -> dict[
     topics before the digest-writing model ever sees anything. Thin
     wrapper around classify_articles: each interest is treated as a
     single-line pseudo-article (title=interest text, no summary). Callers
-    are expected to cache the result (see users_db.get_cached_interest_categories/
+    are expected to cache the result (see interest_cache_ops.get_cached_interest_categories/
     set_interest_categories) rather than re-classifying on every push
     cycle -- interest text is stable vocabulary, not fresh content.
 
@@ -268,7 +268,7 @@ def classify_articles(model, articles: list[dict], taxonomy: Taxonomy,
     nothing is known about that article -- which callers must keep distinct
     from an index that IS present with an empty list, meaning the model
     looked and nothing applied. news_ingest records the first as null and
-    the second as users_db.UNCLASSIFIABLE; collapsing them is what made a
+    the second as category_ops.UNCLASSIFIABLE; collapsing them is what made a
     three-day outage look like normal operation. Same
     reasoning as guardrails.classify_message: a classification hiccup
     shouldn't block caching the article, it should just make it harder to
@@ -516,7 +516,7 @@ def expand_interest_for_retrieval(model, interest: str) -> str | None:
     not in how much of it.
 
     Called once per NEWLY-SEEN interest string (agent.py's
-    _add_one_interest, cached in users_db's global
+    _add_one_interest, cached in interest_cache_ops's global
     interest_query_expansions table, the same shape and same reasoning
     as resolve_interest_categories's cache: the interest text is stable
     vocabulary, so this should be a cache hit for any interest that's
