@@ -43,7 +43,7 @@ def test_classify_message_news_query():
     result = guardrails.classify_message(model, "What's new with Anthropic?")
     assert result.on_topic is True
     assert result.categories == ["news_query"]
-    model.with_structured_output.assert_called_once_with(guardrails.MessageClassification)
+    model.with_structured_output.assert_called_once_with(guardrails.MessageClassification, method="function_calling")
 
 
 def test_classify_message_off_topic():
@@ -196,7 +196,7 @@ def test_layer2_failure_is_announced_not_just_swallowed(monkeypatch, capsys):
     the load-bearing site the incident is about, don't let it downgrade to
     routine WARN noise."""
     class Exploding:
-        def with_structured_output(self, _schema):
+        def with_structured_output(self, _schema, method=None):
             raise RuntimeError("400 Thinking mode does not support this tool_choice")
 
     span = _patch_events_span(monkeypatch)
@@ -216,7 +216,7 @@ def test_layer4_failure_is_announced_not_just_swallowed(monkeypatch, capsys):
     """Layer 4's mirror of the layer2 test above -- same load-bearing ERROR
     level, same incident."""
     class Exploding:
-        def with_structured_output(self, _schema):
+        def with_structured_output(self, _schema, method=None):
             raise RuntimeError("provider exploded")
 
     span = _patch_events_span(monkeypatch)

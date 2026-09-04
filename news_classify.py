@@ -175,7 +175,10 @@ def _classify_one_batch(model, articles: list[dict], taxonomy: Taxonomy,
     """One structured-output call. Returns {} on any failure -- see
     classify_articles for the fail-open reasoning."""
     try:
-        structured = model.with_structured_output(ClassificationBatch)
+        # method="function_calling" -- see guardrails.classify_message's
+        # docstring/comment for why (DeepSeek's real API rejects
+        # langchain_openai's default "json_schema" response_format).
+        structured = model.with_structured_output(ClassificationBatch, method="function_calling")
         result = structured.invoke(
             [
                 {"role": "system", "content": _classify_prompt(taxonomy)},
@@ -332,7 +335,9 @@ def draft_category_description(model, name: str, examples: list[str],
     Returns None on failure; the caller falls back to asking the admin,
     since a missing description is recoverable and a wrong one is not."""
     try:
-        structured = model.with_structured_output(CategoryDescription)
+        # method="function_calling" -- see guardrails.classify_message's
+        # docstring/comment for why.
+        structured = model.with_structured_output(CategoryDescription, method="function_calling")
         result = structured.invoke([
             {"role": "system", "content":
                 "You write one-line category descriptions for a news classifier. "
@@ -439,7 +444,9 @@ def normalize_interest_detailed(model, text: str, alongside: list[str] | None = 
     if not text.strip():
         return None
     try:
-        structured = model.with_structured_output(NormalizedInterest)
+        # method="function_calling" -- see guardrails.classify_message's
+        # docstring/comment for why.
+        structured = model.with_structured_output(NormalizedInterest, method="function_calling")
         result = structured.invoke([
             {"role": "system", "content":
                 "You normalize a news-subscription interest into a short "
@@ -540,7 +547,9 @@ def expand_interest_for_retrieval(model, interest: str) -> str | None:
     if not interest.strip():
         return None
     try:
-        structured = model.with_structured_output(_RetrievalExpansion)
+        # method="function_calling" -- see guardrails.classify_message's
+        # docstring/comment for why.
+        structured = model.with_structured_output(_RetrievalExpansion, method="function_calling")
         result = structured.invoke([
             {"role": "system", "content":
                 "Write a short ENGLISH definition of the given tech-industry "
