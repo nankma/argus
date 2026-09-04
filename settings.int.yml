@@ -21,27 +21,29 @@ storage:
       trailsign-resolve: environment-variable
       name: MESSAGE_ARCHIVE_DIR
     ttl_days: 7
-  # postgres -- live test of the real storage/postgres/ adapter, 2026-09-03
-  # onward. Points at a Postgres container on the DEV MACHINE
-  # (192.168.0.26:5432, database myfirstagent_int), same "test infra lives
-  # on the dev machine" pattern as the earlier Phoenix telemetry test. All
-  # of INT's pre-existing SQLite data (subscribers, categories, etc.) was
-  # migrated over first via tools/migrate_sqlite_to_postgres.py -- see
-  # docs/plans/data-layer-plan.md's "Seam built" section for the result.
-  # The old sqlite: block (and SUBSCRIBERS_DB_FILE) is commented out, not
-  # deleted, so reverting is a one-line swap if this test needs rolling back:
-  #   sqlite:
-  #     path: {trailsign-resolve: environment-variable, name: SUBSCRIBERS_DB_FILE}
+  # Switched back to sqlite 2026-09-04 (after a live Postgres test,
+  # 2026-09-03 onward, against a container on the DEV MACHINE --
+  # 192.168.0.26:5432, database myfirstagent_int -- verified working via
+  # tools/migrate_sqlite_to_postgres.py and a real deploy; see
+  # docs/plans/data-layer-plan.md's "Seam built" section). The postgres
+  # block below is commented out, not deleted, so switching back is a
+  # one-line swap -- see storage/postgres/'s own adapter, still exercised
+  # by tests/test_storage.py even while INT itself runs sqlite.
   database:
-    type: postgres
-    postgres:
-      host: "192.168.0.26"
-      port: 5432
-      dbname: myfirstagent_int
-      user: myfirstagent
-      password:
-        trailsign-resolve: environment-variable
-        name: POSTGRES_PASSWORD
+    type: sqlite
+    sqlite:
+      path: {trailsign-resolve: environment-variable, name: SUBSCRIBERS_DB_FILE}
+    # postgres block commented out, not deleted -- one-line swap back if
+    # needed. See the comment above this block for the Postgres cutover
+    # history.
+    # postgres:
+    #   host: "192.168.0.26"
+    #   port: 5432
+    #   dbname: myfirstagent_int
+    #   user: myfirstagent
+    #   password:
+    #     trailsign-resolve: environment-variable
+    #     name: POSTGRES_PASSWORD
 
 # main: identical to production on purpose (the model that matters for
 # actual reply quality). guardrail: routed through a SEPARATE Together.ai
