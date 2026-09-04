@@ -257,3 +257,29 @@ def list_all_interests() -> list[str]:
             if topic not in seen:
                 seen.append(topic)
     return seen
+
+
+def get_push_consecutive_failures(chat_id: int) -> int:
+    raw = get_storage().get_push_consecutive_failures(chat_id)
+    return raw if raw is not None else 0
+
+
+def record_push_failure(chat_id: int) -> int:
+    """Increments this subscriber's consecutive-undeliverable-cycle
+    counter and returns the new value -- news_push.py's own replacement
+    for the retired push_outcomes event-log table (see git history):
+    a single per-subscriber counter instead of scanning recent history,
+    since the only real reader was "how many chat_not_found cycles in a
+    row", never the history itself."""
+    count = get_push_consecutive_failures(chat_id) + 1
+    get_storage().set_push_consecutive_failures(chat_id, APPROVED, datetime.now().isoformat(), count)
+    return count
+
+
+def reset_push_consecutive_failures(chat_id: int) -> None:
+    """Call on any delivered digest, or when the subscriber themselves
+    turns push off (stop_push) -- deliberately NOT called by the automatic
+    3-strikes disable itself, so re-enabling push while still unreachable
+    strikes out again immediately. See
+    news_push._strike_unreachable_subscriber's own docstring."""
+    get_storage().set_push_consecutive_failures(chat_id, APPROVED, datetime.now().isoformat(), 0)

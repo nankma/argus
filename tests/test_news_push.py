@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
+import pytest
 from langchain_core.messages import AIMessage
 
 import news_cache
@@ -41,6 +42,35 @@ def _article(link, published_dt=None, title="Some title", source="TestSource", c
 # dated fixtures pass this so they don't start failing as the wall clock
 # moves past the guard -- the same reason run_push_cycle takes `now`.
 NOW = datetime(2026, 8, 6, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def recorded_outcomes(monkeypatch):
+    """Captures every news_push._record(...) call (newest first per
+    chat_id) by wrapping it, not replacing it -- the real function still
+    runs, so span emission and the push_consecutive_failures reset still
+    happen. Replaces the pre-2026-09-04 push_outcome_ops.recent_outcomes_for
+    query now that a push cycle's outcome is a span/print only, not a row
+    in a queryable table (see git history)."""
+    calls = []
+    original = news_push._record
+
+    def spy(chat_id, outcome, message, now, detail=None):
+        calls.append((chat_id, outcome, detail))
+        return original(chat_id, outcome, message, now, detail=detail)
+
+    monkeypatch.setattr(news_push, "_record", spy)
+
+    def outcomes_for(chat_id):
+        return [outcome for cid, outcome, _detail in reversed(calls) if cid == chat_id]
+
+    def detail_for(chat_id):
+        """Most recent call's `detail` for this chat_id -- for the one test
+        that needs to check what got folded into it, not just the outcome."""
+        return next(detail for cid, _outcome, detail in reversed(calls) if cid == chat_id)
+
+    outcomes_for.detail_for = detail_for
+    return outcomes_for
 
 
 # --- select_candidate_articles (stage 1: category filter) -----------------
@@ -1590,7 +1620,7 @@ def test_links_actually_sent_on_empty_digest_is_empty():
     assert news_push.links_actually_sent(None, [_article("https://example.com/a")]) == []
 
 
-# --- push_outcomes: the queryable half of every log line ------------------
+# --- push outcomes: what _record reports each cycle -----------------------
 #
 # Each of these asserts the OUTCOME recorded, not the print. The point of
 # the table is that an alarm can distinguish cases `docker logs` only ever
@@ -1621,18 +1651,18 @@ def _cycle_with(monkeypatch, chat_id=1, subscriber=None, digest=None,
     return now
 
 
-def test_run_push_cycle_records_delivered(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_delivered(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     _cycle_with(monkeypatch, chat_id=11)
-    assert push_outcome_ops.recent_outcomes_for(11) == [push_outcome_ops.PUSH_DELIVERED]
+    assert recorded_outcomes(11) == [push_outcome_ops.PUSH_DELIVERED]
 
 
-def test_a_truly_empty_digest_records_not_relevant(monkeypatch, isolated_subscribers_db):
+def test_a_truly_empty_digest_records_not_relevant(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     _cycle_with(monkeypatch, chat_id=51, digest="")
-    assert push_outcome_ops.recent_outcomes_for(51) == [push_outcome_ops.PUSH_NOT_RELEVANT]
+    assert recorded_outcomes(51) == [push_outcome_ops.PUSH_NOT_RELEVANT]
 
 
 def test_a_non_empty_digest_with_no_real_link_is_treated_as_not_relevant(
-    monkeypatch, isolated_subscribers_db
+    monkeypatch, isolated_subscribers_db, recorded_outcomes
 ):
     """The gap this guards: _PUSH_DIGEST_PROMPT's "write nothing" instruction
     asks for a literal empty reply when nothing is relevant, but the model
@@ -1646,31 +1676,31 @@ def test_a_non_empty_digest_with_no_real_link_is_treated_as_not_relevant(
     _cycle_with(monkeypatch, chat_id=52, send=send,
                digest="No genuinely relevant stories emerged from the candidates this cycle.")
 
-    assert push_outcome_ops.recent_outcomes_for(52) == [push_outcome_ops.PUSH_NOT_RELEVANT]
+    assert recorded_outcomes(52) == [push_outcome_ops.PUSH_NOT_RELEVANT]
     send.assert_not_called()
 
 
-def test_run_push_cycle_records_blocked_digest_as_its_own_outcome(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_blocked_digest_as_its_own_outcome(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     _cycle_with(monkeypatch, chat_id=12, on_topic=False)
-    assert push_outcome_ops.recent_outcomes_for(12) == [push_outcome_ops.PUSH_BLOCKED]
+    assert recorded_outcomes(12) == [push_outcome_ops.PUSH_BLOCKED]
 
 
-def test_run_push_cycle_records_chat_not_found_when_delivery_is_refused(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_chat_not_found_when_delivery_is_refused(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """The 2026-08-21 signature: generation succeeded and was billed, only
     the send failed. Must NOT read as a generic cycle failure -- criterion
     1 keys on exactly this."""
     send = AsyncMock(side_effect=Exception("Chat not found"))
     _cycle_with(monkeypatch, chat_id=13, send=send)
-    assert push_outcome_ops.recent_outcomes_for(13) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
+    assert recorded_outcomes(13) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
 
 
-def test_run_push_cycle_records_blocked_user_as_chat_not_found(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_blocked_user_as_chat_not_found(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     send = AsyncMock(side_effect=Exception("Forbidden: bot was blocked by the user"))
     _cycle_with(monkeypatch, chat_id=14, send=send)
-    assert push_outcome_ops.recent_outcomes_for(14) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
+    assert recorded_outcomes(14) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
 
 
-def test_run_push_cycle_records_model_error_when_an_llm_call_raises(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_model_error_when_an_llm_call_raises(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """A 402 comes out of write_push_digest, not out of the send. Classified
     by which call raised rather than by what the message says, so a
     provider rewording its errors cannot silence criterion 2."""
@@ -1684,10 +1714,10 @@ def test_run_push_cycle_records_model_error_when_an_llm_call_raises(monkeypatch,
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert push_outcome_ops.recent_outcomes_for(15) == [push_outcome_ops.PUSH_MODEL_ERROR]
+    assert recorded_outcomes(15) == [push_outcome_ops.PUSH_MODEL_ERROR]
 
 
-def test_run_push_cycle_records_a_non_model_failure_as_cycle_failed(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_a_non_model_failure_as_cycle_failed(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """select_candidate_articles is local filtering, not an LLM call. If it
     raises, that is a bug in our code -- it must not inflate the model-error
     count and page someone about the provider."""
@@ -1699,10 +1729,10 @@ def test_run_push_cycle_records_a_non_model_failure_as_cycle_failed(monkeypatch,
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert push_outcome_ops.recent_outcomes_for(16) == [push_outcome_ops.PUSH_CYCLE_FAILED]
+    assert recorded_outcomes(16) == [push_outcome_ops.PUSH_CYCLE_FAILED]
 
 
-def test_run_push_cycle_records_nothing_new_without_calling_the_model(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_nothing_new_without_calling_the_model(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(17)])
     monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     _stub_cache_and_categories(monkeypatch)
@@ -1712,20 +1742,20 @@ def test_run_push_cycle_records_nothing_new_without_calling_the_model(monkeypatc
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert push_outcome_ops.recent_outcomes_for(17) == [push_outcome_ops.PUSH_NOTHING_NEW]
+    assert recorded_outcomes(17) == [push_outcome_ops.PUSH_NOTHING_NEW]
     write.assert_not_called()
 
 
-def test_run_push_cycle_records_no_interests(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_records_no_interests(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers",
                         lambda: [_subscriber(18, interests=[])])
     monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock()))
 
-    assert push_outcome_ops.recent_outcomes_for(18) == [push_outcome_ops.PUSH_NO_INTERESTS]
+    assert recorded_outcomes(18) == [push_outcome_ops.PUSH_NO_INTERESTS]
 
 
-def test_run_push_cycle_does_not_record_a_not_due_subscriber(monkeypatch, isolated_subscribers_db):
+def test_run_push_cycle_does_not_record_a_not_due_subscriber(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """Every subscriber is 'not due' on almost every tick. Recording it
     would bury the outcomes that carry signal under ~96 rows a day each."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
@@ -1734,7 +1764,7 @@ def test_run_push_cycle_does_not_record_a_not_due_subscriber(monkeypatch, isolat
     monkeypatch.setattr(subscriber_ops, "record_push", MagicMock())
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
 
-    assert push_outcome_ops.recent_outcomes_for(19) == []
+    assert recorded_outcomes(19) == []
 
 
 def test_classify_send_failure_falls_back_to_cycle_failed():
@@ -1779,7 +1809,7 @@ def test_delivery_failure_retires_no_links(monkeypatch, isolated_subscribers_db)
     assert record_push.call_args[0][1] == []
 
 
-def test_three_consecutive_chat_not_found_turns_push_off(monkeypatch, isolated_subscribers_db):
+def test_three_consecutive_chat_not_found_turns_push_off(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     # Set explicitly: get_push_enabled returns False for a row that does not
     # exist, so without this the assertion below would pass without the
     # subscriber ever having been turned off.
@@ -1788,11 +1818,11 @@ def test_three_consecutive_chat_not_found_turns_push_off(monkeypatch, isolated_s
         _cycle_with(monkeypatch, chat_id=23, send=_failing_send(),
                     record_push=MagicMock())
 
-    assert push_outcome_ops.recent_outcomes_for(23)[0] == push_outcome_ops.PUSH_DISABLED
+    assert recorded_outcomes(23)[0] == push_outcome_ops.PUSH_DISABLED
     assert subscriber_ops.get_push_enabled(23) is False
 
 
-def test_two_consecutive_chat_not_found_leaves_push_on(monkeypatch, isolated_subscribers_db):
+def test_two_consecutive_chat_not_found_leaves_push_on(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """Turning a real subscriber off is the more expensive mistake: they
     just stop getting news, with nothing to notice."""
     subscriber_ops.set_push_enabled(23, True)
@@ -1800,7 +1830,7 @@ def test_two_consecutive_chat_not_found_leaves_push_on(monkeypatch, isolated_sub
         _cycle_with(monkeypatch, chat_id=23, send=_failing_send(),
                     record_push=MagicMock())
 
-    assert push_outcome_ops.PUSH_DISABLED not in push_outcome_ops.recent_outcomes_for(23)
+    assert push_outcome_ops.PUSH_DISABLED not in recorded_outcomes(23)
     assert subscriber_ops.get_push_enabled(23) is True
 
 
@@ -1837,7 +1867,7 @@ def test_a_quiet_cycle_between_failures_does_not_clear_the_strikes(monkeypatch, 
     assert subscriber_ops.get_push_enabled(25) is False
 
 
-def test_model_error_before_generation_does_not_advance_last_push_at(monkeypatch, isolated_subscribers_db):
+def test_model_error_before_generation_does_not_advance_last_push_at(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """Nothing was generated, so nothing was billed -- there is no reason to
     make the subscriber wait a full interval for a transient provider blip."""
     monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(26)])
@@ -1849,11 +1879,11 @@ def test_model_error_before_generation_does_not_advance_last_push_at(monkeypatch
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert push_outcome_ops.recent_outcomes_for(26) == [push_outcome_ops.PUSH_MODEL_ERROR]
+    assert recorded_outcomes(26) == [push_outcome_ops.PUSH_MODEL_ERROR]
     record_push.assert_not_called()
 
 
-def test_model_error_after_generation_does_advance_last_push_at(monkeypatch, isolated_subscribers_db):
+def test_model_error_after_generation_does_advance_last_push_at(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """The guardrail check is an LLM call too, and by the time it runs the
     digest has already been written and billed."""
     monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(27)])
@@ -1869,7 +1899,7 @@ def test_model_error_after_generation_does_advance_last_push_at(monkeypatch, iso
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(),
                                          now=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)))
 
-    assert push_outcome_ops.recent_outcomes_for(27) == [push_outcome_ops.PUSH_MODEL_ERROR]
+    assert recorded_outcomes(27) == [push_outcome_ops.PUSH_MODEL_ERROR]
     record_push.assert_called_once()
 
 
@@ -1930,13 +1960,14 @@ def test_emit_heartbeat_is_a_noop_without_a_tracer_provider():
 def test_a_failure_after_a_successful_send_still_retires_what_was_delivered(
         monkeypatch, isolated_subscribers_db):
     """The window between `await send(...)` returning and record_push being
-    reached contains two database writes. If either raises, the cycle lands
-    in the catch-all handler -- and recording [] there would leave articles
-    the subscriber genuinely received still eligible, so they would be sent
-    a second time.
+    reached contains a database write (the consecutive-failures reset,
+    _record's own side effect for a `delivered` outcome). If it raises, the
+    cycle lands in the catch-all handler -- and recording [] there would
+    leave articles the subscriber genuinely received still eligible, so
+    they would be sent a second time.
 
-    Simulated by making the outcome insert raise, which is the first thing
-    that runs after a successful send."""
+    Simulated by making that reset raise, which is the first write that
+    runs after a successful send (see news_push._record)."""
     now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [_subscriber(41)])
     record_push = MagicMock()
@@ -1948,12 +1979,13 @@ def test_a_failure_after_a_successful_send_still_retires_what_was_delivered(
     monkeypatch.setattr(news_push, "write_push_digest", MagicMock(return_value=digest))
     monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", MagicMock(return_value=True))
 
-    # Everything up to and including the send works; the outcome write for
-    # `delivered` does not. Transient rather than permanent, because a
-    # permanently failing writer also breaks the error handler's own
-    # _record call and aborts the whole tick -- a separate weakness, noted
-    # in docs/plans/incident-monitoring-plan.md, not what this pins.
-    monkeypatch.setattr(push_outcome_ops, "record_push_outcome",
+    # Everything up to and including the send works; the consecutive-
+    # failures reset for `delivered` does not. Transient rather than
+    # permanent, because a permanently failing writer also breaks the
+    # error handler's own _record call and aborts the whole tick -- a
+    # separate weakness, noted in docs/plans/incident-monitoring-plan.md,
+    # not what this pins.
+    monkeypatch.setattr(subscriber_ops, "reset_push_consecutive_failures",
                         MagicMock(side_effect=[RuntimeError("database is locked"), None]))
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
@@ -2165,7 +2197,7 @@ def test_each_interest_gets_its_own_message(monkeypatch, isolated_subscribers_db
     assert "https://e.com/ai" in bodies and "https://e.com/robots" in bodies
 
 
-def test_several_messages_still_record_one_outcome(monkeypatch, isolated_subscribers_db):
+def test_several_messages_still_record_one_outcome(monkeypatch, isolated_subscribers_db, recorded_outcomes):
     """One row per subscriber per cycle, NOT one per message. The three live
     alert criteria are thresholds over this table, and a cycle that emits N
     rows instead of 1 silently rescales every one of them."""
@@ -2175,7 +2207,7 @@ def test_several_messages_still_record_one_outcome(monkeypatch, isolated_subscri
         "Optics": ["https://e.com/optics"],
     })
 
-    assert push_outcome_ops.recent_outcomes_for(41) == [push_outcome_ops.PUSH_DELIVERED]
+    assert recorded_outcomes(41) == [push_outcome_ops.PUSH_DELIVERED]
 
 
 def test_an_interest_with_nothing_new_does_not_consume_a_slot(
@@ -2240,7 +2272,7 @@ def test_only_interests_actually_sent_are_marked_pushed(
 
 
 def test_a_send_failure_keeps_what_was_already_delivered(
-    monkeypatch, isolated_subscribers_db
+    monkeypatch, isolated_subscribers_db, recorded_outcomes
 ):
     """A send can succeed and a later one fail. Recording [] there would
     leave articles the subscriber genuinely received still eligible, and
@@ -2255,29 +2287,29 @@ def test_a_send_failure_keeps_what_was_already_delivered(
 
     assert send.await_count == 2, "the third interest must not be attempted"
     assert record_push.call_args.args[1] == ["https://e.com/ai"]
-    assert push_outcome_ops.recent_outcomes_for(46) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
+    assert recorded_outcomes(46) == [push_outcome_ops.PUSH_CHAT_NOT_FOUND]
 
 
 def test_every_interest_blocked_records_blocked_not_delivered(
-    monkeypatch, isolated_subscribers_db
+    monkeypatch, isolated_subscribers_db, recorded_outcomes
 ):
     _per_topic_cycle(monkeypatch, 47, {
         "AI": ["https://e.com/ai"], "Robotics": ["https://e.com/robots"],
     }, on_topic=False)
 
-    assert push_outcome_ops.recent_outcomes_for(47) == [push_outcome_ops.PUSH_BLOCKED]
+    assert recorded_outcomes(47) == [push_outcome_ops.PUSH_BLOCKED]
 
 
 def test_no_interest_having_anything_new_records_nothing_new(
-    monkeypatch, isolated_subscribers_db
+    monkeypatch, isolated_subscribers_db, recorded_outcomes
 ):
     _per_topic_cycle(monkeypatch, 48, {"AI": [], "Robotics": []})
 
-    assert push_outcome_ops.recent_outcomes_for(48) == [push_outcome_ops.PUSH_NOTHING_NEW]
+    assert recorded_outcomes(48) == [push_outcome_ops.PUSH_NOTHING_NEW]
 
 
 def test_a_partial_block_is_visible_in_the_delivered_detail(
-    monkeypatch, isolated_subscribers_db
+    monkeypatch, isolated_subscribers_db, recorded_outcomes
 ):
     """Some interests delivered, one blocked, in the same cycle. The
     delivered-wins branch must not swallow the blocked count -- an
@@ -2309,11 +2341,49 @@ def test_a_partial_block_is_visible_in_the_delivered_detail(
 
     asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
 
-    assert push_outcome_ops.recent_outcomes_for(49) == [push_outcome_ops.PUSH_DELIVERED]
+    assert recorded_outcomes(49) == [push_outcome_ops.PUSH_DELIVERED]
     record_push.assert_called_once()  # not one call per interest
-    # The detail column, not just the outcome name, must show the block.
-    with storage.get_storage()._engine.begin() as conn:
-        row = conn.execute(
-            text("SELECT detail FROM push_outcomes WHERE chat_id = :chat_id ORDER BY id DESC LIMIT 1"),
-            {"chat_id": 49}).fetchone()
-    assert row[0] == "1 interest(s), 1 blocked"
+    # The detail, not just the outcome name, must show the block.
+    assert recorded_outcomes.detail_for(49) == "1 interest(s), 1 blocked"
+
+
+def test_a_later_interests_model_failure_still_records_delivered(
+    monkeypatch, isolated_subscribers_db, recorded_outcomes
+):
+    """Real incident, found live on INT 2026-09-03: interest N delivered,
+    interest N+1's model call then raised OpenAITimeoutError, and the
+    cycle's one outcome/span came out model_error despite
+    message_archive/interest_push_state both showing the successful send.
+    `sent` must win over a later interest's model failure, same "sent
+    wins, fold the failure into detail" rule as the blocked case above."""
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    sub = _subscriber(50, interests=["AI", "Robotics"])
+    monkeypatch.setattr(subscriber_ops, "list_push_enabled_subscribers", lambda: [sub])
+    record_push = MagicMock()
+    monkeypatch.setattr(subscriber_ops, "record_push", record_push)
+    _stub_cache_and_categories(monkeypatch)
+
+    by_topic = {"AI": ["https://e.com/ai"], "Robotics": ["https://e.com/robots"]}
+
+    def fake_select(cached, topics, cats, since, already_pushed, **kwargs):
+        topic = topics[0]
+        return [{**_article(link), "topic": topic}
+                for link in by_topic.get(topic, []) if link not in already_pushed]
+
+    monkeypatch.setattr(news_push, "select_candidate_articles", fake_select)
+    # AI's digest generates fine; Robotics' model call raises.
+    monkeypatch.setattr(
+        news_push, "write_push_digest",
+        MagicMock(side_effect=[
+            '<b>D</b> <a href="https://e.com/ai">s</a>',
+            RuntimeError("Request timed out."),
+        ]))
+    monkeypatch.setattr(news_push.guardrails, "is_output_on_topic", lambda model, digest: True)
+
+    asyncio.run(news_push.run_push_cycle(model="fake-model", send=AsyncMock(), now=now))
+
+    assert recorded_outcomes(50) == [push_outcome_ops.PUSH_DELIVERED]
+    record_push.assert_called_once_with(50, ["https://e.com/ai"], now)
+    detail = recorded_outcomes.detail_for(50)
+    assert "1 interest(s) sent" in detail
+    assert "model call failed" in detail

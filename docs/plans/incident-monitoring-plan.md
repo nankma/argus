@@ -35,6 +35,25 @@ which changes several of this doc's "why not X" conclusions rather than
 just removing Phoenix as an option. Same as the `healthcheck.py` note
 above: left unedited otherwise, `qa-engineer`'s to reconcile.
 
+**`push_outcomes` (the SQLite event-log table "Status: step 1 built" below
+describes) was RETIRED 2026-09-04** — replaced by
+`subscribers.push_consecutive_failures`, a single per-subscriber counter
+(see `subscriber_ops.record_push_failure`/`reset_push_consecutive_failures`
+and `storage/schema.py`'s comment on that column). Two things drove this:
+the table was unbounded (an event per subscriber per cycle, forever,
+pruned only by a TTL setting) with the useful information it carried
+already duplicated elsewhere by the time this was reviewed -- criterion 3
+(the delivery ratio) had already moved onto the Logfire span
+`news_push._record` emits (see `docs/plans/observability-platform-plan.md`'s
+"The three alerts, live" section), and the ONLY other real reader was
+criterion 1's "how many consecutive `chat_not_found` cycles" check, which
+a bounded counter answers directly without ever needing to scan history.
+`push_outcome_ops.push_outcome_counts`/`push_delivery_ratio`/
+`recent_outcomes_for`/`consecutive_chat_not_found`/`prune_push_outcomes`
+are gone; `push_outcome_ops.py` now holds only the outcome-name constants.
+Left unedited below otherwise -- same "history stays as history"
+convention as the `healthcheck.py`/`telemetry_monitor.py` notes above.
+
 ## The gap this is meant to close
 
 This project has two existing, narrower pieces that already do part of

@@ -73,7 +73,7 @@ source indexes with a delay (exactly NewsAPI's ~24-36h delay above) could
 have its `published_dt` fall *behind* a since-cutoff that already moved
 past it by the time the source finally surfaces it — silently skipped
 forever, not just delayed. Fixed by tracking a separate per-source value
-(`users_db.get_source_last_article_dt`/`set_source_last_article_dt`) that
+(`source_state_ops.get_source_last_article_dt`/`set_source_last_article_dt`) that
 only advances to the max `published_dt` actually observed each cycle, so
 it can never outrun what's genuinely been seen the way a wall-clock
 timestamp can.
@@ -394,11 +394,11 @@ traffic.
 
 **`news_sources.RESTRICTED_SOURCES = {"newsapi", "perigon"}`** — excluded
 from `search_news`'s source list by default. `agent.py`'s `search_news`
-checks `users_db.get_restricted_sources_enabled(chat_id)` (a per-user DB
+checks `subscriber_ops.get_restricted_sources_enabled(chat_id)` (a per-user DB
 flag, defaulting to `False`) before deciding whether to include them.
 `bot.py`/`combined_bot.py` grant this to the admin's own chat_id at
 startup — nobody else, for now. Granting it to someone else later is a
-plain DB update (`users_db.set_restricted_sources_enabled(chat_id,
+plain DB update (`subscriber_ops.set_restricted_sources_enabled(chat_id,
 True)`), not a new code path.
 
 **GNews is deliberately not restricted** — its 100/day budget has real

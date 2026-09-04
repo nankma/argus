@@ -386,10 +386,10 @@ computing). `news_push.MAX_INTERESTS_PER_PUSH` bounds how noisy one cycle
 can be, and staleness ordering stops that bound from permanently starving
 whatever sorts last.
 
-Note what did **not** change: a cycle still records exactly one row in
-`push_outcomes`. The three live alert criteria are thresholds over that
-table, so emitting one row per message would have silently rescaled all
-three.
+Note what did **not** change: a cycle still emits exactly one
+`push_outcome` span (`news_push._record`). The live Logfire alert
+criteria are thresholds over that span stream, so emitting one per
+message would have silently rescaled them.
 
 **The LLM is used only for what it's uniquely good at — writing readable
 prose from a list it was handed.** Selection, deduplication, and
@@ -407,7 +407,7 @@ dates.
 A subscriber's interest first narrows the shared article cache by a
 coarse **category** tag (28 broad taxonomy categories as of 2026-08-27,
 assigned once per article at ingestion; the taxonomy is DB-driven and
-grows over time — see `users_db.get_active_categories` — so treat this
+grows over time — see `category_ops.get_active_categories` — so treat this
 count as a snapshot, not a constant).
 
 That alone isn't enough: two subscribers with
@@ -635,19 +635,20 @@ records its outcome per subscriber (sent / nothing new / blocked /
 errored), so timing questions are answerable directly rather than by
 inference.
 
-**Each outcome is reported three ways, from one call site, so they
-cannot disagree.** A `print` (the fast path above), a database row
-(`push_outcomes` — the floor: it needs no network, so it still answers
-"what happened" if telemetry export itself is broken), and an
-OpenTelemetry span. The span is the one of the three an alarm can
-actually see — Logfire's alert engine queries spans, not a row sitting
-on the VM's own disk — so an outcome recorded in the database but never
-emitted as a span would be invisible to every alert in §C5, permanently.
-The subscriber identifier on the span is an opaque, stable id
-(`users_db.external_id`), never the real Telegram chat id — hygiene
-rather than a privacy control at this project's current scale, but free
-to do now and expensive to retrofit once a backlog of spans already
-carries the raw one.
+**Each outcome is reported two ways, from one call site, so they cannot
+disagree.** A `print` (the fast path above) and an OpenTelemetry span —
+the span is what an alarm can actually see, Logfire's alert engine
+queries spans. (A third way, a `push_outcomes` database row, existed
+until 2026-09-04; retired as an unbounded event-log table once its only
+real reader — "how many consecutive `chat_not_found` cycles" — was
+replaced by a bounded per-subscriber counter,
+`subscribers.push_consecutive_failures`; see
+`docs/plans/incident-monitoring-plan.md`'s header note.) The subscriber
+identifier on the span is an opaque, stable id
+(`subscriber_ops.external_id`), never the real Telegram chat id —
+hygiene rather than a privacy control at this project's current scale,
+but free to do now and expensive to retrofit once a backlog of spans
+already carries the raw one.
 
 **A worked example, tracing one real failure through every stage from a
 log line to an admin's phone:**
@@ -656,7 +657,6 @@ log line to an admin's phone:**
 flowchart LR
     A["1. Push cycle runs —<br/>a send fails with<br/>chat_not_found"] --> B["2. news_push._record<br/>reports the outcome,<br/>once, from one call site"]
     B --> C1["print<br/>docker logs —<br/>the fast path,<br/>read by hand"]
-    B --> C2[("push_outcomes row<br/>subscribers.db —<br/>the local floor,<br/>no network needed")]
     B --> C3["OTel span<br/>exported to Logfire"]
     C3 --> D[("3. Logfire records table —<br/>the log aggregate<br/>every alert query reads")]
     D --> E{"4. argus delivery ratio<br/>saved SQL query,<br/>evaluated every 15 min"}

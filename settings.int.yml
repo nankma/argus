@@ -42,7 +42,6 @@ storage:
       password:
         trailsign-resolve: environment-variable
         name: POSTGRES_PASSWORD
-  push_outcomes_ttl_days: 90
 
 # main: identical to production on purpose (the model that matters for
 # actual reply quality). guardrail: routed through a SEPARATE Together.ai

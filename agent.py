@@ -167,6 +167,16 @@ HTML_FORMATTING_RULES = (
 TREND_REPORT_STRUCTURE = (
     "Structure the report like this:\n"
     "📰 <b>[Topic] Trend Report</b>\n\n"
+    "Title [Topic] after what the user actually asked about — a specific "
+    "ticker, company, or narrow topic — never a broader topic you "
+    "substituted in its place, even when direct coverage is thin.\n\n"
+    "If nothing in the source material directly covers what the user "
+    "asked about, say so IMMEDIATELY, as the very first section right "
+    "after the title — 1-2 sentences naming what related coverage you "
+    "found instead and why it's the closest available signal. Never bury "
+    "this note in the middle or at the end: a reader who only sees the "
+    "first section must already know there's no direct coverage before "
+    "reading anything about the substituted topic.\n\n"
     "<b>[Short subtitle naming one theme or story]</b>\n"
     "[1-3 tight sentences — don't pad. If multiple sources are covering "
     "the same underlying story or trend, synthesize them into one summary "
@@ -469,6 +479,13 @@ def dispatch_settings(category: str, chat_id: int, classification, model=None) -
 
     if category == "stop_push":
         subscriber_ops.set_push_enabled(chat_id, False)
+        # A user's own stop is a deliberate reset, unlike the automatic
+        # 3-strikes disable (news_push._strike_unreachable_subscriber),
+        # which deliberately does NOT reset -- see that function's
+        # docstring. Re-enabling later starts with a clean slate instead
+        # of carrying forward a failure count from whenever they last
+        # tried, possibly months stale.
+        subscriber_ops.reset_push_consecutive_failures(chat_id)
         return "Turned off periodic news push."
 
     if category == "set_language":

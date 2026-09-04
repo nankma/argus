@@ -43,6 +43,17 @@ subscribers = Table(
     Column("restricted_sources_enabled", Integer),
     Column("is_test", Integer),
     Column("external_id", Text),
+    # Consecutive undeliverable (chat_not_found) push cycles running --
+    # NOT a history table (push_outcomes, retired -- see git history and
+    # docs/plans/incident-monitoring-plan.md), just a per-subscriber
+    # counter. Incremented on chat_not_found, reset to 0 on any delivered
+    # digest or when the user themselves turns push off (stop_push) --
+    # deliberately NOT reset by the automatic 3-strikes disable, so
+    # re-enabling push while still unreachable strikes out again
+    # immediately rather than granting a fresh allowance. See
+    # subscriber_ops.record_push_failure/reset_push_consecutive_failures
+    # and news_push._strike_unreachable_subscriber's own docstring.
+    Column("push_consecutive_failures", Integer),
 )
 
 api_budget = Table(
@@ -125,18 +136,6 @@ interest_push_state = Table(
     Column("last_pushed_at", Text, nullable=False),
 )
 
-push_outcomes = Table(
-    "push_outcomes",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("chat_id", Integer, nullable=False),
-    Column("outcome", Text, nullable=False),
-    Column("recorded_at", Text, nullable=False),
-    Column("detail", Text),
-    Index("push_outcomes_at", "recorded_at"),
-    Index("push_outcomes_chat_at", "chat_id", "recorded_at"),
-)
-
 # (table, column, sql_type) for columns added additively after a table's
 # first release -- ALTER TABLE ADD COLUMN isn't idempotent, so an existing
 # SQLite file (dev/PROD, both long-lived) that predates one of these needs
@@ -153,6 +152,7 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("subscribers", "restricted_sources_enabled", "INTEGER"),
     ("subscribers", "is_test", "INTEGER"),
     ("subscribers", "external_id", "TEXT"),
+    ("subscribers", "push_consecutive_failures", "INTEGER"),
     ("source_pull_state", "last_article_dt", "TEXT"),
     ("categories", "sort_order", "INTEGER NOT NULL DEFAULT 0"),
     ("categories", "alerted_at", "TEXT"),
