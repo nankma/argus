@@ -69,12 +69,17 @@ class CategoryMixin:
             return cursor.rowcount
 
     def categories_ready_for_review(self, cutoff: str, threshold: int) -> list[tuple]:
+        # HAVING must repeat the aggregate (COUNT(s.id)), not reference the
+        # `hits` alias -- SQLite tolerates an alias here, Postgres doesn't
+        # (real incident, found live on INT: psycopg2.errors.UndefinedColumn
+        # "column 'hits' does not exist"). ORDER BY hits is fine -- alias
+        # references there are standard SQL, both backends accept it.
         with self._engine.begin() as conn:
             return conn.execute(text(
                 "SELECT c.name, COUNT(s.id) AS hits FROM categories c "
                 "JOIN category_sightings s ON s.name = c.name "
                 "WHERE c.status = 'proposed' AND c.alerted_at IS NULL AND s.seen_at >= :cutoff "
-                "GROUP BY c.name HAVING hits >= :threshold ORDER BY hits DESC"
+                "GROUP BY c.name HAVING COUNT(s.id) >= :threshold ORDER BY hits DESC"
             ), {"cutoff": cutoff, "threshold": threshold}).fetchall()
 
     def category_examples(self, name: str, limit: int) -> list[tuple]:
