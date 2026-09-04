@@ -21,23 +21,27 @@ storage:
       trailsign-resolve: environment-variable
       name: MESSAGE_ARCHIVE_DIR
     ttl_days: 7
-  # sqlite for now -- switching this to postgres (storage/postgres/) to
-  # test the real adapter against a local Postgres instance is the next
-  # step, once real connection details exist. See
-  # docs/plans/data-layer-plan.md's "Seam built" section for the shape:
-  #   database:
-  #     type: postgres
-  #     postgres:
-  #       host: <dev machine LAN IP>
-  #       dbname: myfirstagent_int
-  #       user: myfirstagent
-  #       password: {trailsign-resolve: environment-variable, name: POSTGRES_PASSWORD}
+  # postgres -- live test of the real storage/postgres/ adapter, 2026-09-03
+  # onward. Points at a Postgres container on the DEV MACHINE
+  # (192.168.0.26:5432, database myfirstagent_int), same "test infra lives
+  # on the dev machine" pattern as the earlier Phoenix telemetry test. All
+  # of INT's pre-existing SQLite data (subscribers, categories, etc.) was
+  # migrated over first via tools/migrate_sqlite_to_postgres.py -- see
+  # docs/plans/data-layer-plan.md's "Seam built" section for the result.
+  # The old sqlite: block (and SUBSCRIBERS_DB_FILE) is commented out, not
+  # deleted, so reverting is a one-line swap if this test needs rolling back:
+  #   sqlite:
+  #     path: {trailsign-resolve: environment-variable, name: SUBSCRIBERS_DB_FILE}
   database:
-    type: sqlite
-    sqlite:
-      path:
+    type: postgres
+    postgres:
+      host: "192.168.0.26"
+      port: 5432
+      dbname: myfirstagent_int
+      user: myfirstagent
+      password:
         trailsign-resolve: environment-variable
-        name: SUBSCRIBERS_DB_FILE
+        name: POSTGRES_PASSWORD
   push_outcomes_ttl_days: 90
 
 # main: identical to production on purpose (the model that matters for
