@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app_settings import resolved_optional
 import bot as info_bot
-import users_db
+import subscriber_ops
 
 HOST = "0.0.0.0"
 PORT = int(resolved_optional("test_api.port", default=8765))
@@ -93,7 +93,7 @@ class _Handler(BaseHTTPRequestHandler):
         # smoke tests drive the real pipeline, so verifying "start pushing
         # me news every 6 hours" genuinely turns push on, and a cleanup step
         # is skipped precisely when a test fails early.
-        users_db.mark_test_account(chat_id)
+        subscriber_ops.mark_test_account(chat_id)
 
         server = self.server  # type: _Server
         future = asyncio.run_coroutine_threadsafe(

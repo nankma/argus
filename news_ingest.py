@@ -55,7 +55,7 @@ GNewsAdapter.pull/NewsApiAdapter.pull -- for the per-source detail):
     no key to test against).
 
 **The cutoff is the newest article's own published_dt actually seen from
-that source (`users_db.get_source_last_article_dt`/
+that source (`source_state_ops.get_source_last_article_dt`/
 `set_source_last_article_dt`), not when the job last ran
 (`last_pulled_at`).** A real design correction, 2026-08-16: using
 `last_pulled_at` (wall-clock job time) for this meant a source that
@@ -68,7 +68,7 @@ the time the source finally surfaces it. `last_article_dt` only advances
 when a newer article is actually observed (the max published_dt among
 that cycle's genuinely-new articles), so it can never outrun what's truly
 been seen the way a wall-clock timestamp can. See
-get_source_last_article_dt's docstring in users_db.py for the full
+get_source_last_article_dt's docstring in source_state_ops.py for the full
 reasoning.
 """
 
@@ -83,7 +83,10 @@ import news_classify
 import news_embed
 import news_keyness
 import news_sources
-import users_db
+import api_budget_ops
+import category_ops
+import interest_cache_ops
+import source_state_ops
 from opentelemetry import trace
 from telemetry import EventLogger, get_event_logger
 from telemetry_providers import Level
@@ -308,7 +311,7 @@ def _report_category_proposals(now: datetime) -> None:
     distribution first. Accumulating visibly and deciding later beats
     guessing a threshold now and then tuning it against alerts nobody
     trusts."""
-    proposals = users_db.count_recent_sightings(now)
+    proposals = category_ops.count_recent_sightings(now)
     if not proposals:
         return
     ranked = sorted(proposals.items(), key=lambda kv: -kv[1])
@@ -317,7 +320,7 @@ def _report_category_proposals(now: datetime) -> None:
     # what keeps recurring. The full list is in the table.
     summary = ", ".join(f"{name} x{count}" for name, count in ranked[:8])
     print(f"[news_ingest] taxonomy gaps proposed by the classifier "
-          f"(last {users_db.CATEGORY_SIGHTING_RETENTION_DAYS}d): {summary}")
+          f"(last {category_ops.CATEGORY_SIGHTING_RETENTION_DAYS}d): {summary}")
 
 
 def _emit_heartbeat() -> None:
@@ -370,14 +373,14 @@ def _pull_source(
         pull_span.set_attribute("pull.source", source_key)
         pull_span.set_attribute("pull.expected_interval_hours", _interval_hours(source_key))
 
-        last_pulled_at = users_db.get_source_last_pulled_at(source_key)
+        last_pulled_at = source_state_ops.get_source_last_pulled_at(source_key)
         if not _is_source_due(source_key, last_pulled_at, now):
             pull_span.set_attribute("pull.outcome", "not_due")
             print(f"[news_ingest] {source_key}: not due yet")
             return [], 0, 0
 
         daily_cap = _daily_cap(source_key)
-        if daily_cap is not None and not users_db.try_consume_api_budget(
+        if daily_cap is not None and not api_budget_ops.try_consume_api_budget(
             source_key, daily_cap, now.date().isoformat()
         ):
             pull_span.set_attribute("pull.outcome", "budget_exhausted")
@@ -401,7 +404,7 @@ def _pull_source(
         non_latin_skipped = 0
         for i, section in enumerate(sections):
             # Read per section, not once for the source -- see _cutoff_key.
-            last_article_dt = users_db.get_source_last_article_dt(
+            last_article_dt = source_state_ops.get_source_last_article_dt(
                 _cutoff_key(source_key, section))
             newest_seen_this_cycle = last_article_dt
             # Server-side date filter for the 3 sources confirmed to support
@@ -478,12 +481,12 @@ def _pull_source(
 
             if (time_filterable and newest_seen_this_cycle is not None
                     and newest_seen_this_cycle != last_article_dt):
-                users_db.set_source_last_article_dt(
+                source_state_ops.set_source_last_article_dt(
                     _cutoff_key(source_key, section), newest_seen_this_cycle)
 
         # last_pulled_at stays per SOURCE: the pull interval and the daily
         # budget are properties of the source, not of one of its sections.
-        users_db.set_source_last_pulled_at(source_key, now)
+        source_state_ops.set_source_last_pulled_at(source_key, now)
         pull_span.set_attribute("pull.sections_attempted", len(sections))
         pull_span.set_attribute("pull.sections_failed", sections_failed)
         pull_span.set_attribute(
@@ -517,8 +520,8 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
     print(f"[news_ingest] tick at {now.isoformat()}: cleaned up {deleted} expired cache entr{'y' if deleted == 1 else 'ies'}")
     # Sightings age out on the same tick as the cache, so the threshold
     # question stays "how often recently" rather than "how often ever" --
-    # see users_db.CATEGORY_SIGHTING_RETENTION_DAYS.
-    users_db.prune_category_sightings(now)
+    # see category_ops.CATEGORY_SIGHTING_RETENTION_DAYS.
+    category_ops.prune_category_sightings(now)
     # Reported here, next to the prune, rather than after classification:
     # both are about accumulated evidence and neither depends on whether
     # this cycle fetched anything. Placing it after the `if not fetched`
@@ -558,10 +561,10 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
     # Loaded once per cycle, not per chunk: the taxonomy must not change
     # underneath a batch, or the prompt and the validation set would
     # disagree about what a valid answer is.
-    taxonomy = news_classify.Taxonomy.from_rows(users_db.get_active_categories())
+    taxonomy = news_classify.Taxonomy.from_rows(category_ops.get_active_categories())
     categories_by_index = news_classify.classify_articles(
         model, [a for _, a in fetched], taxonomy,
-        on_unknown_label=lambda label, article: users_db.record_category_sighting(
+        on_unknown_label=lambda label, article: category_ops.record_category_sighting(
             label, now, article.get("link"), article.get("title")
         ),
     )
@@ -591,7 +594,7 @@ def run_ingestion_cycle(model, now: datetime | None = None, embedder=None) -> No
         # a three-day classification outage look like normal operation.
         categories = categories_by_index.get(i)
         if categories is not None and not categories:
-            categories = [users_db.UNCLASSIFIABLE]
+            categories = [category_ops.UNCLASSIFIABLE]
         if categories is None:
             unclassified += 1
         news_cache.write_article(source_key, article, categories, now, embedding=embeddings[i])
@@ -645,10 +648,10 @@ def _refresh_category_keyness(now: datetime) -> None:
         if not articles:
             return
         doc_terms, global_df = news_keyness.build_noun_index(articles)
-        categories = [name for name, _description in users_db.get_active_categories()]
+        categories = [name for name, _description in category_ops.get_active_categories()]
         for category in categories:
             scores = news_keyness.category_keyness(articles, doc_terms, global_df, category)
-            users_db.set_category_keyness(category, scores)
+            interest_cache_ops.set_category_keyness(category, scores)
         print(f"[news_ingest] tick at {now.isoformat()}: refreshed keyness for {len(categories)} categor{'y' if len(categories) == 1 else 'ies'}")
     except Exception as exc:
         _events.log("keyness_refresh_failed",

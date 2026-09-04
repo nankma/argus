@@ -1,14 +1,14 @@
 from unittest.mock import MagicMock
 
 import news_classify
-import users_db
+import category_ops
 from telemetry_providers import Level
 from tests.fakes import FakeSpan
 
-# The same 13 categories users_db seeds, so these tests exercise the
+# The same 13 categories category_ops seeds, so these tests exercise the
 # real taxonomy without needing a database -- Taxonomy is a parameter
 # precisely so this is possible (see its docstring).
-TAXONOMY = news_classify.Taxonomy.from_rows(users_db.SEED_CATEGORIES)
+TAXONOMY = news_classify.Taxonomy.from_rows(category_ops.SEED_CATEGORIES)
 
 
 def _patch_events_span(monkeypatch):
@@ -91,7 +91,7 @@ def test_taxonomy_prompt_fragment_lists_every_category_with_its_description():
     silently missing from it would be one the model is never offered."""
     fragment = TAXONOMY.prompt_fragment()
 
-    for name, description in users_db.SEED_CATEGORIES:
+    for name, description in category_ops.SEED_CATEGORIES:
         assert f"- {name}: {description}" in fragment
 
 
@@ -299,7 +299,7 @@ def test_generated_prompt_preserves_the_curated_category_order():
     fragment = TAXONOMY.prompt_fragment()
     lines = [line.split(":")[0].removeprefix("- ") for line in fragment.split("\n")]
 
-    assert lines == [name for name, _ in users_db.SEED_CATEGORIES]
+    assert lines == [name for name, _ in category_ops.SEED_CATEGORIES]
     assert lines.index("Stock") == lines.index("Finance") + 1, (
         "Stock's description cross-references Finance and must follow it"
     )

@@ -34,11 +34,11 @@ data volumes, in different processes: `build_noun_index` +
 ONCE per news_ingest.py cycle over the whole cache (all active
 categories share the same POS-tagging pass -- the expensive part -- so
 computing keyness for 13 categories costs barely more than computing it
-for one) and persist via users_db.set_category_keyness. `article_nouns` +
+for one) and persist via interest_cache_ops.set_category_keyness. `article_nouns` +
 `min_term_keyness` are the cheap, per-article half that news_push.py
 calls at push time against a small (already relevance-filtered)
 candidate pool, reading the precomputed table via
-users_db.get_category_keyness -- a local DB read, never a live NLTK call.
+interest_cache_ops.get_category_keyness -- a local DB read, never a live NLTK call.
 This mirrors news_embed.py's shape exactly: precompute once at
 ingestion, read cheaply at serving time, never a live dependency in the
 push path itself.

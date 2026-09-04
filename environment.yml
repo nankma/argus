@@ -33,6 +33,15 @@ dependencies:
   - python-telegram-bot
   - apscheduler
   - oci-cli
+  # storage/ -- the pluggable SQLite/Postgres backend (see
+  # docs/plans/data-layer-plan.md). Core only, no ORM: query text is
+  # written by hand (sqlalchemy.text() + named binds) throughout, Core is
+  # used only for portable bind-param translation, Table/MetaData-driven
+  # DDL (storage/schema.py), and schema introspection.
+  - sqlalchemy
+  # Postgres driver for storage/postgres/ -- binary build, no separate
+  # libpq/build-toolchain install needed.
+  - psycopg2-binary
   # news_keyness.py -- POS-tags article text (nouns only) to score how
   # "foreign" a word is to an interest's article pool, for offbeat/novelty
   # selection (docs/analysis/cluster-measurements.md's "Offbeat selection,

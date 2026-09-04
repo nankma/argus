@@ -9,7 +9,9 @@ import agent
 import guardrails
 import news_classify
 import news_sources
-import users_db
+import api_budget_ops
+import interest_cache_ops
+import subscriber_ops
 from tests.fakes import FakeToolCallingModel, RecordingCallbackHandler
 
 
@@ -124,7 +126,7 @@ def test_compose_prompt_always_uses_news_query_instructions():
 
 
 def test_compose_prompt_includes_interests_when_set(isolated_subscribers_db):
-    users_db.set_interests(101, ["AI", "robotics"])
+    subscriber_ops.set_interests(101, ["AI", "robotics"])
     prompt = agent._compose_prompt(_fake_request({"chat_id": 101, "category": "news_query"}))
     assert "AI, robotics" in prompt
 
@@ -140,7 +142,7 @@ def test_compose_prompt_omits_interests_when_no_chat_id():
 
 
 def test_compose_prompt_includes_language_when_set(isolated_subscribers_db):
-    users_db.set_language(103, "Spanish")
+    subscriber_ops.set_language(103, "Spanish")
     prompt = agent._compose_prompt(_fake_request({"chat_id": 103, "category": "news_query"}))
     assert "Spanish" in prompt
     assert "preferred reply language" in prompt
@@ -155,7 +157,7 @@ def test_compose_prompt_language_applies_regardless_of_category(isolated_subscri
     # Real requirement: unlike interests (news_query-only), a language
     # preference must govern every reply, including subscription
     # confirmations -- see docs/plans/bot-features-plan.md item 2.
-    users_db.set_language(105, "French")
+    subscriber_ops.set_language(105, "French")
     for category in ("news_query", "set_interest", "start_push", "set_language"):
         prompt = agent._compose_prompt(_fake_request({"chat_id": 105, "category": category}))
         assert "French" in prompt
@@ -168,21 +170,21 @@ def _classification(category, **kwargs):
 def test_dispatch_settings_set_interest_adds_new_topic(isolated_subscribers_db):
     result = agent.dispatch_settings("set_interest", 201, _classification("set_interest", topics=["robotics"]))
     assert "Added robotics" in result
-    assert users_db.get_interests(201) == ["robotics"]
+    assert subscriber_ops.get_interests(201) == ["robotics"]
 
 
 def test_dispatch_settings_set_interest_already_covered(isolated_subscribers_db):
-    users_db.set_interests(202, ["robotics"])
+    subscriber_ops.set_interests(202, ["robotics"])
     result = agent.dispatch_settings("set_interest", 202, _classification("set_interest", topics=["robotics"]))
     assert "already have robotics" in result
-    assert users_db.get_interests(202) == ["robotics"]
+    assert subscriber_ops.get_interests(202) == ["robotics"]
 
 
 def test_dispatch_settings_remove_interest_removes_existing(isolated_subscribers_db):
-    users_db.set_interests(203, ["robotics", "AI"])
+    subscriber_ops.set_interests(203, ["robotics", "AI"])
     result = agent.dispatch_settings("remove_interest", 203, _classification("remove_interest", topics=["robotics"]))
     assert "Removed robotics" in result
-    assert users_db.get_interests(203) == ["AI"]
+    assert subscriber_ops.get_interests(203) == ["AI"]
 
 
 def test_dispatch_settings_remove_interest_not_present(isolated_subscribers_db):
@@ -193,41 +195,41 @@ def test_dispatch_settings_remove_interest_not_present(isolated_subscribers_db):
 def test_dispatch_settings_start_push_enables_and_sets_interval(isolated_subscribers_db):
     result = agent.dispatch_settings("start_push", 205, _classification("start_push", push_interval_hours=6))
     assert "every 6 hour(s)" in result
-    assert users_db.get_push_enabled(205) is True
-    assert users_db.get_push_interval_hours(205) == 6
+    assert subscriber_ops.get_push_enabled(205) is True
+    assert subscriber_ops.get_push_interval_hours(205) == 6
 
 
 def test_dispatch_settings_start_push_no_interval_leaves_existing(isolated_subscribers_db):
-    users_db.set_push_interval_hours(206, 12)
+    subscriber_ops.set_push_interval_hours(206, 12)
     result = agent.dispatch_settings("start_push", 206, _classification("start_push"))
     assert "every 12 hour(s)" in result
-    assert users_db.get_push_interval_hours(206) == 12
+    assert subscriber_ops.get_push_interval_hours(206) == 12
 
 
 def test_dispatch_settings_start_push_invalid_interval_reports_error(isolated_subscribers_db):
     result = agent.dispatch_settings("start_push", 207, _classification("start_push", push_interval_hours=0))
     assert "couldn't set that interval" in result
-    assert users_db.get_push_enabled(207) is True  # the enable itself still succeeded
+    assert subscriber_ops.get_push_enabled(207) is True  # the enable itself still succeeded
 
 
 def test_dispatch_settings_stop_push_disables(isolated_subscribers_db):
-    users_db.set_push_enabled(208, True)
+    subscriber_ops.set_push_enabled(208, True)
     result = agent.dispatch_settings("stop_push", 208, _classification("stop_push"))
     assert "Turned off" in result
-    assert users_db.get_push_enabled(208) is False
+    assert subscriber_ops.get_push_enabled(208) is False
 
 
 def test_dispatch_settings_set_language_sets_new_language(isolated_subscribers_db):
     result = agent.dispatch_settings("set_language", 209, _classification("set_language", language="Spanish"))
     assert "Spanish" in result
-    assert users_db.get_language(209) == "Spanish"
+    assert subscriber_ops.get_language(209) == "Spanish"
 
 
 def test_dispatch_settings_set_language_reports_current_when_none_named(isolated_subscribers_db):
-    users_db.set_language(210, "French")
+    subscriber_ops.set_language(210, "French")
     result = agent.dispatch_settings("set_language", 210, _classification("set_language"))
     assert "currently set to French" in result
-    assert users_db.get_language(210) == "French"  # unchanged
+    assert subscriber_ops.get_language(210) == "French"  # unchanged
 
 
 def test_dispatch_settings_set_language_reports_unset_when_none_named_and_unset(isolated_subscribers_db):
@@ -316,10 +318,10 @@ def test_search_news_records_api_call_for_restricted_sources_only(monkeypatch, i
         "enabled_sources",
         lambda include_restricted=True: [("perigon", perigon_source), ("hackernews", free_source)],
     )
-    monkeypatch.setattr(users_db, "get_restricted_sources_enabled", lambda chat_id: True)
+    monkeypatch.setattr(subscriber_ops, "get_restricted_sources_enabled", lambda chat_id: True)
     record_api_call = SimpleNamespace(calls=[])
     monkeypatch.setattr(
-        users_db, "record_api_call", lambda source, today: record_api_call.calls.append((source, today))
+        api_budget_ops, "record_api_call", lambda source, today: record_api_call.calls.append((source, today))
     )
 
     fake_model = FakeToolCallingModel(
@@ -380,7 +382,7 @@ def test_set_interest_stores_the_english_form(isolated_subscribers_db, monkeypat
 
     agent.dispatch_settings("set_interest", 7, classification, model="fake")
 
-    assert users_db.get_interests(7) == ["Optical Communications"]
+    assert subscriber_ops.get_interests(7) == ["Optical Communications"]
 
 
 def test_set_interest_passes_existing_interests_as_context(isolated_subscribers_db, monkeypatch):
@@ -391,7 +393,7 @@ def test_set_interest_passes_existing_interests_as_context(isolated_subscribers_
         return _normalized("Automated Optical Inspection")
 
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed", fake)
-    users_db.add_interest(7, "AAOI")
+    subscriber_ops.add_interest(7, "AAOI")
 
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AOI"]), model="fake")
 
@@ -406,7 +408,7 @@ def test_set_interest_falls_back_to_the_original_when_normalization_fails(
 
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["光通訊"]), model="fake")
 
-    assert users_db.get_interests(7) == ["光通訊"], "stored, just not translated"
+    assert subscriber_ops.get_interests(7) == ["光通訊"], "stored, just not translated"
 
 
 def test_set_interest_without_a_model_stores_the_raw_topic(isolated_subscribers_db):
@@ -414,7 +416,7 @@ def test_set_interest_without_a_model_stores_the_raw_topic(isolated_subscribers_
     both exercise it that way."""
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["robotics"]))
 
-    assert users_db.get_interests(7) == ["robotics"]
+    assert subscriber_ops.get_interests(7) == ["robotics"]
 
 
 def test_set_interest_confirmation_names_what_was_actually_stored(
@@ -433,7 +435,7 @@ def test_set_interest_confirmation_names_what_was_actually_stored(
 
     assert "Optical Communications" in reply
     assert "光通訊" not in reply
-    assert users_db.get_interests(7) == ["Optical Communications"]
+    assert subscriber_ops.get_interests(7) == ["Optical Communications"]
 
 
 def test_duplicate_interest_message_also_names_the_stored_form(
@@ -441,7 +443,7 @@ def test_duplicate_interest_message_also_names_the_stored_form(
 ):
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: _normalized("Optical Communications"))
-    users_db.add_interest(7, "Optical Communications")
+    subscriber_ops.add_interest(7, "Optical Communications")
 
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["光通訊"]),
                                     model="fake")
@@ -467,7 +469,7 @@ def test_a_broad_interest_is_stored_and_hinted_not_refused(
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI"]),
                                     model="fake")
 
-    assert users_db.get_interests(7) == ["AI"]
+    assert subscriber_ops.get_interests(7) == ["AI"]
     assert "Added AI to your interests." in reply
     assert "AI Agent" in reply and "Local LLM" in reply
 
@@ -499,25 +501,25 @@ def test_at_most_three_narrower_examples_are_offered(isolated_subscribers_db, mo
 
 
 def test_adding_past_the_cap_is_refused_in_words(isolated_subscribers_db):
-    users_db.set_interests(7, [f"topic {i}" for i in range(users_db.MAX_INTERESTS)])
+    subscriber_ops.set_interests(7, [f"topic {i}" for i in range(subscriber_ops.MAX_INTERESTS)])
 
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["one more"]))
 
     assert "one more" in reply
-    assert str(users_db.MAX_INTERESTS) in reply
-    assert "one more" not in users_db.get_interests(7)
-    assert len(users_db.get_interests(7)) == users_db.MAX_INTERESTS
+    assert str(subscriber_ops.MAX_INTERESTS) in reply
+    assert "one more" not in subscriber_ops.get_interests(7)
+    assert len(subscriber_ops.get_interests(7)) == subscriber_ops.MAX_INTERESTS
 
 
 def test_re_adding_an_existing_interest_at_the_cap_is_not_an_error(isolated_subscribers_db):
     """Being at the cap must not turn a no-op into a failure message."""
-    topics = [f"topic {i}" for i in range(users_db.MAX_INTERESTS)]
-    users_db.set_interests(7, topics)
+    topics = [f"topic {i}" for i in range(subscriber_ops.MAX_INTERESTS)]
+    subscriber_ops.set_interests(7, topics)
 
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["topic 3"]))
 
     assert "already have" in reply
-    assert users_db.get_interests(7) == topics
+    assert subscriber_ops.get_interests(7) == topics
 
 
 def test_narrower_examples_without_the_umbrella_verdict_are_ignored(
@@ -558,7 +560,7 @@ def test_set_interest_with_multiple_topics_adds_each_one(
         "set_interest", 7,
         SimpleNamespace(topics=["AI agent", "AI coding", "LLM"]), model="fake")
 
-    assert users_db.get_interests(7) == ["AI agent", "AI coding", "LLM"]
+    assert subscriber_ops.get_interests(7) == ["AI agent", "AI coding", "LLM"]
     assert "Added AI agent" in reply
     assert "Added AI coding" in reply
     assert "Added LLM" in reply
@@ -610,7 +612,7 @@ def test_one_topic_hitting_the_cap_does_not_stop_the_others(
 ):
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: _normalized(text))
-    users_db.set_interests(7, [f"x{i}" for i in range(users_db.MAX_INTERESTS - 1)])
+    subscriber_ops.set_interests(7, [f"x{i}" for i in range(subscriber_ops.MAX_INTERESTS - 1)])
 
     reply = agent.dispatch_settings(
         "set_interest", 7, SimpleNamespace(topics=["room for one", "no room for two"]),
@@ -618,7 +620,7 @@ def test_one_topic_hitting_the_cap_does_not_stop_the_others(
 
     assert "Added room for one" in reply
     assert "Couldn't add no room for two" in reply
-    assert users_db.get_interests(7) == [f"x{i}" for i in range(users_db.MAX_INTERESTS - 1)] + ["room for one"]
+    assert subscriber_ops.get_interests(7) == [f"x{i}" for i in range(subscriber_ops.MAX_INTERESTS - 1)] + ["room for one"]
 
 
 def test_a_cap_refused_topic_is_not_treated_as_known_by_a_later_topic(
@@ -634,7 +636,7 @@ def test_a_cap_refused_topic_is_not_treated_as_known_by_a_later_topic(
         return _normalized(text)
 
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed", fake)
-    users_db.set_interests(7, [f"x{i}" for i in range(users_db.MAX_INTERESTS)])
+    subscriber_ops.set_interests(7, [f"x{i}" for i in range(subscriber_ops.MAX_INTERESTS)])
 
     agent.dispatch_settings(
         "set_interest", 7, SimpleNamespace(topics=["refused", "second"]), model="fake")
@@ -645,29 +647,29 @@ def test_a_cap_refused_topic_is_not_treated_as_known_by_a_later_topic(
 def test_set_interest_with_no_topics_extracted_does_not_crash(isolated_subscribers_db):
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=[]))
     assert "Didn't catch" in reply
-    assert users_db.get_interests(7) == []
+    assert subscriber_ops.get_interests(7) == []
 
 
 def test_remove_interest_with_multiple_topics_removes_each_one(isolated_subscribers_db):
-    users_db.set_interests(7, ["AI agent", "AI coding", "LLM", "robotics"])
+    subscriber_ops.set_interests(7, ["AI agent", "AI coding", "LLM", "robotics"])
 
     reply = agent.dispatch_settings(
         "remove_interest", 7, SimpleNamespace(topics=["AI agent", "LLM"]))
 
-    assert users_db.get_interests(7) == ["AI coding", "robotics"]
+    assert subscriber_ops.get_interests(7) == ["AI coding", "robotics"]
     assert "Removed AI agent" in reply
     assert "Removed LLM" in reply
 
 
 def test_remove_interest_reports_a_topic_that_was_never_there(isolated_subscribers_db):
-    users_db.set_interests(7, ["robotics"])
+    subscriber_ops.set_interests(7, ["robotics"])
 
     reply = agent.dispatch_settings(
         "remove_interest", 7, SimpleNamespace(topics=["robotics", "nonexistent"]))
 
     assert "Removed robotics" in reply
     assert "nonexistent wasn't in your interests" in reply
-    assert users_db.get_interests(7) == []
+    assert subscriber_ops.get_interests(7) == []
 
 
 def test_remove_interest_with_no_topics_extracted_does_not_crash(isolated_subscribers_db):
@@ -690,7 +692,7 @@ def test_two_topics_normalizing_to_the_same_label_report_a_duplicate_not_a_doubl
         "set_interest", 7, SimpleNamespace(topics=["machine learning", "ML"]),
         model="fake")
 
-    assert users_db.get_interests(7) == ["Machine Learning"]
+    assert subscriber_ops.get_interests(7) == ["Machine Learning"]
     assert "Added Machine Learning" in reply
     assert "already have Machine Learning" in reply
 
@@ -698,12 +700,12 @@ def test_two_topics_normalizing_to_the_same_label_report_a_duplicate_not_a_doubl
 def test_removing_the_same_topic_twice_in_one_message_is_not_an_error(
     isolated_subscribers_db
 ):
-    users_db.set_interests(7, ["AI"])
+    subscriber_ops.set_interests(7, ["AI"])
 
     reply = agent.dispatch_settings(
         "remove_interest", 7, SimpleNamespace(topics=["AI", "AI"]))
 
-    assert users_db.get_interests(7) == []
+    assert subscriber_ops.get_interests(7) == []
     assert "Removed AI" in reply
     assert "AI wasn't in your interests" in reply
 
@@ -721,16 +723,16 @@ def test_a_new_interest_gets_its_retrieval_expansion_generated_and_cached(
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]), model="fake-model")
 
     expand.assert_called_once_with("fake-model", "AI coding")
-    assert users_db.get_interest_query_expansion("AI coding") == \
+    assert interest_cache_ops.get_interest_query_expansion("AI coding") == \
         "AI systems that assist developers writing code."
 
 
 def test_an_already_cached_expansion_is_not_regenerated(isolated_subscribers_db, monkeypatch):
-    """The cache is global (users_db.interest_query_expansions), not per
+    """The cache is global (interest_cache_ops), not per
     subscriber -- a topic another subscriber already caused to be
     generated must not cost a second LLM call just because a different
     chat_id adds the same normalized topic."""
-    users_db.set_interest_query_expansion("AI coding", "already cached")
+    interest_cache_ops.set_interest_query_expansion("AI coding", "already cached")
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: _normalized("AI coding"))
     expand = MagicMock()
@@ -739,7 +741,7 @@ def test_an_already_cached_expansion_is_not_regenerated(isolated_subscribers_db,
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]), model="fake-model")
 
     expand.assert_not_called()
-    assert users_db.get_interest_query_expansion("AI coding") == "already cached"
+    assert interest_cache_ops.get_interest_query_expansion("AI coding") == "already cached"
 
 
 def test_no_model_means_no_expansion_attempt(isolated_subscribers_db, monkeypatch):
@@ -751,7 +753,7 @@ def test_no_model_means_no_expansion_attempt(isolated_subscribers_db, monkeypatc
     agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]))
 
     expand.assert_not_called()
-    assert users_db.get_interest_query_expansion("AI coding") is None
+    assert interest_cache_ops.get_interest_query_expansion("AI coding") is None
 
 
 def test_expansion_generation_failure_does_not_block_adding_the_interest(
@@ -765,8 +767,8 @@ def test_expansion_generation_failure_does_not_block_adding_the_interest(
     reply = agent.dispatch_settings("set_interest", 7, SimpleNamespace(topics=["AI coding"]), model="fake-model")
 
     assert "Added AI coding" in reply
-    assert users_db.get_interests(7) == ["AI coding"]
-    assert users_db.get_interest_query_expansion("AI coding") is None
+    assert subscriber_ops.get_interests(7) == ["AI coding"]
+    assert interest_cache_ops.get_interest_query_expansion("AI coding") is None
 
 
 def test_expansion_is_generated_once_even_when_the_add_itself_is_a_duplicate(
@@ -775,7 +777,7 @@ def test_expansion_is_generated_once_even_when_the_add_itself_is_a_duplicate(
     """The expansion cache exists for every future subscriber who adds this
     topic, not just this call -- so it's still worth populating even when
     THIS subscriber already has the interest and the add is a no-op."""
-    users_db.set_interests(7, ["AI coding"])
+    subscriber_ops.set_interests(7, ["AI coding"])
     monkeypatch.setattr(agent.news_classify, "normalize_interest_detailed",
                         lambda model, text, alongside=None: _normalized("AI coding"))
     expand = MagicMock(return_value="a definition")
@@ -785,4 +787,4 @@ def test_expansion_is_generated_once_even_when_the_add_itself_is_a_duplicate(
 
     assert "already have AI coding" in reply
     expand.assert_called_once()
-    assert users_db.get_interest_query_expansion("AI coding") == "a definition"
+    assert interest_cache_ops.get_interest_query_expansion("AI coding") == "a definition"

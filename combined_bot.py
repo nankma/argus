@@ -43,7 +43,9 @@ import bot as info_bot
 import admin_bot
 import news_embed
 import test_api
-import users_db
+import category_ops
+import storage
+import subscriber_ops
 
 
 def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=None, embedder=None) -> Application:
@@ -61,7 +63,7 @@ def build_info_app(agent, admin_chat_id: int, admin_bot_token: str, guard_model=
     app.bot_data["admin_chat_id"] = admin_chat_id
     app.bot_data["admin_bot_token"] = admin_bot_token
     # Idempotent -- see bot.py's main() for the same call and its reasoning.
-    users_db.set_restricted_sources_enabled(admin_chat_id, True)
+    subscriber_ops.set_restricted_sources_enabled(admin_chat_id, True)
     app.add_handler(CommandHandler(["start", "help"], info_bot.handle_start_command))
     app.add_handler(CommandHandler("interests", info_bot.handle_interests_command))
     app.add_handler(CommandHandler("language", info_bot.handle_language_command))
@@ -121,7 +123,8 @@ async def run_both(
 
 def main():
     setup_telemetry()
-    users_db.init_db()
+    storage.init_db()
+    category_ops.bootstrap()
     admin_chat_id = int(get_settings().resolved("delivery.telegram.admin-chat-id", required=True))
     admin_bot_token = get_settings().resolved("delivery.telegram.admin-bot-token", required=True)
     info_bot_token = get_settings().resolved("delivery.telegram.bot-token", required=True)

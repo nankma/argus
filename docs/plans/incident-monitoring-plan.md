@@ -94,13 +94,23 @@ drifting down over time without any single measurement run catching it.
 
 ## Status
 
-Designed 2026-08-21 for three criteria (below); still not built. Tracked here so it isn't lost — `qa-engineer`
-is responsible for turning this into an actual criteria list and a
-concrete design next, not for building the monitor itself (that's
-implementation work for whoever picks it up once the design exists,
-likely `deploy-engineer` or the main thread, following the same
-build-something-real-then-verify discipline as everything else in this
-project).
+Designed 2026-08-21 for three criteria (below). **Updated 2026-09-03 —
+criteria 2 and 3 are now live**, as Logfire alerts (`argus model errors`,
+`argus delivery ratio`), per `docs/plans/observability-platform-plan.md`'s
+"The three alerts, live" section — not the in-process `alert_state`
+machine this doc originally sketched; Logfire's own saved-query alerting
+ended up filling that role instead (see that doc's "The alert state
+machine is built in" section for why). Criterion 1's *action* (three
+consecutive `chat_not_found` outcomes disables a subscriber's push,
+`news_push.UNREACHABLE_STRIKES`) has also been live since 2026-08-21, but
+it still has no accompanying alert — a strike-out disabling a subscriber
+is silent to the admin (see "Status: step 1 built" below, and
+`TODO.md`). `qa-engineer` remains responsible for keeping this doc's
+criteria list current as new failure modes are found, not for building
+whatever implements a new one — that's implementation work for whoever
+picks it up, likely `deploy-engineer` or the main thread, following the
+same build-something-real-then-verify discipline as everything else in
+this project.
 
 
 ---
@@ -148,6 +158,10 @@ tick. The jobs ticked perfectly, all eight days.
 
 ### 1. `chat_not_found` three times consecutively → disable that subscriber
 
+**Status: action built (2026-08-21), alert not built** — the disable
+itself works (`news_push.UNREACHABLE_STRIKES`); nothing notifies the
+admin when it fires. See `TODO.md`.
+
 Turns an unbounded leak into a bounded one. A chat that cannot receive
 costs a full digest generation every interval, forever, and generation is
 billed even though only the send fails. This alone would have capped the
@@ -158,11 +172,22 @@ blocks the bot or deletes their account produces exactly this signature.
 
 ### 2. `model_error` on any push cycle → alert immediately
 
+**Status: live** — Logfire alert `argus model errors`, 30 min window / 5
+min cadence. See `docs/plans/observability-platform-plan.md`'s "The
+three alerts, live" section.
+
 A 402 means every subscriber is down at once; there is no threshold worth
 waiting for. This incident ran two hours in that state before a human
 noticed by trying the bot by hand.
 
 ### 3. delivered / generated below ~80% over 24h → alert
+
+**Status: live** — Logfire alert `argus delivery ratio`, 24h window / 15
+min cadence, `HAVING count(*) >= 5` so an empty/quiet window can't
+masquerade as 0% delivered. See `docs/plans/observability-platform-plan.md`'s
+"The three alerts, live" section. Its threshold arithmetic is still
+"unverified" against a real non-empty sample as of that doc's last
+update — worth checking before trusting it fully.
 
 **The metric that would have caught it on day one.** Generation is where
 the money goes, delivery is where the value is, and during the incident

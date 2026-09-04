@@ -9,7 +9,13 @@ import news_ingest
 import news_keyness
 import news_push
 import news_sources
-import users_db
+import api_budget_ops
+import category_ops
+import interest_cache_ops
+import source_state_ops
+import storage
+import subscriber_ops
+from sqlalchemy import text
 from telemetry_providers import Level
 from tests.fakes import FakeEmbedder, FakeSpan
 
@@ -130,7 +136,7 @@ def test_run_ingestion_cycle_skips_sources_not_yet_due(monkeypatch, isolated_sub
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     fetch = MagicMock(return_value=[_article("https://example.com/1")])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", fetch)])
-    users_db.set_source_last_pulled_at("bbc_business", now - timedelta(hours=1))
+    source_state_ops.set_source_last_pulled_at("bbc_business", now - timedelta(hours=1))
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
 
@@ -144,7 +150,7 @@ def test_run_ingestion_cycle_respects_daily_cap(monkeypatch, isolated_subscriber
     fetch = MagicMock(return_value=[_article("https://example.com/1")])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("perigon", fetch)])
     for _ in range(3):
-        users_db.try_consume_api_budget("perigon", 3, now.date().isoformat())
+        api_budget_ops.try_consume_api_budget("perigon", 3, now.date().isoformat())
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
 
@@ -159,7 +165,7 @@ def test_run_ingestion_cycle_advances_last_pulled_at(monkeypatch, isolated_subsc
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
 
-    assert users_db.get_source_last_pulled_at("bbc_business") == now
+    assert source_state_ops.get_source_last_pulled_at("bbc_business") == now
 
 
 def test_emit_heartbeat_carries_the_job_attribute(monkeypatch):
@@ -238,7 +244,7 @@ def _patch_events_span(monkeypatch):
 
 def test_pull_source_not_due_sets_outcome_and_skips_fetch(monkeypatch, isolated_subscribers_db):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_source_last_pulled_at("bbc_business", now - timedelta(hours=1))
+    source_state_ops.set_source_last_pulled_at("bbc_business", now - timedelta(hours=1))
     span = _patch_pull_span(monkeypatch)
     fetch = MagicMock()
 
@@ -254,7 +260,7 @@ def test_pull_source_budget_exhausted_sets_outcome(monkeypatch, isolated_subscri
     _set_source_overrides(monkeypatch, perigon={"daily_cap": 3})
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     for _ in range(3):
-        users_db.try_consume_api_budget("perigon", 3, now.date().isoformat())
+        api_budget_ops.try_consume_api_budget("perigon", 3, now.date().isoformat())
     span = _patch_pull_span(monkeypatch)
     fetch = MagicMock()
 
@@ -373,7 +379,7 @@ def test_ingestion_passes_the_section_not_a_subscriber_interest(
     as the query, so the corpus could only ever contain answers to
     questions someone had already asked."""
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_interests(1, ["bitcoin", "AAOI"])
+    subscriber_ops.set_interests(1, ["bitcoin", "AAOI"])
     fetch = MagicMock(return_value=[])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
     monkeypatch.setattr(news_ingest.time, "sleep", MagicMock())
@@ -390,7 +396,7 @@ def test_run_ingestion_cycle_no_delay_for_single_query_sources(
     monkeypatch, isolated_subscribers_db, isolated_news_cache
 ):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_interests(1, ["bitcoin", "AI"])
+    subscriber_ops.set_interests(1, ["bitcoin", "AI"])
     fetch = MagicMock(return_value=[])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", fetch)])
     sleep = MagicMock()
@@ -425,7 +431,7 @@ def test_run_ingestion_cycle_passes_since_to_server_side_since_sources(
     # why that distinction matters.
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     last_article_dt = now - timedelta(hours=4)
-    users_db.set_source_last_article_dt("hackernews:front_page", last_article_dt)
+    source_state_ops.set_source_last_article_dt("hackernews:front_page", last_article_dt)
     fetch = MagicMock(return_value=[])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
 
@@ -441,7 +447,7 @@ def test_run_ingestion_cycle_does_not_pass_since_to_newsapi(monkeypatch, isolate
     # `from=` counterproductive (see news_sources.py's comment). It still
     # relies on the client-side filter below, just not a since kwarg.
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_source_last_article_dt("newsapi", now - timedelta(hours=24))
+    source_state_ops.set_source_last_article_dt("newsapi", now - timedelta(hours=24))
     fetch = MagicMock(return_value=[])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("newsapi", fetch)])
 
@@ -456,7 +462,7 @@ def test_run_ingestion_cycle_client_side_filter_drops_articles_not_newer_than_la
 ):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     last_article_dt = now - timedelta(hours=4)
-    users_db.set_source_last_article_dt("hackernews:front_page", last_article_dt)
+    source_state_ops.set_source_last_article_dt("hackernews:front_page", last_article_dt)
     old_article = _article("https://example.com/old", published_dt=last_article_dt - timedelta(minutes=1))
     new_article = _article("https://example.com/new", published_dt=last_article_dt + timedelta(minutes=1))
     fetch = MagicMock(return_value=[old_article, new_article])
@@ -483,7 +489,7 @@ def test_run_ingestion_cycle_advances_last_article_dt_to_the_newest_seen(
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: [], 1: []}), now)
 
-    assert users_db.get_source_last_article_dt("hackernews:front_page") == now - timedelta(hours=1)
+    assert source_state_ops.get_source_last_article_dt("hackernews:front_page") == now - timedelta(hours=1)
 
 
 def test_run_ingestion_cycle_does_not_advance_last_article_dt_when_nothing_new(
@@ -491,13 +497,13 @@ def test_run_ingestion_cycle_does_not_advance_last_article_dt_when_nothing_new(
 ):
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
     last_article_dt = now - timedelta(hours=4)
-    users_db.set_source_last_article_dt("hackernews:front_page", last_article_dt)
+    source_state_ops.set_source_last_article_dt("hackernews:front_page", last_article_dt)
     fetch = MagicMock(return_value=[])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
 
-    assert users_db.get_source_last_article_dt("hackernews:front_page") == last_article_dt
+    assert source_state_ops.get_source_last_article_dt("hackernews:front_page") == last_article_dt
 
 
 def test_run_ingestion_cycle_client_side_filter_keeps_articles_with_unparseable_date(
@@ -508,7 +514,7 @@ def test_run_ingestion_cycle_client_side_filter_keeps_articles_with_unparseable_
     # news_cache dedups by link hash, so re-caching an old one is a no-op
     # overwrite, not a growing duplicate.
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_source_last_article_dt("hackernews:front_page", now - timedelta(hours=4))
+    source_state_ops.set_source_last_article_dt("hackernews:front_page", now - timedelta(hours=4))
     undated = _article("https://example.com/undated", published_dt=None)
     fetch = MagicMock(return_value=[undated])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("hackernews", fetch)])
@@ -522,7 +528,7 @@ def test_run_ingestion_cycle_rss_source_not_time_filtered(monkeypatch, isolated_
     # RSS sources have no query/date-range parameter at all -- an "old"
     # article still gets cached, since there's nothing to filter by.
     now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.set_source_last_pulled_at("bbc_business", now - timedelta(hours=4))
+    source_state_ops.set_source_last_pulled_at("bbc_business", now - timedelta(hours=4))
     old_article = _article("https://example.com/old", published_dt=now - timedelta(hours=10))
     fetch = MagicMock(return_value=[old_article])
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [("bbc_business", fetch)])
@@ -627,7 +633,7 @@ def test_ingestion_records_a_sighting_for_a_label_outside_the_taxonomy(
     model = _fake_classifying_model({0: ["AI", "Education"]})
     news_ingest.run_ingestion_cycle(model, now)
 
-    assert users_db.count_recent_sightings(now) == {"Education": 1}
+    assert category_ops.count_recent_sightings(now) == {"Education": 1}
     # the valid label still lands on the article
     assert news_cache.read_all()[0]["categories"] == ["AI"]
 
@@ -636,12 +642,12 @@ def test_ingestion_prunes_sightings_past_retention(
     monkeypatch, isolated_subscribers_db, isolated_news_cache
 ):
     now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.record_category_sighting("Education", now - timedelta(days=60))
+    category_ops.record_category_sighting("Education", now - timedelta(days=60))
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [])
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
 
-    assert users_db.count_recent_sightings(now) == {}
+    assert category_ops.count_recent_sightings(now) == {}
 
 
 def test_a_sighting_does_not_make_the_label_usable(
@@ -656,7 +662,7 @@ def test_a_sighting_does_not_make_the_label_usable(
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Education"]}), now)
 
-    assert "Education" not in [name for name, _ in users_db.get_active_categories()]
+    assert "Education" not in [name for name, _ in category_ops.get_active_categories()]
 
 
 def test_proposals_are_reported_even_on_a_cycle_with_nothing_new(
@@ -667,7 +673,7 @@ def test_proposals_are_reported_even_on_a_cycle_with_nothing_new(
     exactly the "it's in the logs if you go looking" failure this reporting
     exists to avoid."""
     now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.record_category_sighting("Education", now - timedelta(days=1))
+    category_ops.record_category_sighting("Education", now - timedelta(days=1))
     monkeypatch.setattr(news_sources, "enabled_sources", lambda: [])
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(), now)
@@ -678,7 +684,7 @@ def test_proposals_are_reported_even_on_a_cycle_with_nothing_new(
 def test_a_cycle_does_not_resurrect_a_rejected_category(
     monkeypatch, isolated_subscribers_db, isolated_news_cache
 ):
-    """End-to-end version of the users_db unit test. An admin's rejection
+    """End-to-end version of the category_ops unit test. An admin's rejection
     has to survive the classifier reaching for that label again -- otherwise
     the same proposal comes back every cycle and the admin re-litigates a
     decision they already made.
@@ -687,21 +693,21 @@ def test_a_cycle_does_not_resurrect_a_rejected_category(
     the two bugs already fixed on this branch were both in how the pieces
     joined up, not in the pieces."""
     now = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
-    users_db.record_category_sighting("Education", now - timedelta(days=1))
-    with users_db._connect() as conn:
-        conn.execute("UPDATE categories SET status = 'rejected' WHERE name = 'Education'")
+    category_ops.record_category_sighting("Education", now - timedelta(days=1))
+    with storage.get_storage()._engine.begin() as conn:
+        conn.execute(text("UPDATE categories SET status = 'rejected' WHERE name = 'Education'"))
 
     article = _article("https://s.edu/a", title="Stanford launches AI curriculum")
     monkeypatch.setattr(news_sources, "enabled_sources",
                         lambda: [("bbc_business", lambda q, n: [article])])
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["Education"]}), now)
 
-    with users_db._connect() as conn:
+    with storage.get_storage()._engine.begin() as conn:
         status = conn.execute(
-            "SELECT status FROM categories WHERE name = 'Education'"
+            text("SELECT status FROM categories WHERE name = 'Education'")
         ).fetchone()[0]
     assert status == "rejected"
-    assert users_db.count_recent_sightings(now) == {}, "and it never alerts again"
+    assert category_ops.count_recent_sightings(now) == {}, "and it never alerts again"
 
 
 def test_a_cycle_survives_an_out_of_range_index_from_the_model(
@@ -720,10 +726,10 @@ def test_a_cycle_survives_an_out_of_range_index_from_the_model(
         _fake_classifying_model({0: ["AI"], 99: ["Education"]}), now
     )
 
-    assert users_db.count_recent_sightings(now) == {"Education": 1}
-    with users_db._connect() as conn:
+    assert category_ops.count_recent_sightings(now) == {"Education": 1}
+    with storage.get_storage()._engine.begin() as conn:
         link, title = conn.execute(
-            "SELECT article_link, article_title FROM category_sightings"
+            text("SELECT article_link, article_title FROM category_sightings")
         ).fetchone()
     assert (link, title) == (None, None)
     assert news_cache.read_all()[0]["categories"] == ["AI"], "the good article is unaffected"
@@ -747,7 +753,7 @@ def test_an_article_the_model_found_no_category_for_is_marked_Other(
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: []}), now)
 
-    assert news_cache.read_all()[0]["categories"] == [users_db.UNCLASSIFIABLE]
+    assert news_cache.read_all()[0]["categories"] == [category_ops.UNCLASSIFIABLE]
 
 
 def test_an_article_the_classifier_never_reached_is_recorded_as_unknown(
@@ -772,19 +778,19 @@ def test_Other_is_never_offered_to_the_classifier(isolated_subscribers_db):
     """Give an LLM classifier a catch-all and it stops working for the
     answer. "Other" is assigned by code, never chosen by the model, so it
     must not appear in the prompt."""
-    names = [name for name, _ in users_db.get_active_categories()]
+    names = [name for name, _ in category_ops.get_active_categories()]
 
-    assert users_db.UNCLASSIFIABLE not in names
-    taxonomy = news_ingest.news_classify.Taxonomy.from_rows(users_db.get_active_categories())
-    assert users_db.UNCLASSIFIABLE not in taxonomy.prompt_fragment()
+    assert category_ops.UNCLASSIFIABLE not in names
+    taxonomy = news_ingest.news_classify.Taxonomy.from_rows(category_ops.get_active_categories())
+    assert category_ops.UNCLASSIFIABLE not in taxonomy.prompt_fragment()
 
 
 def test_Other_still_exists_as_a_row(isolated_subscribers_db):
     """Not active, but present -- so it resolves like any other name and an
     admin can count how big the bucket has become."""
-    with users_db._connect() as conn:
+    with storage.get_storage()._engine.begin() as conn:
         status = conn.execute(
-            "SELECT status FROM categories WHERE name = ?", (users_db.UNCLASSIFIABLE,)
+            text("SELECT status FROM categories WHERE name = :name"), {"name": category_ops.UNCLASSIFIABLE}
         ).fetchone()
     assert status == ("system",)
 
@@ -795,7 +801,7 @@ def test_Other_does_not_widen_what_a_subscriber_receives(
     """Behaviour must be unchanged at the one place that reads categories:
     an "Other" article is excluded from a topic with real categories,
     exactly as an empty list was."""
-    article = {"link": "https://e.com/1", "categories": [users_db.UNCLASSIFIABLE],
+    article = {"link": "https://e.com/1", "categories": [category_ops.UNCLASSIFIABLE],
                "published_dt": None, "fetched_at": None, "source_key": "bbc_business",
                "title": "t", "summary": None, "source": "s"}
 
@@ -825,8 +831,8 @@ def test_each_section_keeps_its_own_since_cutoff(
     monkeypatch.setattr(news_ingest.time, "sleep", MagicMock())
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["AI"], 1: ["AI"]}), now)
 
-    fast_cut = users_db.get_source_last_article_dt("arxiv:cs.AI")
-    slow_cut = users_db.get_source_last_article_dt("arxiv:physics.optics")
+    fast_cut = source_state_ops.get_source_last_article_dt("arxiv:cs.AI")
+    slow_cut = source_state_ops.get_source_last_article_dt("arxiv:physics.optics")
     assert fast_cut == fast["published_dt"]
     assert slow_cut == slow["published_dt"]
     assert slow_cut < fast_cut, "the slow section is not dragged forward by the fast one"
@@ -1089,7 +1095,7 @@ def test_ingestion_cycle_refreshes_category_keyness(
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model(categories_by_index), now)
 
-    scores = users_db.get_category_keyness("AI")
+    scores = interest_cache_ops.get_category_keyness("AI")
     assert "openai" in scores
 
 
@@ -1119,7 +1125,7 @@ def test_ingestion_cycle_keyness_reflects_the_whole_cache_not_just_this_batch(
 
     news_ingest.run_ingestion_cycle(_fake_classifying_model({0: ["AI"]}), now)
 
-    scores = users_db.get_category_keyness("AI")
+    scores = interest_cache_ops.get_category_keyness("AI")
     assert "quantum" in scores
 
 
@@ -1150,4 +1156,4 @@ def test_keyness_refresh_does_nothing_on_an_empty_cache(isolated_subscribers_db,
     """No articles at all yet -- nothing to compute keyness over, and
     nothing should raise."""
     news_ingest._refresh_category_keyness(datetime(2026, 8, 26, tzinfo=timezone.utc))
-    assert users_db.get_category_keyness("AI") == {}
+    assert interest_cache_ops.get_category_keyness("AI") == {}

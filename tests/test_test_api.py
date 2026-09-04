@@ -94,7 +94,7 @@ def test_process_message_failure_returns_500(running_server, monkeypatch, isolat
     durably (see tests/test_bot.py's own coverage of that -- it's the
     one place both this endpoint and real Telegram traffic go through,
     so that's where the logging test lives, not here). isolated_subscribers_db
-    is required, not optional -- do_POST calls users_db.mark_test_account
+    is required, not optional -- do_POST calls subscriber_ops.mark_test_account
     unconditionally before process_message even runs, so without it this
     only passed locally by test-ordering luck (an earlier test already
     having created the real subscribers.db table) -- failed for real on

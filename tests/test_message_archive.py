@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import message_archive
-import users_db
+import subscriber_ops
 from telemetry_providers import Level
 from tests.fakes import FakeSpan
 
@@ -19,14 +19,14 @@ def _patch_events_span(monkeypatch):
 def test_archive_message_writes_one_file_with_the_right_fields(
     isolated_message_archive, isolated_subscribers_db
 ):
-    users_db.set_interests(42, ["AI"])
+    subscriber_ops.set_interests(42, ["AI"])
     message_archive.archive_message(42, "push_digest", "<b>Digest</b>", topic="AI", now=NOW)
 
     files = list(isolated_message_archive.glob("*.json"))
     assert len(files) == 1
     record = json.loads(files[0].read_text(encoding="utf-8"))
     assert record["timestamp"] == NOW.isoformat()
-    assert record["recipient"] == users_db.external_id(42)
+    assert record["recipient"] == subscriber_ops.external_id(42)
     assert record["kind"] == "push_digest"
     assert record["topic"] == "AI"
     assert record["text"] == "<b>Digest</b>"
@@ -43,7 +43,7 @@ def test_archive_message_recipient_is_the_opaque_id_not_the_chat_id(
     files = list(isolated_message_archive.glob("*.json"))
     record = json.loads(files[0].read_text(encoding="utf-8"))
     assert record["recipient"] != "42"  # not the literal chat_id
-    assert record["recipient"] == users_db.external_id(42)
+    assert record["recipient"] == subscriber_ops.external_id(42)
 
 
 def test_archive_message_topic_defaults_to_none_for_a_chat_reply(

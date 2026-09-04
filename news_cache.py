@@ -9,7 +9,7 @@ same filename and just overwrites harmlessly -- free deduplication, no
 separate tracking state needed.
 
 CACHE_DIR is configurable via storage.news_cache_dir (settings.yml, see
-app_settings.py), same reasoning as users_db.py's storage.subscribers_db_file
+app_settings.py), same reasoning as storage.database.sqlite.path
 -- local dev and the deployed container need different paths, and a
 container restart shouldn't lose the cache if news_cache_dir points at
 the same mounted volume as subscribers.db.
@@ -127,7 +127,7 @@ def write_article(source_key: str, article: dict, categories: list[str] | None,
         # different facts -- "nothing applied" versus "we don't know" -- and
         # writing [] for both is what made a three-day classification outage
         # indistinguishable from normal operation. news_ingest writes
-        # users_db.UNCLASSIFIABLE for the first case.
+        # category_ops.UNCLASSIFIABLE for the first case.
         "categories": list(categories) if categories is not None else None,
         "embedding": list(embedding) if embedding is not None else None,
     }

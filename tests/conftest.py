@@ -17,7 +17,7 @@ app_settings.reset_settings_for_tests(Settings({
     "storage": {
         "news_cache_dir": {"path": "news_cache", "ttl_hours": 48},
         "message_archive_dir": {"path": "message_archive", "ttl_days": 7},
-        "subscribers_db_file": "subscribers.db",
+        "database": {"type": "sqlite", "sqlite": {"path": "subscribers.db"}},
     },
     "models": {
         "main": {"url": "https://example.invalid", "model": "fake-main", "api-key": "fake-key"},
@@ -57,11 +57,15 @@ app_settings.reset_settings_for_tests(Settings({
     },
 }))
 
+from sqlalchemy import create_engine
+
 import agent
+import category_ops
 import message_archive
 import news_cache
 import news_keyness
-import users_db
+import storage
+from storage.sqlite import SqliteStorage
 from tests.fakes import fake_pos_tag, fake_word_tokenize
 
 
@@ -103,13 +107,18 @@ def isolated_notes_file(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def isolated_subscribers_db(monkeypatch, tmp_path):
-    """Point users_db.DB_FILE at a temp file for the duration of a test, so
-    access-control tests never touch the real subscribers.db."""
+def isolated_subscribers_db(tmp_path):
+    """Points storage at a temp SQLite file for the duration of a test, so
+    access-control tests never touch the real subscribers.db. Explicit
+    teardown (not monkeypatch) because storage.get_storage() is a
+    module-level singleton, not an attribute monkeypatch would revert on
+    its own."""
     path = tmp_path / "subscribers.db"
-    monkeypatch.setattr(users_db, "DB_FILE", str(path))
-    users_db.init_db()
-    return path
+    storage.reset_storage_for_tests(SqliteStorage(create_engine(f"sqlite:///{path}")))
+    storage.init_db()
+    category_ops.bootstrap()
+    yield path
+    storage.reset_storage_for_tests(None)
 
 
 @pytest.fixture

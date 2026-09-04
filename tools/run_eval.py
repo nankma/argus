@@ -62,14 +62,14 @@ from trailsign import Settings, SettingsError
 # Isolate from the real subscribers.db -- this script writes real
 # interests/push/language state (set_interest/start_push/set_language
 # cases below) as a side effect of exercising the real pipeline, and must
-# not touch production data. Must happen before users_db (imported by
-# agent/bot) reads storage.subscribers_db_file via Settings at module
+# not touch production data. Must happen before storage (imported by
+# agent/bot) reads storage.database.sqlite.path via Settings at module
 # load time.
 #
 # This used to be a plain SUBSCRIBERS_DB_FILE env var setdefault, but
 # that stopped having any effect once the Phase 1 storage migration moved
-# users_db.py onto Settings -- settings.yml resolves
-# storage.subscribers_db_file to a literal value, not an
+# subscriber_ops.py onto Settings -- settings.yml resolves
+# storage.database.sqlite.path to a literal value, not an
 # environment-variable node (see
 # docs/standaloneplan/01-settings-migration.md), so the env var was
 # silently ignored and this harness was writing into the real
@@ -80,7 +80,7 @@ from trailsign import Settings, SettingsError
 # not just isolated storage.
 _settings_path = os.environ.get("SETTINGS_FILE", "settings.yml")
 _raw_settings = (yaml.safe_load(open(_settings_path, encoding="utf-8")) or {}) if os.path.exists(_settings_path) else {}
-_raw_settings.setdefault("storage", {})["subscribers_db_file"] = os.path.join(
+_raw_settings.setdefault("storage", {}).setdefault("database", {}).setdefault("sqlite", {})["path"] = os.path.join(
     tempfile.mkdtemp(prefix="myfirstagent_eval_"), "subscribers.db"
 )
 app_settings.reset_settings_for_tests(Settings(_raw_settings))
@@ -92,7 +92,8 @@ from pydantic import BaseModel
 
 import agent
 import bot
-import users_db
+import category_ops
+import storage
 
 _EVAL_CHAT_ID = 900001
 
@@ -288,7 +289,8 @@ def main():
         sys.exit(1)
 
     agent.setup_telemetry()
-    users_db.init_db()
+    storage.init_db()
+    category_ops.bootstrap()
 
     cases = [c for c in EVAL_CASES if args.category is None or c["category"] == args.category]
 

@@ -21,9 +21,23 @@ storage:
       trailsign-resolve: environment-variable
       name: MESSAGE_ARCHIVE_DIR
     ttl_days: 7
-  subscribers_db_file:
-    trailsign-resolve: environment-variable
-    name: SUBSCRIBERS_DB_FILE
+  # sqlite for now -- switching this to postgres (storage/postgres/) to
+  # test the real adapter against a local Postgres instance is the next
+  # step, once real connection details exist. See
+  # docs/plans/data-layer-plan.md's "Seam built" section for the shape:
+  #   database:
+  #     type: postgres
+  #     postgres:
+  #       host: <dev machine LAN IP>
+  #       dbname: myfirstagent_int
+  #       user: myfirstagent
+  #       password: {trailsign-resolve: environment-variable, name: POSTGRES_PASSWORD}
+  database:
+    type: sqlite
+    sqlite:
+      path:
+        trailsign-resolve: environment-variable
+        name: SUBSCRIBERS_DB_FILE
   push_outcomes_ttl_days: 90
 
 # main: identical to production on purpose (the model that matters for

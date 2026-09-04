@@ -17,7 +17,7 @@ wrong — it's correct — but because the cost lands twice if it's done now.
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Move off SQLite to a shared database | **Deferred** — see triggers below |
+| 1 | Move off SQLite to a shared database | **Seam built, 2026-09-03** (`storage/`, `subscriber_ops.py`/`category_ops.py`/`push_outcome_ops.py`/`api_budget_ops.py`/`interest_cache_ops.py`/`source_state_ops.py`, `storage.database.type` setting) — a real `PostgresStorage` exists (inherits `SqliteStorage`, overrides only the two genuinely divergent operations -- ignore-on-conflict inserts and schema introspection, three methods total), but **not yet proven against a live Postgres instance or switched on for any real deployment**; INT and PROD both still run `type: sqlite`. Next step: point `settings.int.yml` at a real Postgres instance and verify end to end. See the layering/design discussion in chat 2026-09-03 for the Business/Data-Access/Storage split this landed on. |
 | 2 | Backup for the current SQLite file | Not built — accepted risk at pilot stage |
 | 3 | Oracle NoSQL Database Cloud Service | **Rejected** — region-locked, verified |
 | 4 | Oracle Autonomous Database (Always Free) | **Candidate, unverified** — see open questions |
@@ -44,6 +44,13 @@ Three reasons, in order of weight:
    limitation is real but not yet *binding*.
 
 ## What the migration would actually involve
+
+**Superseded by the 2026-09-03 seam** (see Status row 1) — `users_db.py`
+no longer exists; its ~60 functions were split into six `*_ops.py` DAL
+modules over a `storage/` package (`SqliteStorage`/`PostgresStorage`).
+Left below as the historical reasoning that motivated keeping persistence
+behind one narrow interface, which is exactly what made the actual split
+low-risk when it happened.
 
 Smaller than it might appear, because the data access is already behind a
 single module.
