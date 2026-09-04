@@ -54,6 +54,14 @@ subscribers = Table(
     # subscriber_ops.record_push_failure/reset_push_consecutive_failures
     # and news_push._strike_unreachable_subscriber's own docstring.
     Column("push_consecutive_failures", Integer),
+    # search_news's daily quota -- a UTC-day-scoped counter, per subscriber,
+    # deliberately modeled on api_budget's date+count shape but stored
+    # directly on the subscriber row (one query, not a join) since there's
+    # no per-source dimension to it. search_count_date holds the UTC date
+    # (YYYY-MM-DD) the count applies to; subscriber_ops resets the count
+    # to 0 whenever the stored date != today rather than a scheduled job.
+    Column("search_count_date", Text),
+    Column("search_count_today", Integer),
 )
 
 api_budget = Table(
@@ -153,6 +161,8 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("subscribers", "is_test", "INTEGER"),
     ("subscribers", "external_id", "TEXT"),
     ("subscribers", "push_consecutive_failures", "INTEGER"),
+    ("subscribers", "search_count_date", "TEXT"),
+    ("subscribers", "search_count_today", "INTEGER"),
     ("source_pull_state", "last_article_dt", "TEXT"),
     ("categories", "sort_order", "INTEGER NOT NULL DEFAULT 0"),
     ("categories", "alerted_at", "TEXT"),

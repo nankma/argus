@@ -4,17 +4,6 @@ Follow-ups noted during work, not yet scheduled. See CLAUDE.md's
 "Design before code" -- none of these get implemented without a design
 pass first, per that rule.
 
-- [ ] **Design: switch `search_news` from live source fetch to searching
-  downloaded/ingested content.** Currently `search_news` fetches live,
-  per query, from `news_sources.enabled_sources()` (excludes
-  NewsAPI/Perigon by default) -- a real source-coverage gap against what
-  `news_ingest.py`'s background cache already has (unrestricted, all
-  sources). Idea: search the local cache/index that ingest already
-  builds, instead of re-fetching from sources on every query. Needs a
-  real design pass (how the cache gets indexed/searched, whether it's
-  still "live" enough) before any code -- explicitly deferred until
-  after the current settings work lands.
-
 - [ ] **Add rate limiting for approved users.** No per-user or global
   message-rate cap exists anywhere in `bot.py`/`agent.py` today -- once
   approved, a user (or a compromised approved account) can trigger

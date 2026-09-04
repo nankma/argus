@@ -178,16 +178,33 @@ def get_last_push_at(chat_id: int) -> datetime | None:
     return datetime.fromisoformat(raw) if raw else None
 
 
-def record_push(chat_id: int, article_links: list[str], pushed_at: datetime) -> None:
-    """Advances the dedup state after a digest is sent (or a due check
-    finds nothing new). `article_links` must be links that genuinely
-    appeared in the delivered digest, not the candidate list."""
-    now = pushed_at if pushed_at.tzinfo else pushed_at.replace(tzinfo=timezone.utc)
+def mark_links_shown(chat_id: int, article_links: list[str], now: datetime) -> None:
+    """Merges `article_links` into this subscriber's dedup memory --
+    shared by news_push.py (a delivered digest) and search_news (an
+    on-demand search result), so neither re-shows something the other
+    already did. Deliberately does NOT touch last_push_at -- that's
+    advance_last_push_at's own job, a separate call, because a manual
+    search must never delay a subscriber's next scheduled push by
+    advancing their push clock. See git history for the 2026-09-04 split
+    (a single record_push used to do both, atomically, which was exactly
+    right for push's own two call sites but wrong for search reusing only
+    half of it)."""
+    ts = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     raw = get_storage().get_pushed_links(chat_id)
-    merged = _parse_pushed_links(raw, now)
+    merged = _parse_pushed_links(raw, ts)
     for link in article_links:
-        merged[link] = now.isoformat()
-    get_storage().record_push(chat_id, APPROVED, datetime.now().isoformat(), pushed_at.isoformat(), json.dumps(merged))
+        merged[link] = ts.isoformat()
+    get_storage().set_pushed_links(chat_id, APPROVED, datetime.now().isoformat(), json.dumps(merged))
+
+
+def advance_last_push_at(chat_id: int, now: datetime) -> None:
+    """Resets the "how long until due again" clock -- called after a push
+    cycle actually reaches this subscriber (a delivered digest, or a due
+    check that found nothing new), never by search_news. See
+    mark_links_shown's docstring for why these are two independent calls,
+    not one -- named to match its `now` parameter, since the two are
+    always called together as a pair at every news_push.py call site."""
+    get_storage().set_last_push_at(chat_id, APPROVED, datetime.now().isoformat(), now.isoformat())
 
 
 def list_push_enabled_subscribers() -> list[dict]:
@@ -274,6 +291,17 @@ def record_push_failure(chat_id: int) -> int:
     count = get_push_consecutive_failures(chat_id) + 1
     get_storage().set_push_consecutive_failures(chat_id, APPROVED, datetime.now().isoformat(), count)
     return count
+
+
+def try_consume_search_query(chat_id: int, today: str, daily_cap: int = 10) -> bool:
+    """Returns True and records the query if this subscriber is still
+    under `daily_cap` search_news calls for `today` (a UTC date string,
+    passed in so callers/tests control it deterministically -- same
+    convention as api_budget_ops.try_consume_api_budget); False (without
+    incrementing) once the cap is reached. The stored count resets
+    automatically once `today` no longer matches the subscriber's last
+    stored date -- see storage's try_consume_search_quota."""
+    return get_storage().try_consume_search_quota(chat_id, APPROVED, datetime.now().isoformat(), daily_cap, today)
 
 
 def reset_push_consecutive_failures(chat_id: int) -> None:

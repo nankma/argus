@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -7,12 +8,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 import agent
 import guardrails
+import news_cache
 import news_classify
-import news_sources
-import api_budget_ops
+import news_embed
 import interest_cache_ops
 import subscriber_ops
-from tests.fakes import FakeToolCallingModel, RecordingCallbackHandler
+from tests.fakes import FakeEmbedder, FakeToolCallingModel, RecordingCallbackHandler
 
 
 def _fake_request(context):
@@ -267,78 +268,175 @@ def test_save_note_writes_isolated_file(isolated_notes_file):
     assert "ts" in entry
 
 
-def test_search_news_aggregates_and_isolates_errors(monkeypatch, isolated_subscribers_db):
-    def working_source(query, max_results):
-        return [{"title": "Test Article", "link": "https://example.com", "source": "TestSource"}]
-
-    def failing_source(query, max_results):
-        raise RuntimeError("simulated network failure")
-
-    monkeypatch.setattr(
-        news_sources,
-        "enabled_sources",
-        lambda include_restricted=True: [("working", working_source), ("failing", failing_source)],
-    )
-
+def _search_news_call(chat_id=1, embedder=None, guard_model=None, query="AI coding"):
+    """Drives agent.search_news through the real tool-calling loop (not a
+    direct function call) so these tests exercise the same runtime.context
+    plumbing bot.py relies on -- chat_id always required, guard_model/
+    embedder default to None (matching bot.py's own embedder=None fallback
+    contract) unless a test needs one."""
     fake_model = FakeToolCallingModel(
         responses=[
             AIMessage(
                 content="",
-                tool_calls=[{"name": "search_news", "args": {"query": "test"}, "id": "call_1"}],
+                tool_calls=[{"name": "search_news", "args": {"query": query}, "id": "call_1"}],
             ),
             AIMessage(content="Here's what I found."),
         ]
     )
     built = agent.build_agent(fake_model)
-
     result = agent.run_agent(
-        built, [{"role": "user", "content": "what's trending?"}], context={"chat_id": 1}
+        built, [{"role": "user", "content": "what's trending?"}],
+        context={"chat_id": chat_id, "guard_model": guard_model, "embedder": embedder},
     )
-
     tool_messages = [m for m in result if isinstance(m, ToolMessage)]
     assert len(tool_messages) == 1
-    tool_output = tool_messages[0].content
-    assert "Test Article" in tool_output
-    assert "https://example.com" in tool_output  # link must be surfaced so the model can cite it
-    assert "ERROR: simulated network failure" in tool_output
-    # one failing source must not prevent the other source's results from
-    # reaching the model, or the final answer from being produced
-    assert result[-1].content == "Here's what I found."
+    return tool_messages[0].content
 
 
-def test_search_news_records_api_call_for_restricted_sources_only(monkeypatch, isolated_subscribers_db):
-    def perigon_source(query, max_results):
-        return [{"title": "Perigon Article", "link": "https://example.com/p", "source": "Perigon"}]
+def _cached_article(link, title, categories=None, embedding=None, published="2026-09-01"):
+    return {
+        "title": title, "link": link, "source": "TestSource", "source_key": "test",
+        "categories": categories, "embedding": embedding,
+        "published": published, "published_dt": None,
+    }
 
-    def free_source(query, max_results):
-        return [{"title": "Free Article", "link": "https://example.com/f", "source": "Free"}]
 
-    monkeypatch.setattr(
-        news_sources,
-        "enabled_sources",
-        lambda include_restricted=True: [("perigon", perigon_source), ("hackernews", free_source)],
+def test_search_news_returns_cached_articles_ranked_by_relevance(monkeypatch, isolated_subscribers_db):
+    """No live source fetch any more -- search_news reads whatever
+    news_ingest.py already cached, the same corpus news_push.py's digest
+    pipeline reads (news_cache.read_all)."""
+    embedder = FakeEmbedder()
+    on_topic = _cached_article(
+        "https://example.com/coding", "New AI coding assistant launches",
+        embedding=news_embed.embed_one(embedder, "AI coding assistant launches"),
     )
-    monkeypatch.setattr(subscriber_ops, "get_restricted_sources_enabled", lambda chat_id: True)
-    record_api_call = SimpleNamespace(calls=[])
-    monkeypatch.setattr(
-        api_budget_ops, "record_api_call", lambda source, today: record_api_call.calls.append((source, today))
+    off_topic = _cached_article(
+        "https://example.com/weather", "Storm hits coastal region",
+        embedding=news_embed.embed_one(embedder, "Storm hits coastal region"),
     )
+    monkeypatch.setattr(news_cache, "read_all", lambda: [on_topic, off_topic])
 
-    fake_model = FakeToolCallingModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[{"name": "search_news", "args": {"query": "test"}, "id": "call_1"}],
-            ),
-            AIMessage(content="Here's what I found."),
-        ]
+    output = _search_news_call(embedder=embedder, query="AI coding assistant")
+
+    assert "New AI coding assistant launches" in output
+    assert "https://example.com/coding" in output
+
+
+def test_search_news_truncates_to_max_results_newest_first(monkeypatch, isolated_subscribers_db):
+    """SEARCH_MAX_RESULTS=5 (the user's own explicit call, after rejecting
+    a proposed 20) must actually cap the output, and relevance-gated
+    survivors must come back newest-first -- recency governs order,
+    relevance only gates inclusion, same principle as news_push.py's own
+    digest cut."""
+    embedder = FakeEmbedder()
+    base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    articles = [
+        _cached_article(
+            f"https://example.com/{i}", f"AI coding update {i}",
+            embedding=news_embed.embed_one(embedder, f"AI coding update {i}"),
+        )
+        for i in range(7)
+    ]
+    for i, a in enumerate(articles):
+        a["published_dt"] = base + timedelta(hours=i)  # index 6 is newest
+    monkeypatch.setattr(news_cache, "read_all", lambda: articles)
+
+    output = _search_news_call(embedder=embedder, query="AI coding")
+
+    expected_newest_first = [f"https://example.com/{i}" for i in (6, 5, 4, 3, 2)]
+    positions = [output.index(link) for link in expected_newest_first]
+    assert positions == sorted(positions)  # each appears, in this exact order
+    assert "https://example.com/1" not in output  # 6th/7th-newest, truncated
+    assert "https://example.com/0" not in output
+
+
+def test_search_news_excludes_already_shown_links(monkeypatch, isolated_subscribers_db):
+    """Shares subscriber_ops' pushed_links dedup memory with news_push.py --
+    an article a push digest already delivered must not resurface here."""
+    embedder = FakeEmbedder()
+    link = "https://example.com/coding"
+    article = _cached_article(
+        link, "New AI coding assistant launches",
+        embedding=news_embed.embed_one(embedder, "New AI coding assistant launches"),
     )
-    built = agent.build_agent(fake_model)
+    monkeypatch.setattr(news_cache, "read_all", lambda: [article])
+    subscriber_ops.mark_links_shown(1, [link], datetime.now(timezone.utc))
 
-    agent.run_agent(built, [{"role": "user", "content": "what's trending?"}], context={"chat_id": 1})
+    output = _search_news_call(embedder=embedder, query="AI coding assistant")
 
-    assert len(record_api_call.calls) == 1
-    assert record_api_call.calls[0][0] == "perigon"
+    assert "No cached articles found" in output
+    assert link not in output
+
+
+def test_search_news_marks_returned_links_shown_without_advancing_last_push_at(monkeypatch, isolated_subscribers_db):
+    """The other half of the shared-dedup contract: a search result must
+    itself become "already shown" (so a later push doesn't re-send it),
+    but must NOT touch last_push_at -- a manual search must never delay
+    this subscriber's own scheduled push. See subscriber_ops.mark_links_shown
+    and advance_last_push_at's docstrings for the 2026-09-04 split."""
+    embedder = FakeEmbedder()
+    link = "https://example.com/coding"
+    article = _cached_article(
+        link, "New AI coding assistant launches",
+        embedding=news_embed.embed_one(embedder, "New AI coding assistant launches"),
+    )
+    monkeypatch.setattr(news_cache, "read_all", lambda: [article])
+    assert subscriber_ops.get_last_push_at(1) is None
+
+    _search_news_call(embedder=embedder, query="AI coding assistant")
+
+    assert link in subscriber_ops.get_pushed_links(1)
+    assert subscriber_ops.get_last_push_at(1) is None
+
+
+def test_search_news_enforces_daily_quota(monkeypatch, isolated_subscribers_db):
+    monkeypatch.setattr(agent, "SEARCH_DAILY_LIMIT", 1)
+    monkeypatch.setattr(news_cache, "read_all", lambda: [])
+
+    first = _search_news_call(query="AI")
+    second = _search_news_call(query="AI")
+
+    assert "No cached articles found" in first  # cap not yet reached, just an empty cache
+    assert "today's searches" in second
+
+
+def test_search_news_generates_and_caches_a_query_definition_when_uncached(monkeypatch, isolated_subscribers_db):
+    monkeypatch.setattr(news_cache, "read_all", lambda: [])
+    expand_calls = []
+
+    def fake_expand(model, interest):
+        expand_calls.append(interest)
+        return "a generated definition"
+
+    monkeypatch.setattr(news_classify, "expand_interest_for_retrieval", fake_expand)
+
+    output = _search_news_call(guard_model="fake-guard-model", query="AI coding")
+
+    assert expand_calls == ["AI coding"]
+    assert interest_cache_ops.get_interest_query_expansion("AI coding") == "a generated definition"
+    assert "a generated definition" in output
+
+
+def test_search_news_reuses_a_cached_query_definition(monkeypatch, isolated_subscribers_db):
+    interest_cache_ops.set_interest_query_expansion("AI coding", "already cached definition")
+    monkeypatch.setattr(news_cache, "read_all", lambda: [])
+
+    def fail_if_called(model, interest):
+        raise AssertionError("should not regenerate a cached definition")
+
+    monkeypatch.setattr(news_classify, "expand_interest_for_retrieval", fail_if_called)
+
+    output = _search_news_call(guard_model="fake-guard-model", query="AI coding")
+
+    assert "already cached definition" in output
+
+
+def test_search_news_no_results_message(monkeypatch, isolated_subscribers_db):
+    monkeypatch.setattr(news_cache, "read_all", lambda: [])
+
+    output = _search_news_call(query="AI coding")
+
+    assert "No cached articles found" in output
 
 
 def test_run_agent_no_tool_call_direct_answer():

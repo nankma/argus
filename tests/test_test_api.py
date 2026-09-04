@@ -20,7 +20,7 @@ def running_server(monkeypatch):
     behavior."""
     monkeypatch.setattr(test_api, "PORT", 0)  # ephemeral port, avoids clashing with a real deploy
 
-    async def fake_process_message(chat_id, text, agent, guard_model):
+    async def fake_process_message(chat_id, text, agent, guard_model, embedder=None):
         return {"blocked_at": None, "category": "news_query", "reply": f"echo:{text}"}
 
     monkeypatch.setattr(bot, "process_message", fake_process_message)
@@ -100,7 +100,7 @@ def test_process_message_failure_returns_500(running_server, monkeypatch, isolat
     having created the real subscribers.db table) -- failed for real on
     CI, a fresh environment with no such luck (sqlite3.OperationalError:
     no such table: subscribers)."""
-    async def failing_process_message(chat_id, text, agent, guard_model):
+    async def failing_process_message(chat_id, text, agent, guard_model, embedder=None):
         raise RuntimeError("simulated pipeline failure")
     monkeypatch.setattr(bot, "process_message", failing_process_message)
 

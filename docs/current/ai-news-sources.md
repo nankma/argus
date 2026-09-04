@@ -1,9 +1,13 @@
 # News Sources
 
-`news_sources.py` powers the `search_news` tool with a pluggable source
-registry — free/no-key sources are always enabled; key-gated sources turn
-on automatically once their env var is set. This doc tracks what's wired up,
-what's just documented for later, and how to add more.
+`news_sources.py` is a pluggable source registry — free/no-key sources
+are always enabled; key-gated sources turn on automatically once their
+env var is set. It powers `news_ingest.py`'s scheduled background pulls,
+which populate the local cache `news_push.py`'s digests and `agent.py`'s
+`search_news` tool both read (`agent.py`'s `search_news` stopped calling
+any source here live, 2026-09-04 — see
+`docs/plans/local-news-cache-plan.md` item 5). This doc tracks what's
+wired up, what's just documented for later, and how to add more.
 
 Originally AI-industry-only. Broadened 2026-08-13 to general tech/business/
 finance press, after a real gap: a subscriber asked about a specific
@@ -28,10 +32,12 @@ everything since X" either.**
 Of the 21 currently-enabled sources, only **5** (`hackernews`, `arxiv`, plus
 the three key-gated `api`-class sources when a key is set) do real
 filtering. The other 16+ are `rss`-class and always return their latest
-items whether or not any of them are actually relevant — this is why
-`search_news` returning a nonzero count is not proof the topic was
-matched; the model reading the titles is currently the only thing that
-catches this. See `docs/plans/local-news-cache-plan.md` for where this is headed.
+items whether or not any of them are actually relevant — this is why a
+big pull count from `news_ingest.py` is not proof any of it is on-topic;
+`news_push.select_candidate_articles`'s category/relevance filters and
+`news_embed.filter_by_relevance` (also used by `search_news`, see
+`docs/plans/local-news-cache-plan.md` item 5) are what actually narrow
+the cache down downstream of ingestion.
 
 ## Since-based ingestion (added 2026-08-16)
 
@@ -275,9 +281,12 @@ binding constraint here; the number of feeds is.
 ## Scheduled ingestion pulls by SECTION, not by query (2026-08-21)
 
 This supersedes the query-based descriptions elsewhere in this document
-for the four query-capable sources. **`agent.py`'s `search_news` is
-unchanged** — it passes a real user question, which is a legitimate query.
-Only `news_ingest.py`'s scheduled pulls changed.
+for the four query-capable sources, and only ever applied to
+`news_ingest.py`'s scheduled pulls in the first place — `agent.py`'s
+`search_news` stopped calling any of these sources live at all once it
+was rewired to search the ingested cache instead (2026-09-04, see
+`docs/plans/local-news-cache-plan.md` item 5); this section's query-mode-
+vs-section-mode distinction is purely a `news_ingest.py` concern now.
 
 | Source | Section endpoint | Sections |
 |---|---|---|
@@ -383,52 +392,53 @@ fit, not features:
 
 ## Restricted sources: NewsAPI and Perigon require per-user access
 
-Added 2026-08-14, after realizing `search_news` (the on-demand chat tool)
-calls every enabled source directly and live, on every matching query,
-completely independent of `news_ingest.py`'s own budget-cap mechanism
-(see `docs/plans/local-news-cache-plan.md`). That mechanism only protects the
-periodic ingestion job's own calls — nothing previously stopped
-`search_news` from also calling NewsAPI/Perigon on every relevant chat
-message, which would exhaust both budgets almost immediately on real
-traffic.
+Added 2026-08-14, after realizing `search_news` (the on-demand chat tool,
+as it worked at the time) called every enabled source directly and live,
+on every matching query, completely independent of `news_ingest.py`'s
+own budget-cap mechanism (see `docs/plans/local-news-cache-plan.md`).
+That mechanism only protected the periodic ingestion job's own calls —
+nothing then stopped `search_news` from also calling NewsAPI/Perigon on
+every relevant chat message, which would exhaust both budgets almost
+immediately on real traffic. **`search_news` no longer calls any source
+live at all** (rewired 2026-09-04 to search the ingested cache instead —
+`docs/plans/local-news-cache-plan.md` item 5), so this restriction now
+applies only to `news_ingest.py`'s own scheduled pulls and
+`news_push.py`'s digest filtering, described below as it still works
+today.
 
 **`news_sources.RESTRICTED_SOURCES = {"newsapi", "perigon"}`** — excluded
-from `search_news`'s source list by default. `agent.py`'s `search_news`
-checks `subscriber_ops.get_restricted_sources_enabled(chat_id)` (a per-user DB
-flag, defaulting to `False`) before deciding whether to include them.
-`bot.py`/`combined_bot.py` grant this to the admin's own chat_id at
-startup — nobody else, for now. Granting it to someone else later is a
-plain DB update (`subscriber_ops.set_restricted_sources_enabled(chat_id,
+from `news_ingest.py`'s scheduled pulls and `news_push.select_candidate_articles`'s
+digest filtering by default, both keyed off the same per-user flag,
+`subscriber_ops.get_restricted_sources_enabled(chat_id)` (defaulting to
+`False`). `bot.py`/`combined_bot.py` grant this to the admin's own
+chat_id at startup — nobody else, for now. Granting it to someone else
+later is a plain DB update (`subscriber_ops.set_restricted_sources_enabled(chat_id,
 True)`), not a new code path.
 
 **GNews is deliberately not restricted** — its 100/day budget has real
-headroom beyond what `news_ingest.py` alone uses (3–6 calls/day), so
-`search_news` calling it too doesn't meaningfully threaten the budget the
-way it would for Perigon (150/month total) or NewsAPI (kept to 1/day by
-choice, not by a hard provider limit).
+headroom beyond what `news_ingest.py` alone uses (3–6 calls/day).
 
 **What this does and doesn't solve.** It protects Perigon/NewsAPI's
-budgets from *unauthorized* on-demand usage — the default is now
-"nobody but the admin can trigger these live." It does **not** protect
-against the admin's own usage exhausting the budget through `search_news`
-independent of what `news_ingest.py` already spends — the admin's calls
-still aren't rate-limited against `news_ingest.py`'s own consumption of
-the same monthly/daily cap (`try_consume_api_budget` is only called from
-`news_ingest.py` today). Worth revisiting if this becomes a real problem
-in practice, not before.
+budgets from *unauthorized* scheduled-ingestion usage — the default is
+"nobody but the admin's own interests pull from these sources." Since
+`search_news` stopped calling sources live entirely, the earlier concern
+here (the admin's own on-demand usage not being rate-limited against
+`news_ingest.py`'s own consumption of the same cap) no longer applies —
+there is no on-demand call left to rate-limit against it.
 
 **Real gap found and fixed 2026-08-14**: this restriction was only ever
-applied to `search_news` (the on-demand chat tool). `news_push.py`'s
-periodic-digest cycle called `news_sources.enabled_sources()` with no
-argument at all, which defaults to `include_restricted=True` — so every
-push-enabled subscriber's digest fetch included NewsAPI/Perigon
-regardless of their own `restricted_sources_enabled` flag, the exact
-thing this section says is supposed to default to "nobody but the
-admin." Found while diagnosing a real subscriber's stalled pushes (a
-separate, unrelated `TypeError` in `_parse_iso_published` was the actual
-crash — see that function's docstring — but this gap meant restricted
-sources were live in every subscriber's push path either way). Fixed by
-adding `list_push_enabled_subscribers`' `restricted_sources_enabled`
+applied to `search_news` (the on-demand chat tool, as it worked at the
+time). `news_push.py`'s periodic-digest cycle called
+`news_sources.enabled_sources()` with no argument at all, which defaults
+to `include_restricted=True` — so every push-enabled subscriber's digest
+fetch included NewsAPI/Perigon regardless of their own
+`restricted_sources_enabled` flag, the exact thing this section says is
+supposed to default to "nobody but the admin." Found while diagnosing a
+real subscriber's stalled pushes (a separate, unrelated `TypeError` in
+`_parse_iso_published` was the actual crash — see that function's
+docstring — but this gap meant restricted sources were live in every
+subscriber's push path either way). Fixed by adding
+`list_push_enabled_subscribers`' `restricted_sources_enabled`
 field and threading it through `run_push_cycle`, whose own default was
 flipped to `False` (unlike `enabled_sources` itself) so a future caller
 that forgets to pass it explicitly fails closed, not open. **Superseded

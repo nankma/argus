@@ -174,6 +174,14 @@ push:
     min: 40
     max: 100
 
+search:
+  max_results: 5
+  daily_limit: 10
+  relevance_keep:
+    fraction: 0.10
+    min: 20
+    max: 50
+
 subscription:
   default_interval_hours: 24
   min_interval_hours: 1
