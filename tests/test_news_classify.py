@@ -42,7 +42,7 @@ def test_classify_articles_maps_index_to_categories():
     result = news_classify.classify_articles(model, articles, TAXONOMY)
 
     assert result == {0: ["IT", "Hardware", "Finance", "Stock"], 1: ["AI"]}
-    model.with_structured_output.assert_called_once_with(news_classify.ClassificationBatch)
+    model.with_structured_output.assert_called_once_with(news_classify.ClassificationBatch, method="function_calling")
 
 
 def test_classify_articles_empty_input_returns_empty_without_calling_model():
@@ -219,7 +219,7 @@ def test_classify_articles_handles_a_model_returning_none():
     uncategorized, and say so rather than going silent. The silent version
     of this hid a three-day outage."""
     class NoneReturningModel:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             return self
 
         def invoke(self, messages):
@@ -243,7 +243,7 @@ def test_one_invented_label_does_not_discard_the_rest_of_the_batch():
     not an error. The unknown label is dropped and everything else
     survives."""
     class InventsALabel:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             self.schema = schema
             return self
 
@@ -268,7 +268,7 @@ def test_an_article_whose_labels_are_all_invalid_gets_an_empty_list():
     """Not a failure -- indistinguishable from the model saying nothing
     applies, which the prompt explicitly allows."""
     class AllInvalid:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             self.schema = schema
             return self
 
@@ -310,7 +310,7 @@ def test_generated_prompt_preserves_the_curated_category_order():
 
 def _model_returning(items):
     class _M:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             self.schema = schema
             return self
 
@@ -434,7 +434,7 @@ def test_draft_category_description_failure_returns_none(monkeypatch):
     """A missing description is recoverable -- the caller falls back to
     asking the admin -- so this must fail open, not raise."""
     class Boom:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             return self
         def invoke(self, messages):
             raise RuntimeError("model down")
@@ -456,7 +456,7 @@ def test_draft_category_description_failure_returns_none(monkeypatch):
 def _echo_model(english):
     class _M:
         seen = None
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             self.schema = schema
             return self
         def invoke(self, messages):
@@ -493,7 +493,7 @@ def test_a_failed_normalization_returns_none_so_the_caller_keeps_the_original(mo
     """A stored interest that searches badly beats one that silently
     wasn't saved."""
     class Boom:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             return self
         def invoke(self, messages):
             raise RuntimeError("model down")
@@ -509,7 +509,7 @@ def test_a_failed_normalization_returns_none_so_the_caller_keeps_the_original(mo
 
 def test_empty_interest_text_is_rejected_without_calling_the_model():
     class NeverCalled:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             raise AssertionError("should not reach the model")
 
     assert news_classify.normalize_interest(NeverCalled(), "   ") is None
@@ -525,7 +525,7 @@ def test_empty_interest_text_is_rejected_without_calling_the_model():
 def _echo_expansion_model(definition):
     class _M:
         seen = None
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             self.schema = schema
             return self
         def invoke(self, messages):
@@ -554,7 +554,7 @@ def test_expand_interest_instructs_english_output():
 
 def test_expand_interest_failure_returns_none(monkeypatch):
     class Boom:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             return self
         def invoke(self, messages):
             raise RuntimeError("model down")
@@ -570,7 +570,7 @@ def test_expand_interest_failure_returns_none(monkeypatch):
 
 def test_expand_interest_none_result_returns_none():
     class NoneModel:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             return self
         def invoke(self, messages):
             return None
@@ -585,7 +585,7 @@ def test_expand_interest_blank_definition_returns_none():
 
 def test_expand_interest_empty_input_is_rejected_without_calling_the_model():
     class NeverCalled:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, method=None):
             raise AssertionError("should not reach the model")
 
     assert news_classify.expand_interest_for_retrieval(NeverCalled(), "   ") is None

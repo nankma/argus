@@ -229,7 +229,19 @@ def classify_message(model, user_message: str) -> MessageClassification:
     but bot.py's process_message indexes categories[0] unconditionally, so
     an empty list would crash the same way a None result would."""
     try:
-        structured = model.with_structured_output(MessageClassification)
+        # method="function_calling", not the langchain_openai default
+        # ("json_schema", OpenAI's strict Structured Outputs) -- DeepSeek's
+        # real API rejects that response_format outright
+        # (OpenAIInvalidRequestError "'response_format' type is unavailable
+        # now"), which silently fail-opened every settings command to
+        # news_query until this was caught live on a real PROD deploy
+        # attempt, 2026-09-04 (invisible on INT, whose guardrail model runs
+        # through Together.ai, not DeepSeek directly). function_calling is
+        # what ChatDeepSeek (the pre-PR#63 model class) used, and what
+        # DeepSeek's API actually supports -- see agent.py's
+        # build_model_from_config docstring for the related reasoning_effort
+        # constraint.
+        structured = model.with_structured_output(MessageClassification, method="function_calling")
         result = structured.invoke([{"role": "system", "content": _ROUTER_PROMPT}, {"role": "user", "content": user_message}])
         if result is None or not result.categories:
             print("[guardrails] layer 2 returned no categories -- "
@@ -331,7 +343,10 @@ def is_output_on_topic(model, response_text: str, category: str | None = None) -
     classify_message's docstring for the live incident that surfaced this
     failure mode (2026-08-16 model-portability baseline run)."""
     try:
-        structured = model.with_structured_output(OutputCheck)
+        # method="function_calling" -- see classify_message's docstring/
+        # comment above for why (DeepSeek's real API rejects the
+        # langchain_openai default "json_schema" response_format).
+        structured = model.with_structured_output(OutputCheck, method="function_calling")
         result = structured.invoke(
             [
                 {"role": "system", "content": _OUTPUT_SCOPE_PROMPT},

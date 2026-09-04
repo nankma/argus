@@ -220,7 +220,9 @@ _RUBRIC_BY_CATEGORY = {
 
 def judge_reply(judge_model, category: str, question: str, reply: str) -> EvalVerdict:
     rubric = _RUBRIC_BY_CATEGORY[category]
-    structured = judge_model.with_structured_output(EvalVerdict)
+    # method="function_calling" -- see guardrails.classify_message's
+    # docstring/comment for why.
+    structured = judge_model.with_structured_output(EvalVerdict, method="function_calling")
     user_content = f"Original user message: {question}\n\nBot's actual reply:\n{reply}"
     result = structured.invoke([{"role": "system", "content": rubric}, {"role": "user", "content": user_content}])
     if result is None:
