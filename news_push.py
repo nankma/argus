@@ -120,7 +120,7 @@ NOVELTY_KEYNESS_THRESHOLD = -5.0
 # broken formatting reaching a subscriber.
 MAX_HTML_ATTEMPTS = get_settings().resolved("push.max_html_attempts", default=3)
 
-# _filter_by_relevance keeps at most this many of a topic's pool, ranked
+# news_embed.filter_by_relevance keeps at most this many of a topic's pool, ranked
 # by similarity to the topic's retrieval query -- not a fixed fraction
 # any more. Three real findings, all from the same 2026-08-25
 # measurement session, forced this shape:
@@ -420,7 +420,7 @@ def select_candidate_articles(
       "AI coding" and "Large Language Model" all map to category `AI`,
       so all four drew from the same undifferentiated pool of generic
       AI-industry news -- the category filter alone cannot tell them
-      apart. See _filter_by_relevance for why this keeps an absolute,
+      apart. See news_embed.filter_by_relevance for why this keeps an absolute,
       clamped count of the pool's top scorers (RELEVANCE_KEEP_MIN to
       RELEVANCE_KEEP_MAX), not a fixed threshold or a fraction of the
       pool -- both were tried and measured not to generalize.
@@ -522,11 +522,15 @@ def select_candidate_articles(
             seen_links.add(link)
             raw_pool.append(article)
 
-        # The fine filter after the coarse one -- see _filter_by_relevance.
-        # Capped at CANDIDATE_POOL_SIZE afterward, same reasoning as
-        # before this existed: bigger than the final max_per_topic cut,
-        # so the novelty-extra search below has a remainder to draw from.
-        pool = _filter_by_relevance(raw_pool, embedder, query_text)[:CANDIDATE_POOL_SIZE]
+        # The fine filter after the coarse one -- see
+        # news_embed.filter_by_relevance. Capped at CANDIDATE_POOL_SIZE
+        # afterward, same reasoning as before this existed: bigger than
+        # the final max_per_topic cut, so the novelty-extra search below
+        # has a remainder to draw from.
+        pool = news_embed.filter_by_relevance(
+            raw_pool, embedder, query_text,
+            keep_fraction=RELEVANCE_KEEP_FRACTION, keep_min=RELEVANCE_KEEP_MIN, keep_max=RELEVANCE_KEEP_MAX,
+        )[:CANDIDATE_POOL_SIZE]
 
         # Pure recency, no offbeat carve-out -- the regular digest is
         # ALWAYS up to max_per_topic articles, newest first. See the
@@ -544,7 +548,7 @@ def select_candidate_articles(
             # eligibility needs its own, more permissive relevance floor
             # rather than only ever seeing what the regular digest's
             # stricter cut left over.
-            novelty_pool = _filter_by_relevance(
+            novelty_pool = news_embed.filter_by_relevance(
                 raw_pool, embedder, query_text,
                 keep_fraction=NOVELTY_RELEVANCE_KEEP_FRACTION,
                 keep_min=NOVELTY_RELEVANCE_KEEP_MIN,
@@ -576,96 +580,6 @@ def _resolve_query_text(topic: str) -> str:
     on every push cycle, and generation is deliberately a write-time,
     cached, once-per-interest cost, not a read-time one."""
     return interest_cache_ops.get_interest_query_expansion(topic) or topic
-
-
-def _filter_by_relevance(
-    pool: list[dict], embedder, query_text: str,
-    keep_fraction: float = RELEVANCE_KEEP_FRACTION,
-    keep_min: int = RELEVANCE_KEEP_MIN,
-    keep_max: int = RELEVANCE_KEEP_MAX,
-) -> list[dict]:
-    """The fine filter after the coarse category one: cuts `pool` (already
-    category-matched, newest-first) down to the top-scoring articles by
-    similarity to `query_text`, where "top" means `keep_min` to `keep_max`
-    articles depending on pool size -- see RELEVANCE_KEEP_MAX's own
-    comment for the full reasoning (an absolute, clamped count, not a
-    fraction; a fraction was tried first and measured not to generalize,
-    across both pool size and topic phrasing). `query_text` is resolved
-    by the caller (see _resolve_query_text) -- a cached generated
-    definition of the topic when one exists, the bare topic string
-    otherwise; this function doesn't know or care which.
-
-    `keep_fraction`/`keep_min`/`keep_max` default to the regular-digest
-    clamp (RELEVANCE_KEEP_*) but are overridable -- the novelty-extra
-    search (select_candidate_articles) calls this a second time with the
-    wider NOVELTY_RELEVANCE_KEEP_* clamp instead, over the same
-    `raw_pool`, so novelty eligibility has its own, more permissive
-    relevance floor rather than inheriting the regular digest's stricter
-    one or having none at all.
-
-    Found necessary live, 2026-08-25: "AI", "AI Agent", "AI coding" and
-    "Large Language Model" all map to category ['AI'], so a subscriber
-    following all four got four near-identical digests drawn from the
-    same generic AI-industry pool -- the category filter has no way to
-    tell them apart, because it was never asked to; only the topic
-    STRING carries that distinction, and until this filter existed
-    nothing downstream used it before write_push_digest's single LLM
-    judgment call, which was measured (same session) to keep every
-    off-target candidate for both "AI Agent" and "AI coding" given the
-    identical input.
-
-    This makes the filter a blunt tool, not the fine-grained relevance
-    decision an earlier version of this docstring implied it could make
-    alone: RELEVANCE_KEEP_MAX's own comment documents two articles that
-    are genuinely on-topic but rank near the bottom of a 999-article real
-    corpus, because their headlines use business-outcome language with
-    none of the definition's technical vocabulary in it -- no clamp
-    shape fixes that specific case on its own, only embedding richer
-    source text does (title+summary rather than title alone -- see
-    news_ingest.py's run_ingestion_cycle, which is what this filter's
-    embeddings actually come from). The precision work still rests on
-    write_push_digest's own topic-framed judgment (see that function's
-    docstring) -- this filter's honest job is trimming the pool down to
-    a workable size that's disproportionately on-topic, not guaranteeing
-    every genuine match survives.
-
-    Falls back to `pool` unchanged -- no filtering at all -- when there's
-    no embedder, no topic vector, or fewer than 2 embedded articles to
-    compute a gate over (same fail-open shape as everywhere else
-    embeddings touch this pipeline). An article with no embedding of its
-    own always survives this filter too -- there is nothing to judge it
-    by, and the pipeline's convention throughout is that a missing
-    embedding excludes an article from an embedding-based FEATURE, never
-    from being a candidate at all."""
-    if not pool:
-        return pool
-    query_vector = news_embed.embed_one(embedder, query_text)
-    if query_vector is None:
-        return pool
-    scored = [(a, news_embed.cosine_similarity(a["embedding"], query_vector))
-             for a in pool if a.get("embedding") is not None]
-    if len(scored) < 2:
-        return pool
-    # Computed from the KEEP side and rounded, not `int(n * (1 - frac))`
-    # -- that subtraction hits float imprecision (1 - 0.9 == 0.09999999999999998
-    # in Python) that silently changes cut_index for specific pool sizes.
-    # Caught by a real test: n=10 computed cut_index=0 instead of 1,
-    # keeping a zero-relevance article that should have been the single
-    # excluded outlier.
-    #
-    # Clamped to len(scored) at the end -- RELEVANCE_KEEP_MIN=20 is bigger
-    # than plenty of real pools (a narrow interest's whole category-matched
-    # pool can be smaller than 20 outright), and without this clamp
-    # n_kept > len(scored) drives cut_index negative, which Python indexes
-    # from the END of the sorted list -- the single highest score becomes
-    # the gate, and the filter would exclude nearly everything instead of
-    # keeping everything.
-    n_kept = min(keep_max, max(round(len(scored) * keep_fraction), keep_min))
-    n_kept = min(n_kept, len(scored))
-    cut_index = len(scored) - n_kept
-    gate = sorted(sim for _, sim in scored)[cut_index]
-    relevant_links = {a["link"] for a, sim in scored if sim >= gate}
-    return [a for a in pool if a.get("embedding") is None or a["link"] in relevant_links]
 
 
 def _novelty_sort_key(scored_item: tuple[dict, bool, tuple[float, str] | None]) -> tuple[int, float]:
@@ -779,7 +693,7 @@ def write_push_digest(model, articles: list[dict], topic: str | None = None,
     no signal stronger than its own semantic judgment of a headline
     against a topic word. A stricter fix (embedding-based relevance
     filtering ahead of this call, using the topic string as a retrieval
-    query) shipped 2026-08-25 as _filter_by_relevance -- see
+    query) shipped 2026-08-25, later moved to news_embed.filter_by_relevance -- see
     select_candidate_articles's own docstring and
     docs/analysis/cluster-measurements.md.
 
@@ -1341,7 +1255,8 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                 _record(chat_id, push_outcome_ops.PUSH_NOTHING_NEW,
                         "due, but no new articles -- advancing last_push_at only", now)
 
-            subscriber_ops.record_push(chat_id, delivered or [], now)
+            subscriber_ops.mark_links_shown(chat_id, delivered or [], now)
+            subscriber_ops.advance_last_push_at(chat_id, now)
         except _ModelStageError as exc:
             # A 402, a rate limit, a provider outage. Unlike everything
             # else here this is never about one subscriber -- if the model
@@ -1369,7 +1284,8 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                 _record(chat_id, push_outcome_ops.PUSH_MODEL_ERROR,
                         f"model call failed with {detail}", now, detail=detail)
             if delivered is not None:
-                subscriber_ops.record_push(chat_id, delivered, now)
+                subscriber_ops.mark_links_shown(chat_id, delivered, now)
+                subscriber_ops.advance_last_push_at(chat_id, now)
             continue
         except Exception as exc:
             detail = repr(exc)
@@ -1384,5 +1300,6 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
                 _record(chat_id, push_outcome_ops.PUSH_CYCLE_FAILED,
                         f"cycle failed with {detail}", now, detail=detail)
             if delivered is not None:
-                subscriber_ops.record_push(chat_id, delivered, now)
+                subscriber_ops.mark_links_shown(chat_id, delivered, now)
+                subscriber_ops.advance_last_push_at(chat_id, now)
             continue

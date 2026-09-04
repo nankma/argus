@@ -222,6 +222,22 @@ push:
     min: 40
     max: 100
 
+# search_news (agent.py): an on-demand lookup over the same ingested
+# cache push reads, not a live source fetch. max_results: articles
+# returned per search (matches push.max_articles_per_topic -- same
+# per-topic volume, deliberately). relevance_keep: {fraction, min, max}
+# clamp on the same news_embed.filter_by_relevance pass push uses, with
+# its own values since search's pool (the whole cache, no category
+# pre-filter) differs from push's per-topic one. daily_limit: max
+# search_news calls per subscriber per UTC day.
+search:
+  max_results: 5
+  daily_limit: 10
+  relevance_keep:
+    fraction: 0.10
+    min: 20
+    max: 50
+
 # Per-subscriber account settings. default_interval_hours/
 # min_interval_hours: push-frequency default and floor a subscriber can
 # set. pushed_link_retention_hours: how long the "already sent this

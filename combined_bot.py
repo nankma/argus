@@ -98,7 +98,9 @@ async def run_both(
         await admin_app.start()
         await admin_app.updater.start_polling()
 
-        test_api_server = test_api.start(info_app.bot_data["agent"], info_app.bot_data["guard_model"])
+        test_api_server = test_api.start(
+            info_app.bot_data["agent"], info_app.bot_data["guard_model"], info_app.bot_data.get("embedder")
+        )
 
         print("Both bots ready (polling). Ctrl+C to stop.")
         stop_event = asyncio.Event()

@@ -479,7 +479,9 @@ def test_handle_message_passes_chat_id_and_category_to_run_agent(isolated_subscr
 
     run_agent_mock.assert_called_once()
     _, kwargs = run_agent_mock.call_args
-    assert kwargs["context"] == {"chat_id": 999, "category": "news_query"}
+    assert kwargs["context"] == {
+        "chat_id": 999, "category": "news_query", "guard_model": "fake-guard-model", "embedder": None,
+    }
 
 
 def test_handle_message_dispatches_route_b_without_calling_run_agent(isolated_subscribers_db, monkeypatch):

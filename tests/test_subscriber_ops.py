@@ -184,20 +184,30 @@ def test_get_last_push_at_none_for_unset_chat(isolated_subscribers_db):
     assert subscriber_ops.get_last_push_at(17) is None
 
 
-def test_record_push_sets_last_push_at_and_links(isolated_subscribers_db):
+def test_mark_links_shown_sets_links(isolated_subscribers_db):
     pushed_at = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
-    subscriber_ops.record_push(18, ["https://example.com/a", "https://example.com/b"], pushed_at)
-    assert subscriber_ops.get_last_push_at(18) == pushed_at
+    subscriber_ops.mark_links_shown(18, ["https://example.com/a", "https://example.com/b"], pushed_at)
     assert set(subscriber_ops.get_pushed_links(18, now=pushed_at)) == {
         "https://example.com/a", "https://example.com/b"
     }
 
 
-def test_record_push_merges_and_dedupes_links(isolated_subscribers_db):
+def test_advance_last_push_at_sets_last_push_at(isolated_subscribers_db):
+    """mark_links_shown and advance_last_push_at are two independent
+    methods (2026-09-04 split) -- a manual search must be able to call
+    mark_links_shown without also advancing the subscriber's push clock,
+    so this confirms advance_last_push_at alone does its one job."""
+    pushed_at = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
+    subscriber_ops.advance_last_push_at(18, pushed_at)
+    assert subscriber_ops.get_last_push_at(18) == pushed_at
+    assert subscriber_ops.get_pushed_links(18, now=pushed_at) == []
+
+
+def test_mark_links_shown_merges_and_dedupes_links(isolated_subscribers_db):
     t1 = datetime(2026, 8, 8, 0, tzinfo=timezone.utc)
     t2 = datetime(2026, 8, 8, 12, tzinfo=timezone.utc)
-    subscriber_ops.record_push(19, ["https://example.com/old"], t1)
-    subscriber_ops.record_push(19, ["https://example.com/new", "https://example.com/old"], t2)
+    subscriber_ops.mark_links_shown(19, ["https://example.com/old"], t1)
+    subscriber_ops.mark_links_shown(19, ["https://example.com/new", "https://example.com/old"], t2)
     assert set(subscriber_ops.get_pushed_links(19, now=t2)) == {
         "https://example.com/old", "https://example.com/new"
     }
@@ -208,10 +218,10 @@ def test_pushed_links_are_pruned_by_age_not_by_count(isolated_subscribers_db):
     intervals -- see subscriber_ops.PUSHED_LINK_RETENTION_HOURS."""
     recent = datetime(2026, 8, 8, tzinfo=timezone.utc)
     # sent a day ago -- comfortably inside the retention window
-    subscriber_ops.record_push(30, ["https://example.com/yesterday"], recent - timedelta(hours=24))
+    subscriber_ops.mark_links_shown(30, ["https://example.com/yesterday"], recent - timedelta(hours=24))
 
     # far more links than the old 200-entry cap, all in one later push
-    subscriber_ops.record_push(30, [f"https://example.com/{i}" for i in range(500)], recent)
+    subscriber_ops.mark_links_shown(30, [f"https://example.com/{i}" for i in range(500)], recent)
 
     links = subscriber_ops.get_pushed_links(30, now=recent)
     assert len(links) == 501, "nothing should be evicted just for being numerous"
@@ -490,3 +500,32 @@ def test_push_consecutive_failures_is_scoped_per_subscriber(isolated_subscribers
     subscriber_ops.record_push_failure(73)
     assert subscriber_ops.get_push_consecutive_failures(73) == 2
     assert subscriber_ops.get_push_consecutive_failures(74) == 0
+
+
+# --- search_news's per-subscriber daily quota -------------------------------
+# A UTC-day-scoped counter stored directly on the subscribers row -- see
+# storage's try_consume_search_quota docstring for why this is one
+# check-and-increment call, not a separate get/set (avoids a race between
+# reading the count and writing the incremented one).
+
+
+def test_try_consume_search_query_allows_up_to_the_cap(isolated_subscribers_db):
+    today = "2026-09-04"
+    for _ in range(3):
+        assert subscriber_ops.try_consume_search_query(80, today, daily_cap=3) is True
+    assert subscriber_ops.try_consume_search_query(80, today, daily_cap=3) is False
+
+
+def test_try_consume_search_query_resets_on_a_new_day(isolated_subscribers_db):
+    assert subscriber_ops.try_consume_search_query(81, "2026-09-04", daily_cap=1) is True
+    assert subscriber_ops.try_consume_search_query(81, "2026-09-04", daily_cap=1) is False
+    # A later day resets the count rather than carrying yesterday's usage
+    # forward -- there's no scheduled reset job, this is what performs it.
+    assert subscriber_ops.try_consume_search_query(81, "2026-09-05", daily_cap=1) is True
+
+
+def test_try_consume_search_query_is_scoped_per_subscriber(isolated_subscribers_db):
+    today = "2026-09-04"
+    assert subscriber_ops.try_consume_search_query(82, today, daily_cap=1) is True
+    assert subscriber_ops.try_consume_search_query(82, today, daily_cap=1) is False
+    assert subscriber_ops.try_consume_search_query(83, today, daily_cap=1) is True

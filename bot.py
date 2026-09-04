@@ -425,14 +425,22 @@ async def _route_b_reply(chat_id: int, classification, guard_model, category: st
     return None, reply
 
 
-async def _route_a_reply(agent, working_messages: list, chat_id: int, category: str, guard_model) -> tuple[str | None, str, list | None]:
+async def _route_a_reply(
+    agent, working_messages: list, chat_id: int, category: str, guard_model, embedder=None
+) -> tuple[str | None, str, list | None]:
     """Runs the news_query agent loop and returns (blocked_at, reply,
     result_messages) -- result_messages is the full LangChain message list
     (including any ToolMessages) for history, or None if blocked/errored,
-    since there's nothing worth persisting in that case."""
+    since there's nothing worth persisting in that case. guard_model/
+    embedder are threaded into the tool-call context for search_news
+    (query-expansion generation and relevance filtering respectively) --
+    both are optional there, search_news degrades gracefully without
+    them, so a caller that hasn't built one yet (or a test) can pass
+    embedder=None."""
     try:
         result_messages = await asyncio.to_thread(
-            run_agent, agent, working_messages, context={"chat_id": chat_id, "category": category}
+            run_agent, agent, working_messages,
+            context={"chat_id": chat_id, "category": category, "guard_model": guard_model, "embedder": embedder},
         )
     except Exception as exc:
         return "agent_error", f"Something went wrong: {exc}", None
@@ -460,7 +468,8 @@ def _persist_turn(chat_id: int, all_messages: list, history_timestamps: list[dat
 
 
 async def _process_single_category(
-    chat_id: int, user_text: str, category: str, classification, agent, guard_model, history: list, history_timestamps: list[datetime]
+    chat_id: int, user_text: str, category: str, classification, agent, guard_model, history: list,
+    history_timestamps: list[datetime], embedder=None,
 ) -> dict:
     """The ordinary case -- classification.categories has exactly one
     entry, the overwhelmingly common shape. Kept as its own path (rather
@@ -480,9 +489,11 @@ async def _process_single_category(
     # Route A: news_query, the only category that still needs multi-step
     # tool use and open-ended synthesis -- chat_id feeds agent.py's
     # dynamic-prompt middleware (layer 3, the user's stored interests/
-    # language) and search_news's restricted-source gate.
+    # language) and search_news's per-subscriber daily quota/dedup memory.
     working_messages = history + [{"role": "user", "content": user_text}]
-    blocked_at, reply, result_messages = await _route_a_reply(agent, working_messages, chat_id, category, guard_model)
+    blocked_at, reply, result_messages = await _route_a_reply(
+        agent, working_messages, chat_id, category, guard_model, embedder
+    )
     if blocked_at is not None:
         return {"blocked_at": blocked_at, "category": category, "reply": reply}
 
@@ -495,7 +506,8 @@ async def _process_single_category(
 
 
 async def _process_multi_category(
-    chat_id: int, user_text: str, classification, agent, guard_model, history: list, history_timestamps: list[datetime]
+    chat_id: int, user_text: str, classification, agent, guard_model, history: list,
+    history_timestamps: list[datetime], embedder=None,
 ) -> dict:
     """A message carrying more than one intent (e.g. "add robotics to my
     interests and tell me what's new with it") -- each category in
@@ -516,7 +528,9 @@ async def _process_multi_category(
             blocked_at, reply = await _route_b_reply(chat_id, classification, guard_model, category)
         else:
             working_messages = history + [{"role": "user", "content": user_text}]
-            blocked_at, reply, _result_messages = await _route_a_reply(agent, working_messages, chat_id, category, guard_model)
+            blocked_at, reply, _result_messages = await _route_a_reply(
+                agent, working_messages, chat_id, category, guard_model, embedder
+            )
         if blocked_at is not None:
             return {"blocked_at": blocked_at, "category": category, "reply": guardrails.REDIRECT_MESSAGE}
         reply_parts.append(reply)
@@ -528,7 +542,7 @@ async def _process_multi_category(
     return {"blocked_at": None, "category": classification.categories[0], "reply": final_content}
 
 
-async def process_message(chat_id: int, user_text: str, agent, guard_model) -> dict:
+async def process_message(chat_id: int, user_text: str, agent, guard_model, embedder=None) -> dict:
     """The actual guardrail/agent/formatting pipeline, independent of
     Telegram's Update/Context objects -- extracted so test_api.py's local
     curl endpoint (docs/reference/local-testing-api-plan.md) exercises this exact
@@ -577,9 +591,12 @@ async def process_message(chat_id: int, user_text: str, agent, guard_model) -> d
 
         if len(classification.categories) == 1:
             return await _process_single_category(
-                chat_id, user_text, classification.categories[0], classification, agent, guard_model, history, history_timestamps
+                chat_id, user_text, classification.categories[0], classification, agent, guard_model,
+                history, history_timestamps, embedder,
             )
-        return await _process_multi_category(chat_id, user_text, classification, agent, guard_model, history, history_timestamps)
+        return await _process_multi_category(
+            chat_id, user_text, classification, agent, guard_model, history, history_timestamps, embedder
+        )
     except Exception as exc:
         _events.log("process_message_failed", {"message": "unhandled pipeline failure", "chat_id": chat_id},
                      level=Level.ERROR, exc=exc)
@@ -595,6 +612,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update.message.text,
         context.bot_data["agent"],
         context.bot_data["guard_model"],
+        context.bot_data.get("embedder"),
     )
     final_content = result["reply"]
 
@@ -772,7 +790,9 @@ async def _start_test_api(app: Application) -> None:
     internally, so this is the standalone-bot.py equivalent of
     combined_bot.py's run_both() starting test_api after the loop is
     already running (test_api.start() needs asyncio.get_running_loop())."""
-    app.bot_data["test_api_server"] = test_api.start(app.bot_data["agent"], app.bot_data["guard_model"])
+    app.bot_data["test_api_server"] = test_api.start(
+        app.bot_data["agent"], app.bot_data["guard_model"], app.bot_data.get("embedder")
+    )
 
 
 async def _stop_test_api(app: Application) -> None:

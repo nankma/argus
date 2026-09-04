@@ -133,6 +133,84 @@ def cosine_similarity(a: list[float] | None, b: list[float] | None) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+def filter_by_relevance(
+    pool: list[dict], embedder, query_text: str,
+    keep_fraction: float, keep_min: int, keep_max: int,
+) -> list[dict]:
+    """The fine filter after a coarse one (a category match, a cache-wide
+    scan -- whatever the caller already narrowed `pool` down to,
+    newest-first): cuts it down to the top-scoring articles by similarity
+    to `query_text`, where "top" means `keep_min` to `keep_max` articles
+    depending on pool size -- an absolute, clamped count, not a fraction;
+    a fraction was tried first and measured not to generalize, across
+    both pool size and topic phrasing (see news_push.py's own git history,
+    2026-08-25, for the full measurement). `keep_fraction`/`keep_min`/
+    `keep_max` are required, not defaulted here, because the right values
+    depend on the caller's own pool sizes and precision/recall tradeoff --
+    news_push.py's regular digest, its wider novelty-extra pass, and
+    agent.py's search_news each pass their own.
+
+    `query_text` is resolved by the caller -- e.g. a cached, LLM-generated
+    definition of a topic/query when one exists (news_push._resolve_query_text,
+    interest_cache_ops), the bare string otherwise; this function doesn't
+    know or care which.
+
+    Found necessary live, 2026-08-25: "AI", "AI Agent", "AI coding" and
+    "Large Language Model" all map to the same category, so without this
+    filter a subscriber following all four got four near-identical
+    digests drawn from the same generic pool -- only the query STRING
+    carries the distinction a coarse category match can't make.
+
+    This is a blunt tool, not fine-grained relevance judgment on its own:
+    two genuinely on-topic articles can still rank near the bottom of a
+    large pool because their headlines use outcome language with none of
+    the query's technical vocabulary in it -- no clamp shape fixes that,
+    only richer source text embedded in the first place does (see
+    news_ingest.py's run_ingestion_cycle, which is what these embeddings
+    actually come from). This filter's honest job is trimming the pool
+    down to a workable size that's disproportionately on-topic, not
+    guaranteeing every genuine match survives -- the caller's own
+    downstream judgment (an LLM call framed around the query) still does
+    the precision work.
+
+    Falls back to `pool` unchanged -- no filtering at all -- when there's
+    no embedder, no query vector, or fewer than 2 embedded articles to
+    compute a gate over (same fail-open shape as everywhere else
+    embeddings touch this codebase). An article with no embedding of its
+    own always survives this filter too -- there is nothing to judge it
+    by, and the convention throughout is that a missing embedding
+    excludes an article from an embedding-based FEATURE, never from being
+    a candidate at all."""
+    if not pool:
+        return pool
+    query_vector = embed_one(embedder, query_text)
+    if query_vector is None:
+        return pool
+    scored = [(a, cosine_similarity(a["embedding"], query_vector))
+             for a in pool if a.get("embedding") is not None]
+    if len(scored) < 2:
+        return pool
+    # Computed from the KEEP side and rounded, not `int(n * (1 - frac))`
+    # -- that subtraction hits float imprecision (1 - 0.9 == 0.09999999999999998
+    # in Python) that silently changes cut_index for specific pool sizes.
+    # Caught by a real test: n=10 computed cut_index=0 instead of 1,
+    # keeping a zero-relevance article that should have been the single
+    # excluded outlier.
+    #
+    # Clamped to len(scored) at the end -- a keep_min bigger than the pool
+    # (a narrow interest's whole matched pool can be smaller than the
+    # min) would otherwise drive cut_index negative, which Python indexes
+    # from the END of the sorted list -- the single highest score becomes
+    # the gate, and the filter would exclude nearly everything instead of
+    # keeping everything.
+    n_kept = min(keep_max, max(round(len(scored) * keep_fraction), keep_min))
+    n_kept = min(n_kept, len(scored))
+    cut_index = len(scored) - n_kept
+    gate = sorted(sim for _, sim in scored)[cut_index]
+    relevant_links = {a["link"] for a, sim in scored if sim >= gate}
+    return [a for a in pool if a.get("embedding") is None or a["link"] in relevant_links]
+
+
 def mean_vector(vectors: list[list[float]]) -> list[float] | None:
     """The centroid of `vectors`, L2-normalized so cosine_similarity
     against it behaves like cosine_similarity against any other vector

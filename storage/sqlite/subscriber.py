@@ -119,19 +119,27 @@ class SubscriberMixin:
             ).fetchone()
         return row[0] if row and row[0] else None
 
-    def record_push(self, chat_id: int, status: str, requested_at: str,
-                    last_push_at: str, pushed_links_json: str) -> None:
+    def set_pushed_links(self, chat_id: int, status: str, requested_at: str, pushed_links_json: str) -> None:
         with self._engine.begin() as conn:
             conn.execute(text(
                 """
-                INSERT INTO subscribers (chat_id, status, requested_at, last_push_at, pushed_links)
-                VALUES (:chat_id, :status, :requested_at, :last_push_at, :pushed_links)
-                ON CONFLICT(chat_id) DO UPDATE SET
-                    last_push_at = excluded.last_push_at,
-                    pushed_links = excluded.pushed_links
+                INSERT INTO subscribers (chat_id, status, requested_at, pushed_links)
+                VALUES (:chat_id, :status, :requested_at, :pushed_links)
+                ON CONFLICT(chat_id) DO UPDATE SET pushed_links = excluded.pushed_links
                 """
             ), {"chat_id": chat_id, "status": status, "requested_at": requested_at,
-                "last_push_at": last_push_at, "pushed_links": pushed_links_json})
+                "pushed_links": pushed_links_json})
+
+    def set_last_push_at(self, chat_id: int, status: str, requested_at: str, last_push_at: str) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(text(
+                """
+                INSERT INTO subscribers (chat_id, status, requested_at, last_push_at)
+                VALUES (:chat_id, :status, :requested_at, :last_push_at)
+                ON CONFLICT(chat_id) DO UPDATE SET last_push_at = excluded.last_push_at
+                """
+            ), {"chat_id": chat_id, "status": status, "requested_at": requested_at,
+                "last_push_at": last_push_at})
 
     def list_push_enabled_subscribers(self, status: str) -> list[tuple]:
         """Excludes accounts flagged is_test -- see subscriber_ops.mark_test_account
@@ -238,3 +246,33 @@ class SubscriberMixin:
                 ON CONFLICT(chat_id) DO UPDATE SET push_consecutive_failures = excluded.push_consecutive_failures
                 """
             ), {"chat_id": chat_id, "status": status, "requested_at": requested_at, "count": count})
+
+    def try_consume_search_quota(self, chat_id: int, status: str, requested_at: str,
+                                  daily_cap: int, today: str) -> bool:
+        """Same check-and-increment shape as api_budget's
+        try_consume_api_budget, but per-subscriber and stored directly on
+        the subscribers row (one query, no join) since there's no
+        per-source dimension here. A stored date that isn't `today`
+        resets the count to 0 before checking the cap -- there's no
+        scheduled reset job, the reset happens lazily on next use."""
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT search_count_date, search_count_today FROM subscribers WHERE chat_id = :chat_id"),
+                {"chat_id": chat_id},
+            ).fetchone()
+            date, count = (row[0], row[1]) if row else (None, None)
+            if date != today or count is None:
+                date, count = today, 0
+            if count >= daily_cap:
+                return False
+            conn.execute(text(
+                """
+                INSERT INTO subscribers (chat_id, status, requested_at, search_count_date, search_count_today)
+                VALUES (:chat_id, :status, :requested_at, :date, :count)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    search_count_date = excluded.search_count_date,
+                    search_count_today = excluded.search_count_today
+                """
+            ), {"chat_id": chat_id, "status": status, "requested_at": requested_at,
+                "date": date, "count": count + 1})
+            return True

@@ -1,8 +1,8 @@
 # Local News Cache Plan
 
 This doc captures the design, same pattern as the other `docs/*-plan.md`
-files. **All open questions are resolved (see below) — implementation is
-in progress.**
+files. **All open questions are resolved and every item below is built —
+see the Status table.**
 
 **The ask:** stop calling news sources live on every query. Instead, pull
 from all enabled sources on a schedule, cache what's fetched locally with
@@ -17,8 +17,8 @@ the network per request.
 | 1 | Periodic ingestion job (pull all sources on a schedule) | **Built** — `news_ingest.py`, per-source interval + daily budget respected, wired into both `bot.py` and `combined_bot.py`'s scheduler |
 | 2 | Local cache (one file per article, 2-day TTL, auto-cleanup) | **Built** — `news_cache.py`, verified live: real fetch → real classification → real YAML file, contents match this doc's spec exactly |
 | 3 | Article classification (rough category tags) | **Built** — `news_classify.py`, one batched structured-output call per cycle, verified live against the real DeepSeek model (not just mocked) |
-| 4 | Two-stage query filtering (category, then content) | **Built for the push path (item 6), not yet for `search_news` (item 5).** |
-| 5 | `search_news` rewritten to read the cache instead of live sources | **Not built — deliberately deferred.** Changes live, user-facing agent behavior (`agent.py`'s tool, and `guardrails.classify_message`'s output schema); items 1–3 are additive and don't touch anything currently running, so they shipped first. See "Next step" below. |
+| 4 | Two-stage query filtering (category, then content) | **Built for the push path (item 6).** `search_news` (item 5) uses only the content (relevance/embedding) stage, deliberately — an ad hoc search query has no pre-classified category the way a stored interest does, so there's nothing to coarse-filter by before the relevance pass. |
+| 5 | `search_news` rewritten to read the cache instead of live sources | **Built 2026-09-04** — `agent.py`'s tool now reads `news_cache.read_all()` (the same corpus `news_push.py` reads) and ranks by embedding similarity to a generated query definition (`news_embed.filter_by_relevance`, `news_classify.expand_interest_for_retrieval` reused via `interest_cache_ops`'s existing cache), instead of calling any source live. Also picked up a shared "already shown" dedup with push (`subscriber_ops.mark_links_shown`/`pushed_links`) and a per-subscriber daily quota (`subscriber_ops.try_consume_search_query`, default 10/day) — neither existed in the original design, added per user direction during implementation. Restricted-source gating (`RESTRICTED_SOURCES`/`get_restricted_sources_enabled`) was dropped from this tool specifically: it no longer calls any source at all, live or restricted — that gate still applies to `news_ingest.py`'s own scheduled pulls and `news_push.py`'s digest filtering, unchanged. |
 | 6 | `news_push.py` converging onto the same cache | **Built 2026-08-15** — see "Interaction with `news_push.py`" below, rewritten in place rather than left as a follow-on. |
 | 7 | Since-based ingestion for query-capable sources (replacing the flat top-N cap) | **Built 2026-08-16** — see "Since-based ingestion" below |
 | 8 | Article/topic embeddings — near-duplicate collapse and offbeat/novelty selection | **Built 2026-08-25** — `news_embed.py` (model2vec), computed at ingestion, consumed by `news_push.select_candidate_articles`. See `docs/analysis/cluster-measurements.md`'s "Shipped, 2026-08-25" section for the measurement behind it and what's still provisional (the offbeat gate threshold). |
@@ -31,12 +31,15 @@ digest — nothing in the old push pipeline could catch that, since no
 relevance filter existed before the digest-writing prompt at all. This
 was exactly the gap items 4/6 were meant to close; deferring it further
 once it was visibly causing incorrect output wasn't defensible the way
-deferring it pre-emptively was. `search_news` (item 5) keeps its original
-deferral reasoning — it's synchronous and user-facing, needs the harness
-(`tools/measure_guardrails.py`) extended to cover it before changing,
-and doesn't have an equivalent live incident forcing the same urgency.
+deferring it pre-emptively was. `search_news` (item 5) kept its original
+deferral reasoning for a while — it's synchronous and user-facing — until
+it was designed and shipped 2026-09-04; see item 5's row above.
 
-**Next step:** rewire `search_news` and extend the router's classification to emit query categories (item 4/5). Held back from this pass because it's the one piece that touches the live agent pipeline directly, and this project's own guardrail history (`docs/system-overview.md` Appendix B.1) is a direct lesson that changes to that pipeline need live measurement before shipping, not just review. Items 1–3 needed no such gate — nothing currently calls `news_ingest.py` from any user-facing path, so they could be built, tested, and verified live without any risk to what's actually running today.
+**Next step:** none outstanding for this plan's own scope — items 1–8 are
+all built. (`search_news`'s daily quota and shared dedup with push, added
+during item 5's implementation, are new surface with their own future
+tuning questions, e.g. whether 10/day is the right default once real
+usage exists — not tracked in this doc.)
 
 ## Since-based ingestion (item 7)
 
@@ -410,23 +413,19 @@ looking like the "production" NewsAPI's own terms describe, upgrade to a
 paid plan or drop NewsAPI — don't keep running on the Developer plan past
 that point.
 
-**Sequencing risk — partially mitigated 2026-08-14, not eliminated.**
-The original concern: the Perigon and NewsAPI keys exist in Vault and
-`docker-entrypoint.sh` fetches both, but before this plan was built,
+**Sequencing risk — resolved 2026-09-04, by item 5 shipping.** The
+original concern: the Perigon and NewsAPI keys exist in Vault and
+`docker-entrypoint.sh` fetches both, and before this plan was built,
 nothing stopped `search_news` from calling them unthrottled on every
-matching on-demand query from every user. Since resolved for
-*unauthorized* usage: `news_sources.RESTRICTED_SOURCES` gates both behind
-a per-user DB flag (`docs/current/ai-news-sources.md`'s "Restricted sources"
-section), defaulting to off for everyone except the admin. **What's still
-true:** `try_consume_api_budget` is only ever called from
-`news_ingest.py` — the admin's own `search_news` usage of Perigon/NewsAPI
-is not rate-limited against what the ingestion job already spent that
-day/month. For a single admin user this is a much smaller exposure than
-"anyone can trigger it," but it's not the same as "protected," and is
-worth closing once `search_news` is rewired to read the cache (item 5)
-rather than calling these sources live at all. GNews remains unrestricted
-by design — its 100/day budget has real headroom beyond what
-`news_ingest.py` alone uses.
+matching on-demand query from every user. Partially mitigated 2026-08-14
+(`news_sources.RESTRICTED_SOURCES` gated both behind a per-user DB flag,
+defaulting to off for everyone except the admin), then closed outright
+once item 5 shipped: `search_news` no longer calls any source live at
+all, restricted or not, so there is nothing left for the admin's own
+usage to spend against `news_ingest.py`'s budget. `get_restricted_sources_enabled`/
+`RESTRICTED_SOURCES` remain in use — just for `news_ingest.py`'s own
+scheduled pulls and `news_push.py`'s digest filtering, not for
+`search_news` any more.
 
 ## Interaction with `news_push.py` — built 2026-08-15
 

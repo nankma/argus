@@ -34,13 +34,25 @@ from langchain.tools import ToolRuntime
 from langchain_openai import ChatOpenAI
 from app_settings import get_settings
 import telemetry
+import news_cache
 import news_classify
-import news_sources
-import api_budget_ops
+import news_embed
 import interest_cache_ops
 import subscriber_ops
 
 NOTES_FILE = "notes.jsonl"
+
+# search_news's own relevance-keep clamp -- see news_embed.filter_by_relevance's
+# docstring for why each caller passes its own values rather than sharing
+# news_push.py's (agent.py can't import news_push -- news_push.py imports
+# agent.py, for HTML_FORMATTING_RULES/TREND_REPORT_STRUCTURE, so the
+# reverse import would be circular). max_results matches push.
+# max_articles_per_topic -- the same per-topic volume, deliberately.
+SEARCH_MAX_RESULTS = get_settings().resolved("search.max_results", default=5)
+SEARCH_DAILY_LIMIT = get_settings().resolved("search.daily_limit", default=10)
+SEARCH_RELEVANCE_KEEP_FRACTION = get_settings().resolved("search.relevance_keep.fraction", default=0.10)
+SEARCH_RELEVANCE_KEEP_MIN = get_settings().resolved("search.relevance_keep.min", default=20)
+SEARCH_RELEVANCE_KEEP_MAX = get_settings().resolved("search.relevance_keep.max", default=50)
 
 
 def build_model_from_config(cfg: dict, default_timeout: float = 60.0):
@@ -256,48 +268,70 @@ def save_note(note: str) -> str:
 
 
 @tool
-def search_news(query: str, runtime: ToolRuntime, max_results_per_source: int = 5) -> str:
-    """Search multiple AI-industry news sources for a query (e.g. a company,
-    model name, or topic like "AI regulation") and return recent items
-    grouped by source. Sources are pluggable — see news_sources.py.
+def search_news(query: str, runtime: ToolRuntime) -> str:
+    """Search the already-ingested news cache for a query (e.g. a company,
+    model name, or topic like "AI regulation") and return the most
+    relevant recent articles. This is a one-off lookup, not a
+    subscription -- it does not add or change any of the user's interests.
     """
     chat_id = runtime.context["chat_id"]
-    # RESTRICTED_SOURCES (NewsAPI, Perigon) are excluded by default -- their
-    # budgets are already spoken for by news_ingest.py's own scheduled
-    # pulls (docs/plans/local-news-cache-plan.md); calling them again here, live,
-    # on every matching query from every user would exhaust both almost
-    # immediately. Gate is per-user, not admin-only in code -- see
-    # subscriber_ops.get_restricted_sources_enabled.
-    include_restricted = subscriber_ops.get_restricted_sources_enabled(chat_id)
-    sources = news_sources.enabled_sources(include_restricted=include_restricted)
+    guard_model = runtime.context.get("guard_model")
+    embedder = runtime.context.get("embedder")
+
     today = datetime.now(timezone.utc).date().isoformat()
-    lines = []
-    total = 0
-    for name, fetch in sources:
-        try:
-            articles = news_sources.traced_fetch(name, fetch, query, max_results_per_source)
-        except Exception as exc:
-            lines.append(f"- [{name}] ERROR: {exc}")
-            continue
-        if name in news_sources.RESTRICTED_SOURCES:
-            # This was a real blind spot until 2026-08-16: news_ingest.py's
-            # own scheduled pulls consume/enforce a daily budget
-            # (try_consume_api_budget), but this on-demand path never
-            # recorded anything at all -- an admin's chat queries against
-            # Perigon/NewsAPI were completely invisible to the
-            # api_budget table. record_api_call is deliberately
-            # non-enforcing (unlike try_consume_api_budget): this path
-            # isn't subject to news_ingest.py's cap, only counted
-            # alongside it for combined visibility (api_budget_ops.
-            # get_api_budget_history/get_total_api_calls).
-            api_budget_ops.record_api_call(name, today)
-        total += len(articles)
-        for a in articles:
-            published = a.get("published") or "date unknown"
-            lines.append(
-                f"- [{name}] {a['title']} ({a.get('source', name)}, published {published}) — {a.get('link', '')}"
-            )
-    return f"{total} articles found across {len(sources)} source(s):\n" + "\n".join(lines)
+    if not subscriber_ops.try_consume_search_query(chat_id, today, daily_cap=SEARCH_DAILY_LIMIT):
+        return (
+            f"You've used all {SEARCH_DAILY_LIMIT} of today's searches. "
+            "The count resets at midnight UTC -- your push digest still keeps arriving on schedule."
+        )
+
+    # Same cache-check-then-generate pattern as _add_one_interest: a
+    # generated definition is a measurably better embedding query than
+    # the bare string (see news_classify.expand_interest_for_retrieval),
+    # and it's cached under the query text itself so a repeated search
+    # (or an interest added later with the same wording) reuses it rather
+    # than paying for generation twice.
+    definition = interest_cache_ops.get_interest_query_expansion(query)
+    if definition is None and guard_model is not None:
+        definition = news_classify.expand_interest_for_retrieval(guard_model, query)
+        if definition is not None:
+            interest_cache_ops.set_interest_query_expansion(query, definition)
+    query_text = definition or query
+
+    # Shared with news_push.py: a search result counts as "shown" the
+    # same way a delivered digest does, so a later push doesn't re-send
+    # what a manual search already surfaced, and a later search doesn't
+    # re-surface what a push already delivered. Deliberately does NOT
+    # call subscriber_ops.advance_last_push_at -- a manual search must
+    # never delay this subscriber's own scheduled push. See
+    # subscriber_ops.mark_links_shown's docstring for the 2026-09-04
+    # split this depends on.
+    already_shown = set(subscriber_ops.get_pushed_links(chat_id))
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    pool = sorted(
+        (a for a in news_cache.read_all() if a.get("link") and a["link"] not in already_shown),
+        key=lambda a: a.get("published_dt") or epoch,
+        reverse=True,
+    )
+    relevant = news_embed.filter_by_relevance(
+        pool, embedder, query_text,
+        keep_fraction=SEARCH_RELEVANCE_KEEP_FRACTION,
+        keep_min=SEARCH_RELEVANCE_KEEP_MIN,
+        keep_max=SEARCH_RELEVANCE_KEEP_MAX,
+    )
+    results = relevant[:SEARCH_MAX_RESULTS]
+
+    if not results:
+        return f'No cached articles found for "{query}" (searched as: {query_text}).'
+
+    subscriber_ops.mark_links_shown(chat_id, [a["link"] for a in results], datetime.now(timezone.utc))
+
+    lines = [f"Searched as: {query_text}", f"{len(results)} article(s) found:"]
+    for a in results:
+        published = a.get("published") or "date unknown"
+        source = a.get("source") or a.get("source_key", "")
+        lines.append(f"- {a['title']} ({source}, published {published}) — {a.get('link', '')}")
+    return "\n".join(lines)
 
 
 TOOLS = [save_note, search_news]

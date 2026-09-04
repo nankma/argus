@@ -14,7 +14,7 @@ they're constructed, rather than hardcoded.
 | 2 | Test infrastructure (folder, fixtures, fake LLM, fake logger) | Done |
 | 3 | Telemetry service install + hook (real backend for normal runs) | Done — originally Arize Phoenix via Docker, then a second backend (Logfire) added alongside it 2026-08-21. Superseded 2026-08-24: Phoenix retired, Logfire the sole live backend. **Superseded again 2026-09-03: `logfire_logger.py` (a single hardcoded `LogfireLogger`) was itself replaced by a pluggable-provider architecture** — new top-level `telemetry.py` reads ONE settings list (`telemetry.providers`) and routes each entry to two internally-separate `TracerProvider`s (general app-events vs. LLM-call tracing) purely by the entry's own discovered class's `KIND`; providers (`otlp.py` — generic OTLP, covers Logfire/Grafana Cloud/SigNoz/OpenObserve; `file.py` — local JSON lines; `phoenix.py` — direct OTLP to a self-hosted Phoenix, no `arize-phoenix-otel` dependency) live under `telemetry_providers/`, auto-discovered the same way `news_adapters/` are. `logfire_logger.py`/`tests/test_logfire_logger.py` deleted outright. See `docs/standaloneplan/01-settings-migration.md`'s "Telemetry providers, take two/take three" sections for the full history (take two shipped a real double-export/kind-leak bug, caught by code review the same day; take three is the corrected, currently-live design) and `docs/current/telemetry-catalog.md` for what actually gets emitted. **`docs/current/infrastructure.md` was not updated alongside this and still describes the retired `logfire_logger.py`/`LOGFIRE_ENABLED` shape as current — stale, needs a pass.** |
 | 4 | CI setup (test automation) | Done — GitHub Actions; branch protection pending manual confirmation |
-| 5 | Test cases (actual scenarios) | Done — 714 tests as of 2026-09-03 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer). `tests/test_users_db.py` was split six ways (`tests/test_subscriber_ops.py`/`test_category_ops.py`/`test_push_outcome_ops.py`/`test_api_budget_ops.py`/`test_interest_cache_ops.py`/`test_source_state_ops.py`) alongside the `users_db.py` -> `storage/` + `*_ops.py` refactor — same bodies, same total count, no coverage lost in the split. New gap the split didn't close: `storage/postgres/__init__.py` (`PostgresStorage`) and the backend-selection dispatch itself (`storage/__init__.py`'s `_build_storage`, `storage/engine.py`'s `build_engine`) have zero test coverage — every test injects a pre-built `SqliteStorage` via `storage.reset_storage_for_tests()` (see `tests/conftest.py`'s `isolated_subscribers_db`), bypassing both files entirely. |
+| 5 | Test cases (actual scenarios) | Done — 732 tests as of 2026-09-04 (started at 16; see below for what's covered vs. not, and its own stale-count disclaimer). `tests/test_users_db.py` was split six ways (`tests/test_subscriber_ops.py`/`test_category_ops.py`/`test_push_outcome_ops.py`/`test_api_budget_ops.py`/`test_interest_cache_ops.py`/`test_source_state_ops.py`) alongside the `users_db.py` -> `storage/` + `*_ops.py` refactor — same bodies, same total count, no coverage lost in the split. New gap the split didn't close: `storage/postgres/__init__.py` (`PostgresStorage`) and the backend-selection dispatch itself (`storage/__init__.py`'s `_build_storage`, `storage/engine.py`'s `build_engine`) have zero test coverage — every test injects a pre-built `SqliteStorage` via `storage.reset_storage_for_tests()` (see `tests/conftest.py`'s `isolated_subscribers_db`), bypassing both files entirely. |
 | 6 | LLM-judged end-to-end evaluation | **Built 2026-08-16** — `tools/run_eval.py`, 11/11 passing on first real run, see below |
 
 ## 1. Dependency injection
@@ -290,6 +290,17 @@ of them was invisible everywhere — not logged, not counted against any
 budget, and (per the section above) not even reaching Phoenix since it
 was disconnected.
 
+**Superseded 2026-09-04 for `search_news` specifically** — it was
+rewritten to read the ingested cache (`news_cache.read_all()`) instead of
+calling any source live at all (`docs/plans/local-news-cache-plan.md` item
+5), so it no longer calls `news_sources.py`'s fetch functions, no longer
+goes through `traced_fetch`, and no longer calls
+`api_budget_ops.record_api_call`. Both mechanisms below remain live and
+load-bearing for `news_ingest.py`'s own scheduled pulls, which is now the
+only caller of either — the rest of this section is kept as the historical
+record of why they were built, not a description of `search_news`'s
+current behavior.
+
 **Fixed with two independent, complementary mechanisms** — deliberately
 not just one, since Phoenix availability and the local DB are different
 failure domains:
@@ -511,6 +522,36 @@ behaviour rather than more of an existing one:
     thing it was logging about doesn't complete") has no test forcing a
     write failure (e.g. a read-only path) and confirming `log()` doesn't
     raise.
+
+- **`search_news` rewritten onto the ingested cache (2026-09-04)** — see
+  `docs/plans/local-news-cache-plan.md` item 5. `tests/test_agent.py`'s old
+  single mocked-source-aggregation test was replaced by 7 tests covering:
+  relevance-ranked results from `news_cache.read_all()`; exclusion of
+  links already in `subscriber_ops`' shared `pushed_links` dedup memory;
+  a returned result being marked shown via `mark_links_shown` *without*
+  advancing `last_push_at` (the load-bearing property of the
+  `mark_links_shown`/`advance_last_push_at` split — a manual search must
+  never delay a subscriber's own scheduled push); the per-subscriber daily
+  quota (`try_consume_search_query`) blocking a query once exhausted;
+  query-definition generation + caching and reuse of an already-cached
+  definition (the same `interest_cache_ops` cache `_add_one_interest`
+  populates); and the no-results message. `tests/test_subscriber_ops.py`
+  gained 3 matching tests for `try_consume_search_quota` itself (cap
+  enforcement, date-based reset, per-subscriber scoping) plus updated
+  `mark_links_shown`/`advance_last_push_at` tests for the split (including
+  `news_push.py`'s three `run_push_cycle` outcome-recording call sites
+  each now asserting both methods are called together, or both are
+  skipped together, matching the old single `record_push`'s guard
+  conditions exactly). QA re-verified 2026-09-04: 732/732 passing, 98%
+  combined line coverage across `agent.py`/`subscriber_ops.py`/
+  `storage/sqlite/subscriber.py`/`news_embed.py`/`news_push.py` (the only
+  misses are pre-existing, unrelated to this change — `agent.py`'s CLI
+  `main()` entry point and one pre-existing branch in
+  `subscriber_ops._is_duplicate_topic`). No coverage gap found in the new
+  code itself; two minor, non-blocking behavioral cases flagged back (not
+  written here per this doc's own division of labor): no test asserts
+  `SEARCH_MAX_RESULTS` actually truncates a pool bigger than 5, and no
+  test asserts multiple relevant results come back newest-first.
 
 **Not covered yet** (candidates for later):
 - ~~`agent._logfire_processor`'s actual body, and the Logfire-only wiring
