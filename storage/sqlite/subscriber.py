@@ -220,3 +220,21 @@ class SubscriberMixin:
             return conn.execute(
                 text("SELECT interests FROM subscribers WHERE interests IS NOT NULL")
             ).fetchall()
+
+    def get_push_consecutive_failures(self, chat_id: int) -> int | None:
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT push_consecutive_failures FROM subscribers WHERE chat_id = :chat_id"),
+                {"chat_id": chat_id},
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_push_consecutive_failures(self, chat_id: int, status: str, requested_at: str, count: int) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(text(
+                """
+                INSERT INTO subscribers (chat_id, status, requested_at, push_consecutive_failures)
+                VALUES (:chat_id, :status, :requested_at, :count)
+                ON CONFLICT(chat_id) DO UPDATE SET push_consecutive_failures = excluded.push_consecutive_failures
+                """
+            ), {"chat_id": chat_id, "status": status, "requested_at": requested_at, "count": count})

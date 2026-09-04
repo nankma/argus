@@ -976,14 +976,15 @@ def _strike_unreachable_subscriber(chat_id: int, now: datetime) -> None:
     discovering their settings were deleted.
 
     Re-enabling does NOT reset the strike count -- only a delivered digest
-    does (see push_outcome_ops.consecutive_chat_not_found). So a subscriber who
+    does, or the subscriber themselves stopping push (see
+    subscriber_ops.reset_push_consecutive_failures). So a subscriber who
     turns push back on while still unreachable is disabled again after a
     single further failure rather than after three. That is deliberate: a
     transient outage records `cycle_failed` and accrues no strikes at all,
     so one more `chat_not_found` really does mean still unreachable, and
     granting a fresh allowance would just pay for three more undeliverable
     digests."""
-    strikes = push_outcome_ops.consecutive_chat_not_found(chat_id)
+    strikes = subscriber_ops.record_push_failure(chat_id)
     if strikes < UNREACHABLE_STRIKES:
         return
     subscriber_ops.set_push_enabled(chat_id, False)
@@ -995,34 +996,37 @@ def _strike_unreachable_subscriber(chat_id: int, now: datetime) -> None:
 
 def _record(chat_id: int, outcome: str, message: str, now: datetime,
             detail: str | None = None) -> None:
-    """Reports a push outcome three ways, from one call site so they cannot
-    disagree: a log line, a database row, and a span.
-
-    Each reaches a different reader and none replaces the others.
+    """Reports a push outcome two ways, from one call site so they cannot
+    disagree: a log line and a span. (A third way, a push_outcomes SQLite
+    row, existed until 2026-09-04 -- retired as an unbounded event-log
+    table with no reader that a bounded per-subscriber counter couldn't
+    serve instead; see subscriber_ops.record_push_failure/
+    reset_push_consecutive_failures and git history.)
 
     The PRINT goes to `docker logs`, where someone looks when debugging a
     specific cycle. It is free text with no timestamp of its own, it cannot
     be read from inside the container, and a deploy destroys it -- fine for
     a human reading a single cycle, useless as an alarm's input.
 
-    The ROW is what `/status` and any local query read. It survives with no
-    network at all, which is what makes it the floor: if telemetry export
-    breaks, this still answers "what happened".
-
     The SPAN is what an ALARM can query. Criteria 2 and 3 of
     docs/plans/incident-monitoring-plan.md live in Logfire, and Logfire can
-    only alert on what it has received -- the SQLite rows sit on the bot VM
-    where the alerting engine cannot see them. A no-op when no tracer
-    provider is configured, which is every test and CI run."""
+    only alert on what it has received. A no-op when no tracer provider is
+    configured, which is every test and CI run.
+
+    Also resets the consecutive-failure counter on a delivered outcome --
+    a successful delivery is the only positive proof a chat is reachable,
+    so it's the only thing that clears it. See
+    _strike_unreachable_subscriber's own docstring for the other half."""
     print(f"[news_push] chat_id={chat_id}: {message}")
-    push_outcome_ops.record_push_outcome(chat_id, outcome, now, detail=detail)
+    if outcome == push_outcome_ops.PUSH_DELIVERED:
+        subscriber_ops.reset_push_consecutive_failures(chat_id)
     with _tracer.start_as_current_span("push_outcome") as span:
         # Flat, low-cardinality attributes: an alert query filters on
         # `outcome` and counts, so it must not have to parse prose.
         span.set_attribute("push.outcome", outcome)
-        # The opaque id, not chat_id: the row and the log line keep the
-        # real Telegram identifier (they never leave the VM), but a span
-        # does leave. See subscriber_ops.external_id.
+        # The opaque id, not chat_id: the log line keeps the real Telegram
+        # identifier (it never leaves the VM), but a span does leave. See
+        # subscriber_ops.external_id.
         span.set_attribute("push.subscriber", subscriber_ops.external_id(chat_id))
         # Whether an LLM was paid for this cycle -- criterion 3's
         # denominator, computed here rather than by re-deriving the outcome
@@ -1118,9 +1122,6 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
     skipped. This function now logs every tick's summary and every
     subscriber's due-check outcome, not just successful sends."""
     now = now or datetime.now(timezone.utc)
-    # Bounded here rather than on a timer of its own: this is the only job
-    # that writes the table, so it is the only one that can grow it.
-    push_outcome_ops.prune_push_outcomes(now)
     # Same reasoning, same cadence -- one maintenance pass per cycle
     # rather than a glob+stat per message sent. See message_archive's
     # own module docstring for why this exists at all.
@@ -1163,6 +1164,16 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
         # itself). Recording [] there would leave articles the subscriber
         # genuinely received still eligible, and they would be sent again.
         delivered: list[str] | None = None
+        # Bound before the try block, not inside it: the except handlers
+        # below reference both to decide whether a later failure gets
+        # folded into an otherwise-successful outcome. Both are genuinely
+        # 0 at this point regardless -- nothing can have sent or been
+        # blocked before interests are even resolved -- but they must be
+        # bound (not merely 0) so the except clauses can't hit an
+        # UnboundLocalError if resolve_interest_categories itself is what
+        # raises.
+        sent = 0
+        blocked = 0
         try:
             topic_categories = _model_call(resolve_interest_categories, model, interests)
             # One message per interest, longest-un-pushed first. Two
@@ -1180,8 +1191,6 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
             # permanently starving whatever sorts last. An interest with no
             # new articles does NOT consume one of the cycle's slots --
             # only a message that was actually sent does.
-            sent = 0
-            blocked = 0
             send_failure: tuple[str, str] | None = None
             for topic in subscriber_ops.interests_by_staleness(chat_id, interests):
                 if sent >= MAX_INTERESTS_PER_PUSH:
@@ -1340,15 +1349,40 @@ async def run_push_cycle(model, send: "callable", now: datetime | None = None, e
             # why criterion 2 alerts on a single occurrence rather than on
             # a threshold.
             detail = repr(exc.__cause__ or exc)
-            _record(chat_id, push_outcome_ops.PUSH_MODEL_ERROR,
-                    f"model call failed with {detail}", now, detail=detail)
+            # `sent` wins if this interest already delivered before a LATER
+            # interest's model call failed -- same "sent wins, fold the
+            # failure into detail" pattern as the `blocked` case in the
+            # `elif sent:` branch above. Without this, a real digest a
+            # subscriber actually received gets recorded (and alerted on)
+            # as a full model_error, which is the exact bug found live on
+            # INT 2026-09-03: interest N delivered, interest N+1 then hit
+            # OpenAITimeoutError, and the one row/span for the cycle came
+            # out model_error despite message_archive/interest_push_state
+            # both showing the successful send.
+            if sent:
+                outcome_detail = f"{sent} interest(s) sent" + (f", {blocked} blocked" if blocked else "") + \
+                    f", then a later interest's model call failed with {detail}"
+                _record(chat_id, push_outcome_ops.PUSH_DELIVERED,
+                        f"sent {sent} message(s), then model call failed with {detail}",
+                        now, detail=outcome_detail)
+            else:
+                _record(chat_id, push_outcome_ops.PUSH_MODEL_ERROR,
+                        f"model call failed with {detail}", now, detail=detail)
             if delivered is not None:
                 subscriber_ops.record_push(chat_id, delivered, now)
             continue
         except Exception as exc:
             detail = repr(exc)
-            _record(chat_id, push_outcome_ops.PUSH_CYCLE_FAILED,
-                    f"cycle failed with {detail}", now, detail=detail)
+            # Same "sent wins" reasoning as the _ModelStageError branch above.
+            if sent:
+                outcome_detail = f"{sent} interest(s) sent" + (f", {blocked} blocked" if blocked else "") + \
+                    f", then cycle failed with {detail}"
+                _record(chat_id, push_outcome_ops.PUSH_DELIVERED,
+                        f"sent {sent} message(s), then cycle failed with {detail}",
+                        now, detail=outcome_detail)
+            else:
+                _record(chat_id, push_outcome_ops.PUSH_CYCLE_FAILED,
+                        f"cycle failed with {detail}", now, detail=detail)
             if delivered is not None:
                 subscriber_ops.record_push(chat_id, delivered, now)
             continue

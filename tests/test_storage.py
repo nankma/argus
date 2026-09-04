@@ -141,4 +141,4 @@ def test_postgres_overrides_list_columns_and_conflict_primitives():
     # ensure_columns/migrate_api_budget_table) is inherited UNCHANGED, not
     # accidentally shadowed.
     assert PostgresStorage.get_interests is SqliteStorage.get_interests
-    assert PostgresStorage.record_push_outcome is SqliteStorage.record_push_outcome
+    assert PostgresStorage.get_interest_push_state is SqliteStorage.get_interest_push_state

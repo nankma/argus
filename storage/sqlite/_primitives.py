@@ -88,3 +88,15 @@ class PrimitivesMixin:
                 "SELECT source, date, count FROM api_budget_old"
             ))
             conn.execute(text("DROP TABLE api_budget_old"))
+
+    def drop_push_outcomes_table(self) -> None:
+        """One-time cleanup: push_outcomes (the old per-cycle event-log
+        table, replaced 2026-09-04 by subscribers.push_consecutive_failures
+        -- see schema.py's comment on that column) is no longer created by
+        create_schema(), but an existing SQLite/Postgres database from
+        before this change still has it sitting there, no longer written
+        to. `DROP TABLE IF EXISTS` is portable SQL, valid on both backends
+        -- a no-op on a database that never had the table (a fresh install,
+        or one already cleaned up)."""
+        with self._engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS push_outcomes"))

@@ -40,10 +40,6 @@ storage:
   # ttl_hours -- nothing prunes this directory by age):
   # news_archive_dir: news_archive
 
-  # How long push_outcomes (per-push delivery status, used for anomaly
-  # detection) rows are kept.
-  push_outcomes_ttl_days: 90
-
 # The AI connector -- works with any provider speaking the OpenAI
 # /chat/completions wire format (Together.ai, Groq, Fireworks, a
 # self-hosted vLLM server, ...). `main` is the agent's own model;

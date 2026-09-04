@@ -33,7 +33,6 @@ storage:
       path:
         trailsign-resolve: environment-variable
         name: SUBSCRIBERS_DB_FILE
-  push_outcomes_ttl_days: 90
 
 # Bridges to the same DEEPSEEK_API_KEY env var docker-entrypoint.sh
 # already vault-fetches -- zero behavior change from before this was

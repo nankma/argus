@@ -10,7 +10,6 @@ from storage.sqlite._primitives import PrimitivesMixin
 from storage.sqlite.api_budget import ApiBudgetMixin
 from storage.sqlite.category import CategoryMixin
 from storage.sqlite.interest_cache import InterestCacheMixin
-from storage.sqlite.push_outcome import PushOutcomeMixin
 from storage.sqlite.source_state import SourceStateMixin
 from storage.sqlite.subscriber import SubscriberMixin
 
@@ -19,7 +18,6 @@ class SqliteStorage(
     PrimitivesMixin,
     SubscriberMixin,
     CategoryMixin,
-    PushOutcomeMixin,
     ApiBudgetMixin,
     InterestCacheMixin,
     SourceStateMixin,
@@ -36,3 +34,4 @@ class SqliteStorage(
         self.create_schema()
         self.ensure_columns()
         self.migrate_api_budget_table()
+        self.drop_push_outcomes_table()

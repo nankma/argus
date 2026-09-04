@@ -453,3 +453,40 @@ def test_external_id_survives_without_a_subscriber_row(isolated_subscribers_db):
     got = subscriber_ops.external_id(999000)
     assert got == subscriber_ops.external_id(999000)
     assert "999000" not in got
+
+
+# --- push_consecutive_failures (2026-09-04) --------------------------------
+#
+# Replaced the old push_outcomes event-log table (see git history) -- the
+# only real reader was "how many chat_not_found cycles in a row", which a
+# bounded per-subscriber counter answers without an ever-growing table.
+
+
+def test_get_push_consecutive_failures_defaults_zero(isolated_subscribers_db):
+    assert subscriber_ops.get_push_consecutive_failures(70) == 0
+
+
+def test_record_push_failure_increments_and_returns_the_new_count(isolated_subscribers_db):
+    assert subscriber_ops.record_push_failure(70) == 1
+    assert subscriber_ops.record_push_failure(70) == 2
+    assert subscriber_ops.get_push_consecutive_failures(70) == 2
+
+
+def test_record_push_failure_creates_a_row_when_none_exists(isolated_subscribers_db):
+    assert subscriber_ops.get_status(71) is None
+    assert subscriber_ops.record_push_failure(71) == 1
+    assert subscriber_ops.get_status(71) == subscriber_ops.APPROVED
+
+
+def test_reset_push_consecutive_failures_clears_it(isolated_subscribers_db):
+    subscriber_ops.record_push_failure(72)
+    subscriber_ops.record_push_failure(72)
+    subscriber_ops.reset_push_consecutive_failures(72)
+    assert subscriber_ops.get_push_consecutive_failures(72) == 0
+
+
+def test_push_consecutive_failures_is_scoped_per_subscriber(isolated_subscribers_db):
+    subscriber_ops.record_push_failure(73)
+    subscriber_ops.record_push_failure(73)
+    assert subscriber_ops.get_push_consecutive_failures(73) == 2
+    assert subscriber_ops.get_push_consecutive_failures(74) == 0
